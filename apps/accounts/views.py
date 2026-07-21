@@ -6,6 +6,9 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from .models import User
 from .serializers import LoginRequestSerializer
 
+from rest_framework.permissions import IsAuthenticated
+
+
 
 class LoginView(APIView):
     permission_classes = []
@@ -40,9 +43,44 @@ class LoginView(APIView):
                     'accessToken': access_token,
                     'role': user.role,
                     'userId': user.username,
+                    'nickname': user.nickname,
                     'teamId': str(user.team.id) if user.team else None,
                     'teamName': user.team.name if user.team else None,
                 },
+            },
+            status=status.HTTP_200_OK,
+        )
+    
+class MeView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+
+        return Response(
+            {
+                'code': 'SUCCESS',
+                'message': '성공',
+                'data': {
+                    'userId': user.username,
+                    'nickname': user.nickname,
+                    'teamId': str(user.team.id) if user.team else None,
+                    'teamName': user.team.name if user.team else None,
+                    'role': user.role,
+                },
+            },
+            status=status.HTTP_200_OK,
+        )
+    
+class LogoutView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        return Response(
+            {
+                'code': 'SUCCESS',
+                'message': '로그아웃되었습니다.',
+                'data': None,
             },
             status=status.HTTP_200_OK,
         )
