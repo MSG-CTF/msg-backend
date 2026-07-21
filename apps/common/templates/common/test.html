@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>API 테스트 (임시 도구)</title>
+  <style>
+    body { font-family: sans-serif; max-width: 600px; margin: 40px auto; }
+    section { border: 1px solid #ccc; padding: 16px; margin-bottom: 16px; border-radius: 8px; }
+    input { display: block; margin: 8px 0; padding: 6px; width: 100%; box-sizing: border-box; }
+    button { padding: 8px 16px; margin-right: 8px; cursor: pointer; }
+    pre { background: #f4f4f4; padding: 12px; overflow-x: auto; white-space: pre-wrap; }
+    h3 { margin-top: 0; }
+  </style>
+</head>
+<body>
+  <h1>⚠️ 임시 API 테스트 페이지 (개발용)</h1>
+
+  <section>
+    <h3>1. 로그인</h3>
+    <input id="loginId" placeholder="loginId (예: kim01)">
+    <input id="password" type="password" placeholder="password">
+    <button onclick="login()">로그인</button>
+  </section>
+
+  <section>
+    <h3>2. 내 상태 확인 (/auth/me)</h3>
+    <button onclick="me()">확인</button>
+  </section>
+
+  <section>
+    <h3>3. 로그아웃</h3>
+    <button onclick="logout()">로그아웃</button>
+  </section>
+
+  <h3>현재 토큰</h3>
+  <pre id="tokenBox">(없음)</pre>
+
+  <h3>응답 결과</h3>
+  <pre id="result">(여기 표시됨)</pre>
+
+  <script>
+    let accessToken = null;
+
+    function showResult(data) {
+      document.getElementById('result').textContent = JSON.stringify(data, null, 2);
+    }
+
+    function updateTokenBox() {
+      document.getElementById('tokenBox').textContent = accessToken
+        ? accessToken.slice(0, 40) + '...'
+        : '(없음)';
+    }
+
+    async function login() {
+      const loginId = document.getElementById('loginId').value;
+      const password = document.getElementById('password').value;
+
+      const res = await fetch('/api/v1/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ loginId, password }),
+      });
+      const data = await res.json();
+
+      if (data.data && data.data.accessToken) {
+        accessToken = data.data.accessToken;
+        updateTokenBox();
+      }
+      showResult(data);
+    }
+
+    async function me() {
+      const res = await fetch('/api/v1/auth/me', {
+        headers: { 'Authorization': 'Bearer ' + accessToken },
+      });
+      const data = await res.json();
+      showResult(data);
+    }
+
+    async function logout() {
+      const res = await fetch('/api/v1/auth/logout', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + accessToken },
+      });
+      const data = await res.json();
+      showResult(data);
+    }
+  </script>
+</body>
+</html>
