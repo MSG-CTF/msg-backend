@@ -1,17 +1,10 @@
-# 가상환경
-venv/
-
-# 파이썬 캐시 파일
+# Python / Django
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
 
-# 환경변수
+# Environment variables
 .env
-
-# Django 관련
-*.sqlite3
-staticfiles/
-
-# 에디터 설정
-.vscode/
-.DS_Store
