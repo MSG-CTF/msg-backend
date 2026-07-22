@@ -45,6 +45,7 @@ INSTALLED_APPS = [
     'apps.accounts',
     'apps.teams',
     'apps.adminpanel',
+    'apps.board',
     'apps.common'
 ]
 
