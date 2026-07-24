@@ -46,7 +46,8 @@ INSTALLED_APPS = [
     'apps.teams',
     'apps.adminpanel',
     'apps.board',
-    'apps.common'
+    'apps.common',
+    'apps.timer',
 ]
 
 MIDDLEWARE = [
