@@ -1,0 +1,9 @@
+asgiref==3.12.1
+Django==5.2.16
+django-redis==7.0.0
+psycopg==3.3.4
+psycopg-binary==3.3.4
+redis==8.0.1
+sqlparse==0.5.5
+typing_extensions==4.16.0
+tzdata==2026.3
