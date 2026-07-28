@@ -1,0 +1,23 @@
+# msgCTF API 명세 검증 하네스 설정
+# 사용법: python run_harness.py --config config.yaml
+
+# mode: notion  -> 아래 members의 page_id를 Notion API로 직접 읽어옴 (NOTION_TOKEN 필요)
+# mode: offline -> offline_dir 하위의 팀원별 폴더(.md 파일들)를 읽음
+mode: notion
+
+notion:
+  token_env: NOTION_TOKEN   # 이 이름의 환경변수에 Notion integration token을 넣어두세요
+
+# members 항목은 두 스타일을 지원한다.
+# 1) page_id: 한 페이지 안에 'METHOD /path' 헤딩으로 여러 endpoint가 나열된 문서 스타일
+# 2) page_ids: 노션 DB처럼 endpoint 1개 = 페이지 1개 스타일 (메소드/URL이 페이지 속성)
+members:
+  - name: alice
+    page_id: "REPLACE_WITH_NOTION_PAGE_ID"
+  - name: board
+    page_ids:
+      - "REPLACE_WITH_NOTION_PAGE_ID_1"
+      - "REPLACE_WITH_NOTION_PAGE_ID_2"
+
+# mode: offline 일 때 사용
+offline_dir: fixtures
