@@ -74,14 +74,16 @@ def check_base_url(specs: list[SpecDocument], contract: dict) -> list[ContractVi
     base = contract.get("base_url")
     if not base:
         return []
+    exceptions = tuple(contract.get("base_url_exceptions", []))
     violations: list[ContractViolation] = []
     for doc in specs:
         for ep in doc.endpoints:
-            if not ep.path.startswith(base):
-                violations.append(ContractViolation(
-                    "base_url_prefix_violation", ep.key, doc.team,
-                    f"경로가 규약 Base URL('{base}')로 시작하지 않음: {ep.path}",
-                ))
+            if ep.path.startswith(base) or ep.path.startswith(exceptions):
+                continue
+            violations.append(ContractViolation(
+                "base_url_prefix_violation", ep.key, doc.team,
+                f"경로가 규약 Base URL('{base}')로 시작하지 않음: {ep.path}",
+            ))
     return violations
 
 
@@ -155,6 +157,8 @@ def check_id_types(specs: list[SpecDocument], contract: dict) -> list[ContractVi
     for doc in specs:
         for ep in doc.endpoints:
             for leaf, _parent, value in ep.field_values:
+                if value is None:
+                    continue  # 선택값이 비어있는 null은 타입 위반이 아님
                 if leaf in long_fields:
                     if isinstance(value, bool) or not isinstance(value, int):
                         violations.append(ContractViolation(

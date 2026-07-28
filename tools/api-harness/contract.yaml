@@ -8,17 +8,22 @@
 #   envelope_keys: [code, message, data]
 #   forbidden_terms: [tile]
 
-# 모든 경로가 이걸로 시작해야 함
+# 모든 경로가 이걸로 시작해야 함 (단, base_url_exceptions에 있는 접두어는 예외)
 base_url: /api/v1
+# /internal/** 은 채점 서버 전용 API로, 공개 /api/v1 네임스페이스와 의도적으로 분리한다고
+# 명세에 명시되어 있음 (예: /internal/koth/scores)
+base_url_exceptions: [/internal]
 
 url_rules:
   no_trailing_slash: true
-  # 리소스명 복수형 규칙 검사에서 예외로 둘 첫 세그먼트 (싱글턴/액션성 경로라 복수형이 안 맞음)
-  resource_name_plural_skip: [me, auth, admin, internal, login, logout, refresh, board]
+  # 리소스명 복수형 규칙 검사에서 예외로 둘 첫 세그먼트 (싱글턴/기능 도메인명이라 복수형이 안 맞음)
+  resource_name_plural_skip: [me, auth, admin, internal, login, logout, refresh, board, koth, ranking, leaderboard, timer]
 
 # team_id 등은 정수(Long), card_id/token 등은 문자열이어야 한다.
+# instance_id는 규약 원문의 ID 타입 표에 없고, 실제 명세 전체가 스케줄러 발급 UUID 문자열을
+# 일관되게 쓰고 있어 Long 목록에 넣지 않는다.
 id_types:
-  long_fields: [team_id, user_id, challenge_id, club_id, history_id, koth_challenge_id, instance_id]
+  long_fields: [team_id, user_id, challenge_id, club_id, history_id, koth_challenge_id]
   string_fields: [card_id, token]
 
 # 타임스탬프 필드는 ISO-8601 UTC (끝에 Z) 형식이어야 한다.

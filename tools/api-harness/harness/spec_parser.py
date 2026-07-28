@@ -42,7 +42,9 @@ RESPONSE_HINT = ("response", "응답", "res body")
 ERROR_HINT = ("error", "에러", "오류")
 HEADER_NEARBY_RE = re.compile(r"(header|헤더)", re.IGNORECASE)
 
-TIMESTAMP_KEY_RE = re.compile(r"(_at$|At$|date|time|Date|Time)", re.IGNORECASE)
+# 끝부분 앵커 매치만 사용 (중간에 'date'/'time'이 들어간 단어까지 잡히는 오탐 방지 -
+# 예: challenge_candidates('date' 포함), timer_running/time_until_start('time' 포함))
+TIMESTAMP_KEY_RE = re.compile(r"(_at|At|_time|Time|_date|Date)$")
 
 
 def _split_blocks(text: str) -> list[tuple[str, str, str, int, int]]:
@@ -97,14 +99,49 @@ def _walk_values(obj, parent_key: str | None = None, out: list | None = None) ->
     return out
 
 
+STATUS_LABEL_RE = re.compile(r"status\s*code\s*[:：]?\s*([1-5]\d{2})", re.IGNORECASE)
+STATUS_LEADING_RE = re.compile(r"^([1-5]\d{2})\b")
+
+
+def _status_line_positions(block: str) -> list[tuple[int, str]]:
+    """'NNN Xxx' 또는 'Status Code: NNN' 형태로 시작하는 줄들의 (줄 시작 위치, code) 목록.
+
+    '## Error' 같은 명시적 헤딩 없이 '401 Unauthorized - ...' 처럼 상태코드 자체를
+    소제목처럼 쓰는 페이지에서, 그 아래 JSON을 성공/실패 중 무엇으로 볼지 판단하는 데 쓴다.
+    """
+    positions = []
+    offset = 0
+    for line in block.splitlines(keepends=True):
+        stripped = line.strip()
+        m = STATUS_LABEL_RE.search(stripped)
+        if not m:
+            cleaned = re.sub(r"^[\-\*#>\s]+", "", stripped).lstrip("*").strip()
+            m = STATUS_LEADING_RE.match(cleaned)
+        if m:
+            positions.append((offset, m.group(1)))
+        offset += len(line)
+    return positions
+
+
 def _nearest_section(block: str, pos: int) -> str | None:
-    """pos 바로 이전에 등장한 'Request'/'Response'/'Error' 섹션 표시 중 가장 가까운 것을 판별."""
+    """pos 바로 이전에 등장한 'Request'/'Response'/'Error' 섹션 표시 중 가장 가까운 것을 판별.
+
+    'Request'/'Response'/'Error' 같은 단어뿐 아니라, 'Status Code: 401' / '401 Unauthorized'
+    처럼 상태코드 자체가 소제목 역할을 하는 경우도 인식한다 (2xx -> response, 4xx/5xx -> error).
+    """
     preceding = block[:pos].lower()
     scores = {
         "request": max((preceding.rfind(h) for h in REQUEST_HINT), default=-1),
         "response": max((preceding.rfind(h) for h in RESPONSE_HINT), default=-1),
         "error": max((preceding.rfind(h) for h in ERROR_HINT), default=-1),
     }
+    for line_pos, code in _status_line_positions(block):
+        if line_pos >= pos:
+            continue
+        if code.startswith("2"):
+            scores["response"] = max(scores["response"], line_pos)
+        elif code[0] in "45":
+            scores["error"] = max(scores["error"], line_pos)
     best = max(scores, key=scores.get)
     return best if scores[best] >= 0 else None
 
@@ -194,6 +231,15 @@ def parse_endpoint_block(team: str, title: str, method: str, path: str, block: s
             ep.error_envelope_keys.append(list(obj.keys()))
             status_val = obj.get("status")
             code_val = obj.get("code")
+            if status_val is None:
+                # JSON 본문에 status가 없고 'Status Code: 401' / '401 Unauthorized' 처럼
+                # 프로즈에만 상태코드가 있는 경우, 가장 가까운 4xx/5xx 상태줄로 보강한다.
+                preceding_error_codes = [
+                    c for line_pos, c in _status_line_positions(block)
+                    if line_pos < pos and c[0] in "45"
+                ]
+                if preceding_error_codes:
+                    status_val = preceding_error_codes[-1]
             if isinstance(status_val, (int, str)) and isinstance(code_val, str):
                 ep.error_code_status_pairs.append((code_val, str(status_val)))
             if isinstance(status_val, (int, str)):

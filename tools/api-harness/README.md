@@ -13,27 +13,35 @@
 pip install -r requirements.txt
 ```
 
+## 사용 흐름
+
+이 도구는 Notion에 직접 접근하지 않는다. 3단계로 나뉜다.
+
+1. **노션 페이지 읽기** — Claude(MCP)나 사람이 직접 Notion 페이지를 읽어서 로컬 `.md` 파일로 저장한다.
+2. **로컬 파일 검증** — `python run_harness.py verify-file <파일...>` 로 저장된 파일만 검증한다.
+   이 단계는 순수 로컬 동작이라 **Notion 토큰이 전혀 필요 없다** — 저장소를 클론한 사람 누구나
+   바로 쓸 수 있다.
+3. **결과를 댓글로 남기기** — 리포트를 읽고, Claude(MCP)나 사람이 Notion에 댓글을 남긴다.
+
+즉 "Notion 읽기"와 "Notion 쓰기"는 이 저장소 밖에서 일어나고, 이 저장소는 가운데 검증 단계만 책임진다.
+
 ## 실행
 
-### 1) 노션에서 바로 읽기
-
-`config.yaml`을 `config.example.yaml`을 참고해 작성 (팀원별 노션 페이지 ID 등록):
+### 1) 로컬 파일/디렉토리 검증 (기본, 권장)
 
 ```bash
-cp config.example.yaml config.yaml
-# config.yaml의 members[].page_id 를 실제 노션 페이지 ID로 교체
+# 파일 하나
+python run_harness.py verify-file specs/board_dice_roll.md
+
+# 여러 파일
+python run_harness.py verify-file specs/team_a.md specs/team_b.md
+
+# 팀원별 하위 폴더 구조
+python run_harness.py verify-file specs/
 ```
 
-Notion 통합(integration) 토큰을 발급받아 대상 페이지에 연결(Connect)한 뒤:
-
-```bash
-set NOTION_TOKEN=secret_xxx      # PowerShell: $env:NOTION_TOKEN="secret_xxx"
-python run_harness.py --config config.yaml
-```
-
-### 2) 오프라인(로컬 마크다운)으로 읽기
-
-팀원별 하위 폴더에 `.md` 명세를 두고:
+경로가 디렉토리면: 하위에 폴더가 있으면 **폴더 하나 = 팀 하나**, 하위에 파일만 있으면
+**파일 하나 = 팀 하나**로 취급한다.
 
 ```
 fixtures/
@@ -42,23 +50,31 @@ fixtures/
   carol/api.md
 ```
 
-```bash
-python run_harness.py --offline fixtures
-```
-
 `fixtures/` 에는 데모용 샘플 3인분(alice/bob/carol)이 이미 들어 있고, 의도적으로
 AI 말투·응답 envelope 불일치·경로 중복·네이밍 컨벤션 혼용을 포함하고 있어
-`python run_harness.py --offline fixtures` 로 바로 동작을 확인할 수 있다.
+`python run_harness.py verify-file fixtures` 로 바로 동작을 확인할 수 있다.
 
-### 3) 공통 규약 대비 검증까지 함께 돌리기
+### 2) 공통 규약 대비 검증까지 함께 돌리기
 
-`contract.yaml`에 팀이 합의한 규약(응답 envelope, enum 사전, 금지 용어)을 적어두고:
+`contract.yaml`에 팀이 합의한 규약(enum 사전, ID 타입, base URL 등)을 적어두고:
 
 ```bash
-python run_harness.py --offline fixtures --contract contract.yaml
+python run_harness.py verify-file fixtures --contract contract.yaml
 ```
 
 `--contract`를 안 주면 1~3번 체크만 수행하고, 4번(공통 규약 준수)은 건너뛴다.
+
+### 3) [레거시] Notion REST API로 직접 조회
+
+CI처럼 사람이 개입하지 않고 자동으로 돌려야 하는 경우에만 사용한다. `NOTION_TOKEN` 발급과
+대상 페이지 연결(Connect)이 필요하다.
+
+```bash
+cp config.example.yaml config.yaml
+# config.yaml의 members[].page_id 를 실제 노션 페이지 ID로 교체
+set NOTION_TOKEN=secret_xxx      # PowerShell: $env:NOTION_TOKEN="secret_xxx"
+python run_harness.py verify-notion --config config.yaml
+```
 
 ## 출력
 
@@ -94,9 +110,9 @@ status: 201 Created, 401 Unauthorized
 - `Authorization`/`Bearer`/`인증`/`토큰` 등의 키워드가 있는 줄을 인증 관련 메모로 수집
 - 헤딩 블록이 전혀 없는 페이지는 `| Method | Path | ... |` 형태의 표에서 method+path만 추출 (충돌 탐지용)
 
-### 노션 DB가 '엔드포인트 1개 = 페이지 1개' 구조인 경우
+### [레거시] 노션 DB가 '엔드포인트 1개 = 페이지 1개' 구조인 경우
 
-메소드/URL이 헤딩이 아니라 페이지 속성(select/title/url 타입)으로 되어 있는 노션 데이터베이스라면,
+`verify-notion` 모드에서, 메소드/URL이 헤딩이 아니라 페이지 속성(select/title/url 타입)으로 되어 있는 노션 데이터베이스라면,
 `config.yaml`의 members 항목에서 `page_id` 대신 `page_ids` 리스트를 사용한다:
 
 ```yaml
@@ -169,7 +185,7 @@ harness/
     response_consistency.py      # 검증 3: 응답 방식 등 전역 일관성 (팀간 상대 비교)
     contract.py                  # 검증 4: 공통 규약 준수 (contract.yaml과 절대 비교)
   report.py                   # 콘솔/Markdown/JSON 리포트 렌더링
-  cli.py                       # argparse 기반 CLI 로직
+  cli.py                       # verify-file(기본) / verify-notion(레거시) 서브커맨드
 run_harness.py                 # 실행 진입점
 config.example.yaml            # 설정 예시
 contract.yaml                  # 공통 규약 정의 (msgCTF "API공통/참고" 문서 기반)
