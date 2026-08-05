@@ -23,8 +23,10 @@ USER app
 
 EXPOSE 8080
 
+# SECURE_SSL_REDIRECT가 켜져 있어 http 요청은 301로 튕긴다.
+# 프록시 뒤에 있는 것처럼 X-Forwarded-Proto를 붙여 실제 앱 응답을 확인한다.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request,os; urllib.request.urlopen(f'http://127.0.0.1:{os.environ.get(\"PORT\",\"8080\")}/healthz')" || exit 1
+    CMD python -c "import urllib.request,os; urllib.request.urlopen(urllib.request.Request(f'http://127.0.0.1:{os.environ.get(\"PORT\",\"8080\")}/healthz', headers={'X-Forwarded-Proto':'https'}))" || exit 1
 
 # Cloud Run은 $PORT로 리슨 포트를 지정한다 (기본 8080).
 # 로컬 docker-compose에서는 command를 runserver로 오버라이드해서 사용.
