@@ -1,0 +1,133 @@
+name: KOTH Problem Name
+
+category: koth
+
+description: |-
+  참가자는 KOTH 문제 서버에 접속해 팀 토큰으로 인증한 뒤 목표 상태를 만들고 유지해야 합니다.
+  플랫폼 백엔드는 15분마다 문제 서버의 공통 점수 API를 조회해 구간별 지급 점수를 반영합니다.
+
+authors:
+  - author-name
+
+# 일반 플래그면 전체 플래그를, 동적 secret이면 secret 값을 적습니다.
+flag: msgctf2026{replace_this}
+
+# KOTH 전용 명세입니다.
+koth:
+  club:
+    club_id: 1                    # 백엔드에 등록된 동아리 ID (1~6)
+    name: 동아리A
+    open_group: 1                 # /api/v1/koth/clubs[].open_group
+    status: SCHEDULED             # 플랫폼 관리 값: SCHEDULED | ACTIVE | CLOSED
+
+  challenge:
+    koth_challenge_id: 10         # 플랫폼팀이 발급하는 KOTH 문제 ID
+    title: koth_web_1             # /api/v1/koth/clubs[].title
+    category: WEB                 # /api/v1/koth/clubs[].category
+    score_unit: 100               # 등수별 awarded_score 설계 기준값
+
+  auth:
+    team_token:
+      required: true
+      source: CTFd plugin         # 참가자는 플랫폼에서 자기 팀 토큰을 확인
+      verify_endpoint: /internal/koth/team-tokens/verify
+      internal_token_header: X-Internal-Token
+      response_envelope: true     # code/message/data 공통 응답 봉투 사용
+      request_fields:
+        - koth_challenge_id
+        - team_token
+      response_fields:
+        - code
+        - message
+        - data
+      data_fields:
+        - valid
+        - team_id
+        - team_name
+        - koth_challenge_id
+      session_identity: team_id   # 브라우저가 보낸 team_id는 사용하지 않음
+
+  team_source:
+    endpoint: /internal/teams
+    method: GET
+    internal_token_header: X-Internal-Token
+    response_envelope: true       # code/message/data 공통 응답 봉투 사용
+    query_fields:
+      - koth_challenge_id
+    response_fields:
+      - code
+      - message
+      - data
+    data_fields:
+      - teams
+      - total_count
+    required_rules:
+      - 전체 팀 수가 75팀이어도 같은 응답 구조를 사용
+      - 목록은 data.teams로 감싸고 팀 토큰 원본은 반환하지 않음
+
+  score_api:
+    endpoint: /internal/koth/scores
+    method: GET                   # 플랫폼 백엔드가 문제 서버를 조회
+    internal_token_header: X-KOTH-Internal-Token
+    response_envelope: true       # code/message/data 공통 응답 봉투 사용
+    interval_seconds: 900         # 15분마다 조회
+    query_fields:
+      - period_id
+      - scored_at
+    response_fields:
+      - code
+      - message
+      - data
+    data_fields:
+      - koth_challenge_id
+      - period_id
+      - results
+      - total_count
+    result_fields:
+      - team_id
+      - rank
+      - metric_score
+      - awarded_score
+    required_rules:
+      - 같은 period_id 요청에는 같은 결과를 반환
+      - 이미 계산한 period_id는 다시 계산하지 않고 저장된 결과를 반환
+      - 응답 전에 해당 period 결과를 저장
+      - 지난 period 결과를 대회 종료 전까지 재조회 가능
+      - 결과가 없는 구간은 SUCCESS와 data null로 응답
+      - scored_at이 period_id와 달라도 period_id 기준으로 계산
+      - 브라우저가 보낸 team_id는 사용하지 않음
+
+  scoring:
+    type: periodic_rank_award     # 15분마다 성능 순위에 따라 점수를 지급
+    metric:
+      name: performance_score
+      value_type: Double          # score_api.results[].metric_score
+      higher_is_better: true      # 낮을수록 좋은 지표면 false
+    awards:
+      - rank: 1
+        awarded_score: 100
+      - rank: 2
+        awarded_score: 70
+      - rank: 3
+        awarded_score: 40
+    default_awarded_score: 0
+    tie_breaker: 출제자가 작성
+    note: metric_score는 순위 산정 원점수(Double)이고, awarded_score는 누적 총점이 아니라 해당 15분 구간에서 새로 지급할 Long 정수 점수입니다.
+
+  state:
+    persistence: persistent       # period 결과 재조회가 필요하므로 기본 persistent
+    reset_policy: manual
+
+# 서버가 필요한 문제이므로 deployment 블록을 작성합니다.
+deployment:
+  runtime_type: KUBERNETES        # KUBERNETES | DOCKER | VM (정해진 값만)
+  architecture: AMD64             # AMD64 | ARM64
+  containers:
+    - name: service
+      build: ./prob/for_organizer/service
+      ports: [8080]
+      expose: true
+  resource_profile:
+    cpu_millicores: 500
+    memory_mib: 512
+    ephemeral_storage_mib: 1024
