@@ -13,6 +13,8 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 import os
 from pathlib import Path
 
+from django.core.exceptions import ImproperlyConfigured
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -20,13 +22,32 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "django-insecure-*%5a3*nw#g2)2%z8&36xna3lpt22!9_esyox_x9##%@+2q9o10")
+# 기본값을 두지 않는다. 기본값을 두면 그 값이 그대로 운영에 나가고,
+# 이 저장소는 public이라 기본값은 곧 공개된 키가 된다.
+# 로컬은 .env, CI는 워크플로우 env, 운영은 시크릿 저장소에서 주입한다.
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY")
+if not SECRET_KEY:
+    raise ImproperlyConfigured("DJANGO_SECRET_KEY 환경변수가 필요합니다 (.env.example 참고)")
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.getenv("DJANGO_DEBUG", "True").lower() == "true"
+# 기본값은 안전한 쪽이어야 한다. 배포에서 환경변수를 빠뜨리는 건 가장 흔한 실수인데,
+# 기본이 True면 그 실수가 곧바로 디버그 페이지 노출로 이어진다.
+# 로컬 개발은 .env에 DJANGO_DEBUG=True를 넣어 그대로 쓰면 된다.
+DEBUG = os.getenv("DJANGO_DEBUG", "False").lower() == "true"
 
 ALLOWED_HOSTS = [host.strip() for host in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if host.strip()]
+
+# HTTPS 관련 설정은 로컬(http)에서 켜면 접속 자체가 막히므로 DEBUG일 때만 끈다.
+# CI의 `manage.py check --deploy`는 DJANGO_DEBUG=False로 돌기 때문에 항상 검사된다.
+SECURE_SSL_REDIRECT = not DEBUG
+SESSION_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_SECURE = not DEBUG
+SECURE_HSTS_SECONDS = 0 if DEBUG else 31536000
+SECURE_HSTS_INCLUDE_SUBDOMAINS = not DEBUG
+SECURE_HSTS_PRELOAD = not DEBUG
+
+# Cloud Run 등 프록시 뒤에서는 TLS가 프록시에서 끊기고 원래 스킴은 이 헤더로 전달된다.
+# 이게 없으면 Django가 모든 요청을 http로 보고 SECURE_SSL_REDIRECT가 무한 리다이렉트를 만든다.
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
 
 # Application definition

@@ -1,0 +1,181 @@
+name: Django CI Pipeline
+
+on:
+  push:
+    branches: [ "main", "develop" ]
+  pull_request:
+    branches: [ "main", "develop" ]
+
+permissions:
+  contents: read
+
+# 같은 브랜치에 연달아 push하면 이전 실행은 취소한다 - 어차피 결과가 무의미하다
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Gitleaks 시크릿 스캔
+      # dir이 아닌 git 모드 - 커밋 히스토리까지 스캔해야 지웠다 되살릴 수 있는 시크릿을 잡는다
+      # (위 fetch-depth: 0이 전체 히스토리를 받아오는 이유)
+      run: |
+        docker run --rm \
+          -v "$PWD:/repo" \
+          ghcr.io/gitleaks/gitleaks:v8.30.1 \
+          git /repo --redact --verbose
+
+    - name: Trivy 파일시스템 취약점 차단 검사 (Critical, High)
+      uses: aquasecurity/trivy-action@v0.36.0
+      with:
+        version: v0.72.0
+        scan-type: fs
+        scan-ref: .
+        scanners: vuln
+        severity: CRITICAL,HIGH
+        ignore-unfixed: true
+        exit-code: "1"
+
+    - name: Trivy 파일시스템 SARIF 생성
+      if: always()
+      uses: aquasecurity/trivy-action@v0.36.0
+      with:
+        version: v0.72.0
+        scan-type: fs
+        scan-ref: .
+        scanners: vuln
+        ignore-unfixed: true
+        format: sarif
+        output: trivy-fs-results.sarif
+        exit-code: "0"
+
+    - name: Trivy SARIF 업로드
+      if: always()
+      continue-on-error: true
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: trivy-fs-results.sarif
+        category: trivy-filesystem
+
+  lint-and-test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: msg_backend_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        # 서비스가 완전히 준비될 때까지 대기
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python 3.12.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12.10'
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run Tests
+      env:
+        DJANGO_DEBUG: "False"
+        DJANGO_SECRET_KEY: "ci-only-key-not-used-anywhere-else-0123456789abcdef"
+        DJANGO_ALLOWED_HOSTS: "localhost,127.0.0.1,testserver"
+        POSTGRES_DB: msg_backend_test
+        POSTGRES_USER: postgres
+        POSTGRES_PASSWORD: postgres
+        POSTGRES_HOST: localhost
+        POSTGRES_PORT: 5432
+        REDIS_URL: redis://localhost:6379/1
+      run: python manage.py test
+
+    # Gitleaks/Trivy는 "알려진 취약점"과 "시크릿처럼 생긴 문자열"만 본다.
+    # 안전하지 않은 '설정'은 둘 다 못 잡으므로 Django 자체 점검을 게이트로 쓴다.
+    - name: Django 배포 보안 점검 (check --deploy)
+      env:
+        DJANGO_DEBUG: "False"
+        DJANGO_SECRET_KEY: "ci-only-key-not-used-anywhere-else-0123456789abcdef"
+        DJANGO_ALLOWED_HOSTS: "example.com"
+        REDIS_URL: redis://localhost:6379/1
+      run: python manage.py check --deploy --fail-level WARNING
+
+  docker-build-check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Test Docker Build
+      run: docker build . --file Dockerfile --tag msg-backend:test
+
+    - name: Trivy 이미지 취약점/시크릿 차단 검사 (Critical, High)
+      uses: aquasecurity/trivy-action@v0.36.0
+      with:
+        version: v0.72.0
+        image-ref: msg-backend:test
+        scanners: vuln,secret
+        severity: CRITICAL,HIGH
+        ignore-unfixed: true
+        exit-code: "1"
+
+    - name: Trivy 이미지 SARIF 생성
+      if: always()
+      uses: aquasecurity/trivy-action@v0.36.0
+      with:
+        version: v0.72.0
+        image-ref: msg-backend:test
+        scanners: vuln,secret
+        ignore-unfixed: true
+        format: sarif
+        output: trivy-image-results.sarif
+        exit-code: "0"
+
+    - name: Trivy 이미지 SARIF 업로드
+      if: always()
+      continue-on-error: true
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: trivy-image-results.sarif
+        category: trivy-image
