@@ -1,0 +1,26 @@
+{
+  "forbidden_response_fields": [
+    "password",
+    "password_hash",
+    "flag",
+    "flag_hash",
+    "submitted_flag",
+    "submitted_flag_hash",
+    "token",
+    "access_token_claims",
+    "refresh_token_hash",
+    "team_token_hash",
+    "secret",
+    "secret_key",
+    "api_key",
+    "private_key",
+    "authorization",
+    "cookie",
+    "session",
+    "session_key",
+    "csrf_token",
+    "container_image",
+    "container_port",
+    "github_access_token"
+  ]
+}

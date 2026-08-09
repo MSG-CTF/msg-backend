@@ -1,0 +1,17 @@
+
+**`tools/backend-code-harness/canonical_fields.yaml`**
+```yaml
+canonical_field_names:
+  user_id: 사용자 식별자
+  team_id: 팀 식별자
+  challenge_id: 문제 식별자
+  instance_id: 인스턴스 식별자
+  team_name: 팀 이름
+  cell_index: 보드 칸 번호
+  board_event_code: 보드 이벤트 결과
+
+deprecated_field_names:
+  id: public API response/request에서 단독 식별자 이름으로 사용 금지
+  index: 보드 칸 번호로 사용 금지. cell_index를 사용
+  event_triggered: 보드 이벤트 결과로 사용 금지. board_event_code를 사용
+  total_cells: 보드 전체 칸 개수로 사용 금지. total_cell_count를 사용
