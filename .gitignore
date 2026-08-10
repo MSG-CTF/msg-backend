@@ -3,3 +3,6 @@ __pycache__/
 *.py[cod]
 db.sqlite3
 .env
+seed.py
+accounts_generated.csv
+teams.csv
