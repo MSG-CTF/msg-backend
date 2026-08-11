@@ -1,7 +1,7 @@
 from django.contrib import admin
+
 from .models import RefreshToken, Team, User
 
-# Register your models here.
 
 @admin.register(Team)
 class TeamAdmin(admin.ModelAdmin):
@@ -11,9 +11,14 @@ class TeamAdmin(admin.ModelAdmin):
 
 @admin.register(User)
 class UserAdmin(admin.ModelAdmin):
-    list_display = ("login_id", "nickname", "team", "role", "is_leader")
-    list_filter = ("role", "is_leader")
+    list_display = ("login_id", "nickname", "team", "role", "is_leader", "is_staff")
+    list_filter = ("role", "is_leader", "is_staff")
     search_fields = ("login_id", "nickname")
+
+    def save_model(self, request, obj, form, change):
+        if "password" in form.changed_data:
+            obj.set_password(obj.password)
+        super().save_model(request, obj, form, change)
 
 
 @admin.register(RefreshToken)
