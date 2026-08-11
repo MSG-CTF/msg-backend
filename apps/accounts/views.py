@@ -35,7 +35,11 @@ def login(request):
     password = serializer.validated_data["password"]
 
     user = User.objects.select_related("team").filter(login_id=login_id).first()
-    if user is None or not user.check_password(password):
+    if user is None:
+        User().set_password(password)
+        raise InvalidCredentials()
+
+    if not user.check_password(password):
         raise InvalidCredentials()
 
     access_token = issue_access_token(user)
