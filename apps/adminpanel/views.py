@@ -1,4 +1,7 @@
+from django.core.exceptions import ValidationError
+from django.db import transaction
 from django.db.models import Prefetch
+from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
 
 from apps.accounts.models import Team, User
@@ -6,6 +9,8 @@ from apps.common.exceptions import InvalidRequest
 from apps.common.permissions import IsAdmin
 from apps.common.response import ok
 from apps.common.utils import num
+
+from .exceptions import AlreadyBanned, NotBanned, TeamNotFound
 
 SORT_FIELDS = {
     "score": "-team_score",
@@ -79,3 +84,81 @@ def team_list(request):
         
 
     return ok({"teams": teams, "total_count": total_count, "page": page, "size": size})
+
+def _get_team_for_update(team_id):
+    try:
+        return Team.objects.select_for_update().get(pk=team_id)
+    except (Team.DoesNotExist, ValidationError, ValueError):
+        raise TeamNotFound()
+
+
+@api_view(["POST", "DELETE"])
+@permission_classes([IsAdmin])
+def team_ban(request, team_id):
+    if request.method == "POST":
+        return _ban(request, team_id)
+    return _unban(request, team_id)
+
+
+def _ban(request, team_id):
+    reason = request.data.get("ban_reason")
+    if reason is None:
+        raise InvalidRequest("필수 항목이 누락되었습니다: ban_reason")
+    reason = str(reason).strip()
+    if not reason:
+        raise InvalidRequest("벤 사유는 1자 이상 입력해야 합니다")
+
+    with transaction.atomic():
+        team = _get_team_for_update(team_id)
+        if team.is_banned:
+            raise AlreadyBanned(
+                data={
+                    "team_id": str(team.team_id),
+                    "ban_reason": team.ban_reason,
+                    "banned_at": team.banned_at,
+                }
+            )
+        team.is_banned = True
+        team.ban_reason = reason
+        team.banned_at = timezone.now().replace(microsecond=0)
+        team.banned_by = request.user.login_id
+        team.save(
+            update_fields=["is_banned", "ban_reason", "banned_at", "banned_by", "updated_at"]
+        )
+
+    return ok(
+        {
+            "team_id": str(team.team_id),
+            "is_banned": True,
+            "ban_reason": team.ban_reason,
+            "banned_at": team.banned_at,
+            "banned_by": team.banned_by,
+        },
+        message="팀 활동이 정지되었습니다",
+    )
+
+
+def _unban(request, team_id):
+    with transaction.atomic():
+        team = _get_team_for_update(team_id)
+        if not team.is_banned:
+            raise NotBanned(data={"team_id": str(team.team_id), "is_banned": False})
+
+        # 이력이 필요하면 admin_events 에 기록한다 (해당 앱 생성 후).
+        team.is_banned = False
+        team.ban_reason = None
+        team.banned_at = None
+        team.banned_by = None
+        team.save(
+            update_fields=["is_banned", "ban_reason", "banned_at", "banned_by", "updated_at"]
+        )
+
+    return ok(
+        {
+            "team_id": str(team.team_id),
+            "is_banned": False,
+            "unbanned_at": timezone.now().replace(microsecond=0),
+            "unbanned_by": request.user.login_id,
+        },
+        message="팀 활동 정지가 해제되었습니다",
+    )
