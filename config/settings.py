@@ -13,6 +13,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+from django.core.exceptions import ImproperlyConfigured
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -153,7 +154,18 @@ PASSWORD_HASHERS = [
     "django.contrib.auth.hashers.PBKDF2PasswordHasher",
 ]
 
-JWT_SECRET = os.getenv("JWT_SECRET", SECRET_KEY)
+# JWT 서명 키.
+# 실서버에서 누락되면 SECRET_KEY 로 대체되는데, 그 기본값이 settings.py 에
+# 커밋되어 있어 누구나 role=ADMIN 토큰을 위조할 수 있게 된다.
+# 로컬(DEBUG=True)은 개발 편의를 위해 허용한다.
+JWT_SECRET = os.getenv("JWT_SECRET")
+if not JWT_SECRET:
+    if not DEBUG:
+        raise ImproperlyConfigured(
+            "실서버에서는 JWT_SECRET 환경변수가 필수입니다.\n"
+            '  생성: python -c "import secrets; print(secrets.token_urlsafe(48))"'
+        )
+    JWT_SECRET = SECRET_KEY
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_HOURS = 1
 REFRESH_TOKEN_HOURS = 12
