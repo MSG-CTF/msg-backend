@@ -28,7 +28,6 @@ from .serializers import LoginSerializer, RefreshTokenSerializer
 
 @api_view(["POST"])
 def login(request):
-    """POST /api/v1/auth/login — 밴된 팀도 허용한다 (규약 「밴 처리」 예외)."""
     serializer = LoginSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
 
@@ -37,7 +36,6 @@ def login(request):
 
     user = User.objects.select_related("team").filter(login_id=login_id).first()
     if user is None or not user.check_password(password):
-        # 아이디가 틀렸든 비밀번호가 틀렸든 같은 응답을 준다
         raise InvalidCredentials()
 
     access_token = issue_access_token(user)
@@ -66,7 +64,7 @@ def login(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def me(request):
-    """GET /api/v1/auth/me — 로그인 상태 확인."""
+
     user = request.user
     return ok(
         {
@@ -83,7 +81,7 @@ def me(request):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def logout(request):
-    """POST /api/v1/auth/logout — refresh_token 행을 삭제해 재발급을 막는다."""
+    
     serializer = RefreshTokenSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
 
@@ -97,7 +95,7 @@ def logout(request):
 
 @api_view(["POST"])
 def refresh(request):
-    """POST /api/v1/auth/refresh — access_token 만 재발급한다."""
+    
     serializer = RefreshTokenSerializer(data=request.data)
     if not serializer.is_valid():
         raise InvalidRequest("refresh_token이 필요합니다")
@@ -117,7 +115,7 @@ def refresh(request):
         .first()
     )
     if row is None:
-        # 서명은 멀쩡한데 DB에 없다 = 로그아웃됐거나 강제 폐기됨
+       
         raise RefreshTokenNotFound()
 
     return ok(
