@@ -8,7 +8,7 @@ from rest_framework.decorators import api_view, permission_classes
 
 from apps.common.exceptions import UserHasNoTeam
 from apps.common.jwt import hash_token
-from apps.common.permissions import IsAuthenticated, IsNotBanned
+from apps.common.permissions import IsAuthenticated
 from apps.common.response import ok
 
 from .models import MileageHistory, PaymentToken, PaymentTokenStatus
@@ -88,7 +88,7 @@ def mileage_history(request):
 
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated, IsNotBanned])
+@permission_classes([IsAuthenticated])
 def qr_token(request):
     team = _get_team(request)
 

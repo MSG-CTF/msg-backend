@@ -1,8 +1,17 @@
 import jwt
 from rest_framework.authentication import BaseAuthentication
 
-from apps.common.exceptions import TokenExpired, TokenInvalid
+from apps.common.exceptions import TeamBanned, TokenExpired, TokenInvalid
 from apps.common.jwt import ACCESS, decode_token
+
+WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+BAN_EXEMPT_PATHS = frozenset({
+    "/api/v1/auth/login",
+    "/api/v1/auth/refresh",
+    "/api/v1/auth/logout",
+})
+
+ADMIN_PATH_PREFIX = "/api/v1/admin/"
 
 
 class JWTAuthentication(BaseAuthentication):
@@ -11,7 +20,7 @@ class JWTAuthentication(BaseAuthentication):
     def authenticate(self, request):
         header = request.headers.get("Authorization", "")
         if not header:
-            return None                      # 토큰 없음 → 권한 클래스가 판정
+            return None                     
         if not header.startswith(f"{self.keyword} "):
             raise TokenInvalid()
 
@@ -30,7 +39,18 @@ class JWTAuthentication(BaseAuthentication):
         except (User.DoesNotExist, ValueError, KeyError):
             raise TokenInvalid()
 
+        self._check_banned(request, user)
         return (user, payload)
+
+    def _check_banned(self, request, user):
+        if request.method not in WRITE_METHODS:
+            return                                   # 조회(GET)는 허용
+        if request.path in BAN_EXEMPT_PATHS:
+            return
+        if request.path.startswith(ADMIN_PATH_PREFIX):
+            return                                   # 관리자 API 는 검사 제외
+        if user.team_id and user.team.is_banned:
+            raise TeamBanned()
 
     def authenticate_header(self, request):
         return self.keyword
