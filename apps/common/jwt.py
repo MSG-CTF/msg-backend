@@ -39,7 +39,7 @@ def issue_refresh_token(user):
 
 
 def decode_token(token, expected_type):
-    
+
     payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
     if payload.get("typ") != expected_type:
         raise jwt.InvalidTokenError("token type mismatch")
@@ -47,5 +47,5 @@ def decode_token(token, expected_type):
 
 
 def hash_token(token):
-    
+
     return hashlib.sha256(token.encode()).hexdigest()

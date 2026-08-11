@@ -15,8 +15,6 @@ from .models import MileageHistory, PaymentToken, PaymentTokenStatus
 
 QR_TOKEN_TTL_MINUTES = 5
 
-# Create your views here.
-
 def _num(value):
     if value is None:
         return 0

@@ -20,7 +20,7 @@ class JWTAuthentication(BaseAuthentication):
     def authenticate(self, request):
         header = request.headers.get("Authorization", "")
         if not header:
-            return None                     
+            return None
         if not header.startswith(f"{self.keyword} "):
             raise TokenInvalid()
 
@@ -44,11 +44,11 @@ class JWTAuthentication(BaseAuthentication):
 
     def _check_banned(self, request, user):
         if request.method not in WRITE_METHODS:
-            return                                   # 조회(GET)는 허용
+            return
         if request.path in BAN_EXEMPT_PATHS:
             return
         if request.path.startswith(ADMIN_PATH_PREFIX):
-            return                                   # 관리자 API 는 검사 제외
+            return
         if user.team_id and user.team.is_banned:
             raise TeamBanned()
 
