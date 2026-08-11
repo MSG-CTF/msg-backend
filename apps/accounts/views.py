@@ -1,4 +1,5 @@
 from django.shortcuts import render
+from django.utils import timezone
 
 import jwt
 from rest_framework.decorators import api_view, permission_classes
@@ -41,6 +42,9 @@ def login(request):
 
     if not user.check_password(password):
         raise InvalidCredentials()
+        
+    RefreshToken.objects.filter(user=user, expires_at__lt=timezone.now()).delete()
+    access_token = issue_access_token(user)
 
     access_token = issue_access_token(user)
     refresh_token, expires_at = issue_refresh_token(user)
