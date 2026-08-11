@@ -25,7 +25,6 @@ from .serializers import LoginSerializer, RefreshTokenSerializer
 
 @api_view(["POST"])
 def login(request):
-    """POST /api/v1/auth/login — 밴된 팀도 허용한다 (규약 「밴 처리」 예외)."""
     serializer = LoginSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
 
@@ -34,16 +33,12 @@ def login(request):
 
     user = User.objects.select_related("team").filter(login_id=login_id).first()
     if user is None:
-        # 계정이 없어도 해싱을 한 번 수행해 응답 시간을 맞춘다.
-        # 없는 계정만 빠르게 실패하면 응답 시간으로 계정 존재 여부가 드러난다.
         User().set_password(password)
         raise InvalidCredentials()
 
     if not user.check_password(password):
         raise InvalidCredentials()
 
-    # 이 유저의 만료된 refresh_token 행을 정리한다.
-    # 로그아웃 시에만 삭제되므로, 그냥 두면 만료된 행이 계속 쌓인다.
     RefreshToken.objects.filter(user=user, expires_at__lt=timezone.now()).delete()
 
     access_token = issue_access_token(user)
@@ -72,7 +67,6 @@ def login(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def me(request):
-    """GET /api/v1/auth/me — 로그인 상태 확인."""
     user = request.user
     return ok(
         {
@@ -89,7 +83,6 @@ def me(request):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def logout(request):
-    """POST /api/v1/auth/logout — refresh_token 행을 삭제해 재발급을 막는다."""
     serializer = RefreshTokenSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
 
@@ -103,7 +96,6 @@ def logout(request):
 
 @api_view(["POST"])
 def refresh(request):
-    """POST /api/v1/auth/refresh — access_token 만 재발급한다 (밴 예외 경로)."""
     serializer = RefreshTokenSerializer(data=request.data)
     if not serializer.is_valid():
         raise InvalidRequest("refresh_token이 필요합니다")
@@ -123,7 +115,7 @@ def refresh(request):
         .first()
     )
     if row is None:
-        # 서명은 유효한데 DB에 없다 = 로그아웃됐거나 강제 폐기됨
+
         raise RefreshTokenNotFound()
 
     return ok(

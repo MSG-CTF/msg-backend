@@ -10,17 +10,11 @@ from apps.common.exceptions import UserHasNoTeam
 from apps.common.jwt import hash_token
 from apps.common.permissions import IsAuthenticated
 from apps.common.response import ok
+from apps.common.utils import num
 
 from .models import MileageHistory, PaymentToken, PaymentTokenStatus
 
 QR_TOKEN_TTL_MINUTES = 5
-
-def _num(value):
-    if value is None:
-        return 0
-    if isinstance(value, Decimal):
-        return int(value) if value == value.to_integral_value() else float(value)
-    return value
 
 def _get_team(request):
     if request.user.team_id is None:
@@ -51,9 +45,9 @@ def team_me(request):
         {
             "team_id": str(team.team_id),
             "team_name": team.team_name,
-            "team_score": _num(jeopardy_score + koth_score),
-            "jeopardy_score": _num(jeopardy_score),
-            "koth_score": _num(koth_score),
+            "team_score": num(jeopardy_score + koth_score),
+            "jeopardy_score": num(jeopardy_score),
+            "koth_score": num(koth_score),
             "mileage": team.mileage,
             "is_banned": team.is_banned,
             "ban_reason": team.ban_reason,
