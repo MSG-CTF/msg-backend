@@ -118,4 +118,4 @@ def qr_token(request):
         if old_ids:
             PaymentToken.objects.filter(pk__in=old_ids).update(invalidated_by_token=new_token)
 
-    return ok({"token": raw_token, "expires_at": expires_at})
+    return ok({"payment_token": raw_token, "expires_at": expires_at})
