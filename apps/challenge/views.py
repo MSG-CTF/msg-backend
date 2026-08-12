@@ -1,0 +1,175 @@
+from datetime import timedelta
+
+from django.db import IntegrityError, transaction
+from django.utils import timezone
+from rest_framework.views import APIView
+
+from apps.challenge.models import (
+    Challenge,
+    FlagSubmission,
+    FlagSubmissionLock,
+    OpenedChallenge,
+    Solve,
+)
+from apps.challenge.services import hash_flag, is_correct_flag
+from apps.common.formatters import isoformat_z, number_value
+from apps.common.responses import api_response
+from apps.instances.models import Instance
+from apps.instances.services import ACTIVE_INSTANCE_STATUSES, serialize_instance
+
+
+class ChallengeDetailView(APIView):
+    def get(self, request, challenge_id):
+        team = request.user.team
+        if team is None:
+            return api_response("USER_HAS_NO_TEAM", "소속된 팀이 없습니다", None, status=404)
+
+        challenge = Challenge.objects.filter(challenge_id=challenge_id).first()
+        if challenge is None:
+            return api_response("CHALLENGE_NOT_FOUND", "존재하지 않는 문제 ID입니다.", None, status=404)
+        opened_challenge = OpenedChallenge.objects.filter(team=team, challenge=challenge).first()
+        if opened_challenge is None:
+            return api_response("CHALLENGE_LOCKED", "아직 개방되지 않은 문제입니다.", None, status=403)
+
+        solve = Solve.objects.filter(team=team, challenge=challenge).first()
+        instance = (
+            Instance.objects
+            .filter(user=request.user, challenge=challenge, status__in=ACTIVE_INSTANCE_STATUSES)
+            .order_by("-created_at")
+            .first()
+        )
+
+        return api_response(
+            message="문제 상세 조회 성공",
+            data={
+                "challenge_id": str(challenge.challenge_id),
+                "title": challenge.title,
+                "category": challenge.category,
+                "difficulty": challenge.difficulty,
+                "score": number_value(challenge.score),
+                "description": challenge.description,
+                "files": [],
+                "solved_team_count": Solve.objects.filter(challenge=challenge).count(),
+                "is_solved": solve is not None,
+                "instance": serialize_instance(instance),
+            },
+        )
+
+
+class ChallengeSubmitView(APIView):
+    def post(self, request, challenge_id):
+        team = request.user.team
+        if team is None:
+            return api_response("USER_HAS_NO_TEAM", "소속된 팀이 없습니다", None, status=404)
+
+        flag = request.data.get("flag")
+        if not flag:
+            return api_response("INVALID_REQUEST", "요청 값이 올바르지 않습니다", None, status=400)
+
+        challenge = Challenge.objects.filter(challenge_id=challenge_id).first()
+        if challenge is None:
+            return api_response("CHALLENGE_NOT_FOUND", "존재하지 않는 문제 ID입니다.", None, status=404)
+
+        opened_challenge = OpenedChallenge.objects.filter(team=team, challenge=challenge).first()
+        if opened_challenge is None:
+            return api_response("CHALLENGE_LOCKED", "아직 개방되지 않은 문제입니다.", None, status=403)
+
+        if Solve.objects.filter(team=team, challenge=challenge).exists():
+            return api_response("ALREADY_SOLVED", "이미 정답을 맞춘 문제입니다.", None, status=409)
+
+        now = timezone.now()
+        submitted_flag_hash = hash_flag(flag)
+
+        with transaction.atomic():
+            flag_lock, _ = FlagSubmissionLock.objects.select_for_update().get_or_create(
+                team=team,
+                challenge=challenge,
+            )
+
+            if flag_lock.locked_until and flag_lock.locked_until > now:
+                retry_after_seconds = int((flag_lock.locked_until - now).total_seconds())
+                FlagSubmission.objects.create(
+                    team=team,
+                    user=request.user,
+                    challenge=challenge,
+                    submitted_flag_hash=submitted_flag_hash,
+                    result=FlagSubmission.SubmissionResult.TOO_MANY_ATTEMPTS,
+                )
+                return api_response(
+                    "TOO_MANY_ATTEMPTS",
+                    "잘못된 플래그를 3회 연속 제출했습니다. 30초 후 다시 시도해주세요.",
+                    {"retry_after_seconds": retry_after_seconds},
+                    status=429,
+                )
+
+            if flag_lock.locked_until and flag_lock.locked_until <= now:
+                flag_lock.failed_count = 0
+                flag_lock.locked_until = None
+
+            if not is_correct_flag(flag, challenge.flag_hash):
+                flag_lock.failed_count += 1
+                flag_lock.last_failed_at = now
+
+                if flag_lock.failed_count >= 3:
+                    flag_lock.locked_until = now + timedelta(seconds=30)
+                    result = FlagSubmission.SubmissionResult.INCORRECT
+                    status_code = 429
+                    code = "TOO_MANY_ATTEMPTS"
+                    message = "잘못된 플래그를 3회 연속 제출했습니다. 30초 후 다시 시도해주세요."
+                    data = {"retry_after_seconds": 30}
+                else:
+                    result = FlagSubmission.SubmissionResult.INCORRECT
+                    status_code = 200
+                    code = "INCORRECT_FLAG"
+                    message = "틀린 플래그입니다."
+                    data = None
+
+                flag_lock.save(update_fields=["failed_count", "locked_until", "last_failed_at", "updated_at"])
+                FlagSubmission.objects.create(
+                    team=team,
+                    user=request.user,
+                    challenge=challenge,
+                    submitted_flag_hash=submitted_flag_hash,
+                    result=result,
+                )
+                return api_response(code, message, data, status=status_code)
+
+            is_extra_dice_granted = opened_challenge.solve_deadline_at >= now
+            earned_score = challenge.score
+            earned_mileage = 0
+
+            try:
+                solve = Solve.objects.create(
+                    team=team,
+                    challenge=challenge,
+                    solved_by_user=request.user,
+                    earned_score=earned_score,
+                    earned_mileage=earned_mileage,
+                    is_extra_dice_granted=is_extra_dice_granted,
+                )
+            except IntegrityError:
+                return api_response("ALREADY_SOLVED", "이미 정답을 맞춘 문제입니다.", None, status=409)
+
+            flag_lock.failed_count = 0
+            flag_lock.locked_until = None
+            flag_lock.last_failed_at = None
+            flag_lock.save(update_fields=["failed_count", "locked_until", "last_failed_at", "updated_at"])
+
+            FlagSubmission.objects.create(
+                team=team,
+                user=request.user,
+                challenge=challenge,
+                submitted_flag_hash=submitted_flag_hash,
+                result=FlagSubmission.SubmissionResult.CORRECT,
+            )
+
+        return api_response(
+            message="정답입니다!",
+            data={
+                "challenge_id": str(challenge.challenge_id),
+                "earned_score": number_value(earned_score),
+                "earned_mileage": earned_mileage,
+                "is_extra_dice_granted": is_extra_dice_granted,
+                "solved_at": isoformat_z(solve.solved_at),
+            },
+        )
