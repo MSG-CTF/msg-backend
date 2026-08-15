@@ -5,6 +5,7 @@ services:
     build: ./service
     ports:
       - "8080:8080"
+      - "9090:9090"   # 헬스체크 전용, 참가자 진입점(8080)과 분리
     environment:
       KOTH_CHALLENGE_ID: "018f3f1e-0700-7a91-a30b-630000000010"
       KOTH_INTERNAL_TOKEN: local-koth-internal-token

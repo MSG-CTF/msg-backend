@@ -8,7 +8,7 @@
 
 문제 디렉토리 이름은 다른 분야와 같은 규칙을 씁니다. `분야-문제명` 형태이므로 KOTH 문제는 `koth-문제명`으로 만듭니다. 소문자와 하이픈만 사용합니다.
 
-`info.yaml`은 일반 문제와 완전히 동일한 양식입니다. KOTH 전용 필드는 없습니다. 팀 토큰 인증과 점수 API 규칙은 이 README와 `prob/for_organizer/admin.md`가 담당합니다.
+`info.yaml`은 일반 문제 양식에 `deployment.healthcheck`만 추가한 형태입니다. 그 외 KOTH 전용 필드는 없습니다. 팀 토큰 인증과 점수 API 규칙은 이 README와 `prob/for_organizer/admin.md`가 담당합니다.
 
 로컬 테스트(출제자 편의용, 실제 배포는 `info.yaml`의 `deployment`가 담당):
 
@@ -48,6 +48,19 @@ KOTH 문제는 일반 web 문제와 달리 팀 토큰 인증과 15분 점수 API
 3. 검증 성공 시 응답의 `team_id`와 `team_name`을 세션 또는 서버 상태에 저장합니다.
 4. 이후 모든 팀 상태, 제출 코드, 점유 정보, 성능 측정값은 `team_id` 기준으로 관리합니다.
 5. 브라우저가 직접 보낸 `team_id`는 사용하지 않습니다.
+
+Method: `POST`
+
+URL: `/internal/koth/team_tokens/verify`
+
+Header:
+
+```json
+{
+  "X-Internal-Token": "<INTERNAL_TOKEN>",
+  "Content-Type": "application/json"
+}
+```
 
 검증 요청:
 

@@ -18,8 +18,8 @@
 
 - `club_id`: 동아리 식별값 (UUID)
 - `koth_challenge_id`: 문제 식별값 (UUID)
-- `open_group`: 문제 공개 순번. 대회 전체 스케줄이라 플랫폼이 배정합니다.
-- `status`: `SCHEDULED` / `ACTIVE` / `CLOSED`. 플랫폼이 관리하며 출제자가 지정하지 않습니다.
+- `open_group`: 문제 공개 순번, 대회 전체 스케줄이라 플랫폼이 배정
+- `status`: `SCHEDULED` / `ACTIVE` / `CLOSED`, 플랫폼이 관리하며 출제자가 지정하지 않음
 - 팀 토큰 검증 API 주소: `/internal/koth/team_tokens/verify`
 - 전체 팀 조회 API 주소: `/internal/teams`
 - 문제 서버 내부 API 인증값: `X-KOTH-Internal-Token`
@@ -39,6 +39,19 @@ KOTH 문제는 팀별 토큰으로 참가 팀을 식별합니다.
 4. 플랫폼 백엔드가 `valid`, `team_id`, `team_name`, `koth_challenge_id`를 반환합니다.
 5. 문제 서버는 반환받은 `team_id`를 기준으로 로그인 세션과 팀별 상태를 관리합니다.
 6. 원본 팀 토큰은 저장하거나 로그에 남기지 않습니다.
+
+Method: `POST`
+
+URL: `/internal/koth/team_tokens/verify`
+
+Header:
+
+```json
+{
+  "X-Internal-Token": "<INTERNAL_TOKEN>",
+  "Content-Type": "application/json"
+}
+```
 
 검증 API 요청:
 
@@ -209,6 +222,7 @@ Response:
 - `team_id`: 팀 토큰 검증으로 확인한 팀 ID(UUID)
 - `period_rank`: 해당 구간 등수(Long)
 - `metric_score`: 해당 구간 순위 산정에 사용한 원점수(Double)
+- `total_count`: `results` 배열의 길이(Long). 전체 참가 팀 수가 아니라 이 구간에서 순위가 매겨진 팀 수입니다.
 
 지급 점수는 반환하지 않습니다. 12문제의 배점 스케일을 맞추기 위해 플랫폼이 배점표를 관리하며, 문제 서버는 등수까지만 계산합니다.
 
@@ -218,7 +232,7 @@ Response:
 2. 이미 계산한 `period_id`는 다시 계산하지 않고 저장된 결과를 그대로 반환합니다.
 3. 응답 전에 해당 구간 결과를 문제 서버에 저장합니다.
 4. 지난 구간 결과를 대회 종료 전까지 다시 조회할 수 있게 합니다.
-5. 결과가 없는 구간은 200 OK, `code: "SUCCESS"`, `data: null`로 응답합니다.
+5. 구간이 끝났는데 순위를 매길 팀이 없으면 200 OK, `code: "SUCCESS"`, `data: null`로 응답합니다. 아직 구간이 끝나지 않아 계산 자체를 못 한 경우에만 409 `PERIOD_NOT_READY`를 씁니다. 두 상황을 섞지 않습니다.
 6. 백엔드가 응답을 받지 못하면 같은 `period_id`로 재요청할 수 있습니다.
 7. 한 번 저장한 구간 결과는 이후 등수가 바뀌어도 수정하지 않습니다.
 8. `team_id`는 팀 토큰 검증 API에서 받은 값만 사용합니다.
@@ -254,7 +268,7 @@ Response:
 
 - 400 `INVALID_PERIOD`: 채점 구간 값 오류
 - 401 `INVALID_INTERNAL_TOKEN`: 문제 서버 인증 실패
-- 409 `PERIOD_NOT_READY`: 아직 해당 구간 결과가 준비되지 않음
+- 409 `PERIOD_NOT_READY`: 아직 구간이 끝나지 않아 계산을 못 함 (구간은 끝났는데 순위 매길 팀이 없는 경우는 200 + `data: null`)
 - 500 `SCORING_FAILED`: 문제 서버 채점 실패
 
 오류 응답 예시:

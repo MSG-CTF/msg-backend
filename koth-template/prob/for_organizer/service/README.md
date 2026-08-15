@@ -25,7 +25,7 @@
 
 운영자/백엔드용:
 
-- `GET /healthz` 생존 확인 엔드포인트 (인증 없이 200 반환, `info.yaml`의 `deployment.healthcheck`와 경로가 같아야 함)
+- `GET /healthz` 생존 확인 엔드포인트, 9090 포트, 인증 없이 200 반환 (참가자 진입점인 8080과 다른 포트입니다. `info.yaml`의 `deployment.healthcheck`와 포트·경로가 같아야 함)
 - `GET /internal/koth/scores`
 - `X-KOTH-Internal-Token` 인증
 - `period_id`, `scored_at` query 처리
