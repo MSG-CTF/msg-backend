@@ -6,7 +6,7 @@
 
 - `docker compose up --build`로 서비스가 정상 실행되는지 확인
 - 팀 토큰 입력 화면이 있는지 확인
-- 문제 서버가 `/internal/koth/team-tokens/verify`를 호출해 `team_id`를 받아오는지 확인
+- 문제 서버가 `/internal/koth/team_tokens/verify`를 호출해 `team_id`를 받아오는지 확인
 - 브라우저가 보낸 `team_id`를 사용하지 않는지 확인
 - `GET /internal/koth/scores`가 정상 JSON을 반환하는지 확인
 - 같은 `period_id`로 재요청했을 때 같은 결과가 반환되는지 확인
@@ -16,12 +16,17 @@
 
 플랫폼팀은 출제자에게 다음 값을 제공해야 합니다.
 
-- `koth_challenge_id`: 문제 식별값
-- 팀 토큰 검증 API 주소: `/internal/koth/team-tokens/verify`
+- `club_id`: 동아리 식별값 (UUID)
+- `koth_challenge_id`: 문제 식별값 (UUID)
+- `open_group`: 문제 공개 순번. 대회 전체 스케줄이라 플랫폼이 배정합니다.
+- `status`: `SCHEDULED` / `ACTIVE` / `CLOSED`. 플랫폼이 관리하며 출제자가 지정하지 않습니다.
+- 팀 토큰 검증 API 주소: `/internal/koth/team_tokens/verify`
 - 전체 팀 조회 API 주소: `/internal/teams`
 - 문제 서버 내부 API 인증값: `X-KOTH-Internal-Token`
 - 플랫폼 API 호출용 인증값: `X-Internal-Token`
 - 15분 채점 구간 규칙: `period_id`, `scored_at` 형식
+
+두 인증값은 모두 플랫폼이 발급합니다. 문제마다 따로 발급하며 출제자가 직접 만들지 않습니다.
 
 ## 팀 토큰 인증 흐름
 
@@ -30,7 +35,7 @@ KOTH 문제는 팀별 토큰으로 참가 팀을 식별합니다.
 
 1. 참가자가 플랫폼에서 자기 팀 토큰을 확인합니다.
 2. 참가자가 KOTH 문제 서버에 팀 토큰을 입력합니다.
-3. 문제 서버가 플랫폼 백엔드의 `/internal/koth/team-tokens/verify`를 호출합니다.
+3. 문제 서버가 플랫폼 백엔드의 `/internal/koth/team_tokens/verify`를 호출합니다.
 4. 플랫폼 백엔드가 `valid`, `team_id`, `team_name`, `koth_challenge_id`를 반환합니다.
 5. 문제 서버는 반환받은 `team_id`를 기준으로 로그인 세션과 팀별 상태를 관리합니다.
 6. 원본 팀 토큰은 저장하거나 로그에 남기지 않습니다.
@@ -39,7 +44,7 @@ KOTH 문제는 팀별 토큰으로 참가 팀을 식별합니다.
 
 ```json
 {
-  "koth_challenge_id": 10,
+  "koth_challenge_id": "018f3f1e-0700-7a91-a30b-630000000010",
   "team_token": "<TEAM_TOKEN>"
 }
 ```
@@ -52,9 +57,9 @@ KOTH 문제는 팀별 토큰으로 참가 팀을 식별합니다.
   "message": "성공",
   "data": {
     "valid": true,
-    "team_id": 3,
+    "team_id": "018f3f1e-0100-7a91-a30b-630000000003",
     "team_name": "MJSEC",
-    "koth_challenge_id": 10
+    "koth_challenge_id": "018f3f1e-0700-7a91-a30b-630000000010"
   }
 }
 ```
@@ -69,13 +74,14 @@ KOTH 문제는 팀별 토큰으로 참가 팀을 식별합니다.
     "valid": false,
     "team_id": null,
     "team_name": null,
-    "koth_challenge_id": 10
+    "koth_challenge_id": "018f3f1e-0700-7a91-a30b-630000000010"
   }
 }
 ```
 
 필수 규칙:
 
+- `team_id`, `club_id`, `koth_challenge_id`는 UUID 문자열입니다. 정수로 파싱하지 않습니다.
 - 출제자에게 전체 팀 토큰 목록을 전달하지 않습니다.
 - 브라우저가 보낸 `team_id`는 사용하지 않습니다.
 - 차단된 팀 토큰은 검증에 실패해야 합니다.
@@ -101,7 +107,7 @@ Query:
 
 ```json
 {
-  "koth_challenge_id": 10
+  "koth_challenge_id": "018f3f1e-0700-7a91-a30b-630000000010"
 }
 ```
 
@@ -114,11 +120,11 @@ Response:
   "data": {
     "teams": [
       {
-        "team_id": 3,
+        "team_id": "018f3f1e-0100-7a91-a30b-630000000003",
         "team_name": "MJSEC"
       },
       {
-        "team_id": 4,
+        "team_id": "018f3f1e-0100-7a91-a30b-630000000004",
         "team_name": "TEAM4"
       }
     ],
@@ -175,20 +181,18 @@ Response:
   "code": "SUCCESS",
   "message": "성공",
   "data": {
-    "koth_challenge_id": 10,
+    "koth_challenge_id": "018f3f1e-0700-7a91-a30b-630000000010",
     "period_id": "2026-07-28T10:15:00Z",
     "results": [
       {
-        "team_id": 3,
-        "rank": 1,
-        "metric_score": 98.73,
-        "awarded_score": 100
+        "team_id": "018f3f1e-0100-7a91-a30b-630000000003",
+        "period_rank": 1,
+        "metric_score": 98.73
       },
       {
-        "team_id": 4,
-        "rank": 2,
-        "metric_score": 92.15,
-        "awarded_score": 70
+        "team_id": "018f3f1e-0100-7a91-a30b-630000000004",
+        "period_rank": 2,
+        "metric_score": 92.15
       }
     ],
     "total_count": 2
@@ -202,10 +206,11 @@ Response:
 
 필수 결과 필드:
 
-- `team_id`: 팀 토큰 검증으로 확인한 팀 ID
-- `rank`: 해당 구간 등수
+- `team_id`: 팀 토큰 검증으로 확인한 팀 ID(UUID)
+- `period_rank`: 해당 구간 등수(Long)
 - `metric_score`: 해당 구간 순위 산정에 사용한 원점수(Double)
-- `awarded_score`: 해당 구간 지급 점수(Long)
+
+지급 점수는 반환하지 않습니다. 12문제의 배점 스케일을 맞추기 위해 플랫폼이 배점표를 관리하며, 문제 서버는 등수까지만 계산합니다.
 
 필수 규칙:
 
@@ -228,11 +233,12 @@ Response:
 1. 15분마다 `ACTIVE` 상태인 KOTH 문제 서버를 조회합니다.
 2. 응답을 못 받으면 같은 `period_id`로 재시도합니다.
 3. 한 구간의 재시도 횟수와 간격은 플랫폼팀 정책을 따릅니다.
-4. 이미 처리한 `period_id`는 다시 점수에 반영하지 않습니다.
-5. 해당 팀이 이 문제에서 처음 양수 점수를 받으면 KOTH SOLVE를 만듭니다.
-6. 이후 점수는 기존 SOLVE의 `earned_score`에 더합니다.
-7. 기존 SOLVE의 `solved_at`은 수정하지 않습니다.
-8. 채점 응답 원본은 운영 확인용 로그로 저장합니다.
+4. 받은 `period_rank`에 플랫폼 배점표를 적용해 구간별 지급 점수를 계산합니다.
+5. 이미 처리한 `period_id`는 다시 점수에 반영하지 않습니다.
+6. 해당 팀이 이 문제에서 처음 양수 점수를 받으면 KOTH SOLVE를 만듭니다.
+7. 이후 점수는 기존 SOLVE의 `earned_score`에 더합니다.
+8. 기존 SOLVE의 `solved_at`은 수정하지 않습니다.
+9. 채점 응답 원본은 운영 확인용 로그로 저장합니다.
 
 ## API 테스트 항목
 
@@ -263,15 +269,14 @@ Response:
 
 ## 공개 API 연결
 
-`info.yaml`의 값은 공개 API에 다음처럼 연결됩니다.
+`info.yaml`은 일반 문제와 동일한 양식이며 KOTH 전용 필드가 없습니다. 아래 값은 모두 플랫폼이 관리하고 출제자에게 전달합니다.
 
-- `koth.club.club_id` -> `/api/v1/koth/clubs[].club_id`
-- `koth.club.name` -> `/api/v1/koth/clubs/{club_id}.name`
-- `koth.club.open_group` -> `/api/v1/koth/clubs[].open_group`
-- `koth.club.status` -> `/api/v1/koth/clubs[].status`
-- `koth.challenge.koth_challenge_id` -> 백엔드 DB의 KOTH 문제 ID
-- `koth.challenge.title` -> `/api/v1/koth/clubs[].title`
-- `koth.challenge.category` -> `/api/v1/koth/clubs[].category`
-- `koth.scoring.awards[].awarded_score` -> `GET /internal/koth/scores`의 `results[].awarded_score`
+동아리 하나가 문제를 여러 개 낼 수 있으므로 문제 정보는 동아리 아래 `challenges[]` 배열에 들어갑니다. 이번 대회는 동아리 6개에 동아리당 문제 2개, 총 12문제입니다.
+
+- `club_id`, 동아리 이름 -> `/api/v1/koth/clubs[].club_id`, `/api/v1/koth/clubs[].name`
+- `koth_challenge_id`, 문제 이름, 카테고리 -> `/api/v1/koth/clubs[].challenges[]`
+- `open_group`, `status` -> `/api/v1/koth/clubs[].challenges[]`
+
+`open_group`과 `status`는 대회 전체 스케줄이라 플랫폼이 배정합니다. 둘 다 동아리가 아니라 문제 단위로 관리됩니다. 한 동아리의 문제 두 개가 서로 다른 시간대에 열릴 수 있기 때문입니다.
 
 전체 KOTH 등수는 백엔드가 KOTH SOLVE의 `earned_score`를 합산해 계산합니다.

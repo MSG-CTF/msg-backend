@@ -6,7 +6,11 @@
 
 ## 문제 세팅 방법
 
-로컬 테스트(출제자 편의용, 실제 배포는 `info.yaml`의 `deployment`와 `koth`가 담당):
+문제 디렉토리 이름은 다른 분야와 같은 규칙을 씁니다. `분야-문제명` 형태이므로 KOTH 문제는 `koth-문제명`으로 만듭니다. 소문자와 하이픈만 사용합니다.
+
+`info.yaml`은 일반 문제와 완전히 동일한 양식입니다. KOTH 전용 필드는 없습니다. 팀 토큰 인증과 점수 API 규칙은 이 README와 `prob/for_organizer/admin.md`가 담당합니다.
+
+로컬 테스트(출제자 편의용, 실제 배포는 `info.yaml`의 `deployment`가 담당):
 
 ```bash
 cd prob/for_organizer
@@ -17,6 +21,8 @@ docker compose up --build
 
 실제 대회 배포는 플랫폼이 `info.yaml`의 `deployment.containers` 명세로 쿠버네티스 리소스를 생성합니다.
 출제자는 컨테이너별 Dockerfile, KOTH 문제 서버 코드, `GET /internal/koth/scores` 공통 API 코드, `info.yaml`을 정확히 작성하면 됩니다.
+
+`club_id`와 `koth_challenge_id`는 플랫폼이 발급해서 전달하는 값입니다. `info.yaml`에 적지 않고, 문제 서버에는 환경 변수로 주입받습니다.
 
 ## 출제 지문
 
@@ -38,7 +44,7 @@ KOTH 문제는 일반 web 문제와 달리 팀 토큰 인증과 15분 점수 API
 ### 팀 토큰 인증
 
 1. 참가자가 문제 서버에서 팀 토큰을 입력합니다.
-2. 문제 서버가 플랫폼 백엔드의 `/internal/koth/team-tokens/verify`를 호출합니다.
+2. 문제 서버가 플랫폼 백엔드의 `/internal/koth/team_tokens/verify`를 호출합니다.
 3. 검증 성공 시 응답의 `team_id`와 `team_name`을 세션 또는 서버 상태에 저장합니다.
 4. 이후 모든 팀 상태, 제출 코드, 점유 정보, 성능 측정값은 `team_id` 기준으로 관리합니다.
 5. 브라우저가 직접 보낸 `team_id`는 사용하지 않습니다.
@@ -47,7 +53,7 @@ KOTH 문제는 일반 web 문제와 달리 팀 토큰 인증과 15분 점수 API
 
 ```json
 {
-  "koth_challenge_id": 10,
+  "koth_challenge_id": "018f3f1e-0700-7a91-a30b-630000000010",
   "team_token": "<TEAM_TOKEN>"
 }
 ```
@@ -60,9 +66,9 @@ KOTH 문제는 일반 web 문제와 달리 팀 토큰 인증과 15분 점수 API
   "message": "성공",
   "data": {
     "valid": true,
-    "team_id": 3,
+    "team_id": "018f3f1e-0100-7a91-a30b-630000000003",
     "team_name": "MJSEC",
-    "koth_challenge_id": 10
+    "koth_challenge_id": "018f3f1e-0700-7a91-a30b-630000000010"
   }
 }
 ```
@@ -77,10 +83,12 @@ KOTH 문제는 일반 web 문제와 달리 팀 토큰 인증과 15분 점수 API
     "valid": false,
     "team_id": null,
     "team_name": null,
-    "koth_challenge_id": 10
+    "koth_challenge_id": "018f3f1e-0700-7a91-a30b-630000000010"
   }
 }
 ```
+
+`koth_challenge_id`와 `team_id`는 UUID 문자열입니다. 정수가 아니므로 정수로 파싱하지 마세요.
 
 주의사항:
 
@@ -132,20 +140,18 @@ Query:
   "code": "SUCCESS",
   "message": "성공",
   "data": {
-    "koth_challenge_id": 10,
+    "koth_challenge_id": "018f3f1e-0700-7a91-a30b-630000000010",
     "period_id": "2026-07-31T10:15:00Z",
     "results": [
       {
-        "team_id": 3,
-        "rank": 1,
-        "metric_score": 98.73,
-        "awarded_score": 100
+        "team_id": "018f3f1e-0100-7a91-a30b-630000000003",
+        "period_rank": 1,
+        "metric_score": 98.73
       },
       {
-        "team_id": 4,
-        "rank": 2,
-        "metric_score": 92.15,
-        "awarded_score": 70
+        "team_id": "018f3f1e-0100-7a91-a30b-630000000004",
+        "period_rank": 2,
+        "metric_score": 92.15
       }
     ],
     "total_count": 2
@@ -174,6 +180,7 @@ Query:
 7. `team_id`는 팀 토큰 검증 API에서 받은 값만 사용합니다.
 8. 응답 body는 항상 `code`, `message`, `data` 3개 키를 포함합니다.
 9. 목록은 `data.results`로 감쌉니다.
+10. 점수는 반환하지 않습니다. 문제 서버는 등수까지만 계산하고, 등수에 배점을 적용하는 것은 플랫폼 백엔드가 합니다.
 
 ### 등수 계산
 
@@ -183,10 +190,11 @@ Query:
 - 정렬 방향: 높은 값이 좋은지, 낮은 값이 좋은지
 - 동점 처리: 같은 점수일 때 같은 등수인지, 먼저 달성한 팀 우선인지
 - 순위 제외 조건: 인증 실패, 서비스 장애, 제출 코드 오류 등
-- 등수별 지급 점수: 1등, 2등, 3등, 그 외
+
+등수별 지급 점수는 출제자가 정하지 않습니다. 12개 문제의 배점 스케일을 맞추기 위해 플랫폼이 배점표를 관리하며, 문제 서버는 등수까지만 계산해서 반환합니다.
 
 `metric_score`는 등수 계산에 사용한 성능 측정값입니다. 타입은 Double입니다.
-`awarded_score`는 해당 15분 구간에 지급할 정수 점수입니다. 타입은 Long입니다.
+`period_rank`는 해당 15분 구간의 등수입니다. 타입은 Long입니다. 대회 전체 누적 등수는 플랫폼이 따로 계산하므로 이름이 다릅니다.
 
 ## 문제 풀이 (writeup)
 

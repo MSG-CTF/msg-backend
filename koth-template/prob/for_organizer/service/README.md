@@ -17,7 +17,7 @@
 참가자용:
 
 - 팀 토큰 입력 화면 또는 API
-- `/internal/koth/team-tokens/verify` 호출
+- `/internal/koth/team_tokens/verify` 호출
 - 플랫폼 API 호출 시 `X-Internal-Token` 헤더 사용
 - 검증 성공 시 `team_id` 기준 세션 생성
 - 검증 실패 시 `valid: false`로 처리하고 세션 생성 금지
@@ -25,12 +25,15 @@
 
 운영자/백엔드용:
 
+- `GET /healthz` 생존 확인 엔드포인트 (인증 없이 200 반환, `info.yaml`의 `deployment.healthcheck`와 경로가 같아야 함)
 - `GET /internal/koth/scores`
 - `X-KOTH-Internal-Token` 인증
 - `period_id`, `scored_at` query 처리
-- 팀별 `metric_score`, `rank`, `awarded_score` 반환
+- 팀별 `metric_score`와 `period_rank` 반환 (지급 점수는 플랫폼이 계산하므로 반환하지 않음)
 - 결과가 없는 구간은 `data: null` 반환
 - period별 결과 저장 및 재조회
 - `code`, `message`, `data` 공통 응답 봉투 적용
 
 브라우저가 보낸 `team_id`는 사용하지 말고, 팀 토큰 검증 API에서 받은 `team_id`만 사용합니다.
+
+`team_id`와 `koth_challenge_id`는 UUID 문자열입니다. 정수 컬럼이나 정수 파싱을 쓰지 마세요.
