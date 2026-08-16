@@ -34,15 +34,17 @@ class Contest(models.Model):
         if now < self.start_time:
             return {
                 "status": "BEFORE",
-                "remaining_seconds": 0,
+                "remaining_seconds": int((self.end_time - self.start_time).total_seconds()),
                 "time_until_start": int((self.start_time - now).total_seconds()),
             }
+        
         if now >= self.end_time:
             return {
                 "status": "ENDED",
                 "remaining_seconds": 0,
                 "time_until_start": 0,
             }
+        
         return {
             "status": "RUNNING",
             "remaining_seconds": int((self.end_time - now).total_seconds()),
