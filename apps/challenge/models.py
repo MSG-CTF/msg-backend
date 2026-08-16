@@ -3,8 +3,6 @@ import uuid
 from django.conf import settings
 from django.db import models
 
-from apps.teams.models import Team
-
 
 class Challenge(models.Model):
     class CategoryType(models.TextChoices):
@@ -39,7 +37,7 @@ class Challenge(models.Model):
 
 class OpenedChallenge(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    team = models.ForeignKey(Team, on_delete=models.CASCADE, related_name="opened_challenges")
+    team = models.ForeignKey("accounts.Team", on_delete=models.CASCADE, related_name="opened_challenges")
     challenge = models.ForeignKey(Challenge, on_delete=models.CASCADE, related_name="opened_challenges")
     cell_index = models.IntegerField()
     opened_at = models.DateTimeField(auto_now_add=True)
@@ -58,7 +56,7 @@ class OpenedChallenge(models.Model):
 
 class Solve(models.Model):
     solve_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    team = models.ForeignKey(Team, on_delete=models.CASCADE, related_name="solves")
+    team = models.ForeignKey("accounts.Team", on_delete=models.CASCADE, related_name="solves")
     challenge = models.ForeignKey(Challenge, on_delete=models.CASCADE, related_name="solves")
     solved_by_user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -90,7 +88,7 @@ class FlagSubmission(models.Model):
         TOO_MANY_ATTEMPTS = "TOO_MANY_ATTEMPTS"
 
     submission_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    team = models.ForeignKey(Team, on_delete=models.CASCADE, related_name="flag_submissions")
+    team = models.ForeignKey("accounts.Team", on_delete=models.CASCADE, related_name="flag_submissions")
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -113,7 +111,7 @@ class FlagSubmission(models.Model):
 
 
 class FlagSubmissionLock(models.Model):
-    team = models.ForeignKey(Team, on_delete=models.CASCADE, related_name="flag_locks")
+    team = models.ForeignKey("accounts.Team", on_delete=models.CASCADE, related_name="flag_locks")
     challenge = models.ForeignKey(Challenge, on_delete=models.CASCADE, related_name="flag_locks")
     failed_count = models.IntegerField(default=0)
     locked_until = models.DateTimeField(blank=True, null=True)

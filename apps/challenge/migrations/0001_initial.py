@@ -11,7 +11,7 @@ class Migration(migrations.Migration):
     initial = True
 
     dependencies = [
-        ('teams', '__first__'),
+        ('accounts', '0001_initial'),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
@@ -41,7 +41,7 @@ class Migration(migrations.Migration):
                 ('result', models.CharField(choices=[('CORRECT', 'Correct'), ('INCORRECT', 'Incorrect'), ('ALREADY_SOLVED', 'Already Solved'), ('TOO_MANY_ATTEMPTS', 'Too Many Attempts')], max_length=30)),
                 ('created_at', models.DateTimeField(auto_now_add=True)),
                 ('challenge', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='flag_submissions', to='challenge.challenge')),
-                ('team', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='flag_submissions', to='teams.team')),
+                ('team', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='flag_submissions', to='accounts.team')),
                 ('user', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='flag_submissions', to=settings.AUTH_USER_MODEL)),
             ],
             options={
@@ -58,7 +58,7 @@ class Migration(migrations.Migration):
                 ('last_failed_at', models.DateTimeField(blank=True, null=True)),
                 ('updated_at', models.DateTimeField(auto_now=True)),
                 ('challenge', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='flag_locks', to='challenge.challenge')),
-                ('team', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='flag_locks', to='teams.team')),
+                ('team', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='flag_locks', to='accounts.team')),
             ],
             options={
                 'db_table': 'flag_submission_locks',
@@ -74,7 +74,7 @@ class Migration(migrations.Migration):
                 ('opened_at', models.DateTimeField(auto_now_add=True)),
                 ('solve_deadline_at', models.DateTimeField()),
                 ('challenge', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='opened_challenges', to='challenge.challenge')),
-                ('team', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='opened_challenges', to='teams.team')),
+                ('team', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='opened_challenges', to='accounts.team')),
             ],
             options={
                 'db_table': 'opened_challenges',
@@ -92,7 +92,7 @@ class Migration(migrations.Migration):
                 ('solved_at', models.DateTimeField(auto_now_add=True)),
                 ('challenge', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='solves', to='challenge.challenge')),
                 ('solved_by_user', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='solves', to=settings.AUTH_USER_MODEL)),
-                ('team', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='solves', to='teams.team')),
+                ('team', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='solves', to='accounts.team')),
             ],
             options={
                 'db_table': 'solves',

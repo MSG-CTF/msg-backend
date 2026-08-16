@@ -12,24 +12,31 @@ from apps.challenge.models import (
     Solve,
 )
 from apps.challenge.services import hash_flag, is_correct_flag
-from apps.common.formatters import isoformat_z, number_value
-from apps.common.responses import api_response
+from apps.common.response import fail, ok
 from apps.instances.models import Instance
-from apps.instances.services import ACTIVE_INSTANCE_STATUSES, serialize_instance
+from apps.instances.services import ACTIVE_INSTANCE_STATUSES, isoformat_z, serialize_instance
+
+
+def number_value(value):
+    # Decimal 점수를 API 응답용 숫자로 바꾼다
+    if value is None:
+        return None
+
+    return int(value) if value == int(value) else float(value)
 
 
 class ChallengeDetailView(APIView):
     def get(self, request, challenge_id):
         team = request.user.team
         if team is None:
-            return api_response("USER_HAS_NO_TEAM", "소속된 팀이 없습니다", None, status=404)
+            return fail("USER_HAS_NO_TEAM", "소속된 팀이 없습니다", 404)
 
         challenge = Challenge.objects.filter(challenge_id=challenge_id).first()
         if challenge is None:
-            return api_response("CHALLENGE_NOT_FOUND", "존재하지 않는 문제 ID입니다.", None, status=404)
+            return fail("CHALLENGE_NOT_FOUND", "존재하지 않는 문제 ID입니다.", 404)
         opened_challenge = OpenedChallenge.objects.filter(team=team, challenge=challenge).first()
         if opened_challenge is None:
-            return api_response("CHALLENGE_LOCKED", "아직 개방되지 않은 문제입니다.", None, status=403)
+            return fail("CHALLENGE_LOCKED", "아직 개방되지 않은 문제입니다.", 403)
 
         solve = Solve.objects.filter(team=team, challenge=challenge).first()
         instance = (
@@ -39,7 +46,7 @@ class ChallengeDetailView(APIView):
             .first()
         )
 
-        return api_response(
+        return ok(
             message="문제 상세 조회 성공",
             data={
                 "challenge_id": str(challenge.challenge_id),
@@ -60,22 +67,22 @@ class ChallengeSubmitView(APIView):
     def post(self, request, challenge_id):
         team = request.user.team
         if team is None:
-            return api_response("USER_HAS_NO_TEAM", "소속된 팀이 없습니다", None, status=404)
+            return fail("USER_HAS_NO_TEAM", "소속된 팀이 없습니다", 404)
 
         flag = request.data.get("flag")
         if not flag:
-            return api_response("INVALID_REQUEST", "요청 값이 올바르지 않습니다", None, status=400)
+            return fail("INVALID_REQUEST", "요청 값이 올바르지 않습니다", 400)
 
         challenge = Challenge.objects.filter(challenge_id=challenge_id).first()
         if challenge is None:
-            return api_response("CHALLENGE_NOT_FOUND", "존재하지 않는 문제 ID입니다.", None, status=404)
+            return fail("CHALLENGE_NOT_FOUND", "존재하지 않는 문제 ID입니다.", 404)
 
         opened_challenge = OpenedChallenge.objects.filter(team=team, challenge=challenge).first()
         if opened_challenge is None:
-            return api_response("CHALLENGE_LOCKED", "아직 개방되지 않은 문제입니다.", None, status=403)
+            return fail("CHALLENGE_LOCKED", "아직 개방되지 않은 문제입니다.", 403)
 
         if Solve.objects.filter(team=team, challenge=challenge).exists():
-            return api_response("ALREADY_SOLVED", "이미 정답을 맞춘 문제입니다.", None, status=409)
+            return fail("ALREADY_SOLVED", "이미 정답을 맞춘 문제입니다.", 409)
 
         now = timezone.now()
         submitted_flag_hash = hash_flag(flag)
@@ -95,11 +102,11 @@ class ChallengeSubmitView(APIView):
                     submitted_flag_hash=submitted_flag_hash,
                     result=FlagSubmission.SubmissionResult.TOO_MANY_ATTEMPTS,
                 )
-                return api_response(
+                return fail(
                     "TOO_MANY_ATTEMPTS",
                     "잘못된 플래그를 3회 연속 제출했습니다. 30초 후 다시 시도해주세요.",
+                    429,
                     {"retry_after_seconds": retry_after_seconds},
-                    status=429,
                 )
 
             if flag_lock.locked_until and flag_lock.locked_until <= now:
@@ -132,7 +139,7 @@ class ChallengeSubmitView(APIView):
                     submitted_flag_hash=submitted_flag_hash,
                     result=result,
                 )
-                return api_response(code, message, data, status=status_code)
+                return fail(code, message, status_code, data)
 
             is_extra_dice_granted = opened_challenge.solve_deadline_at >= now
             earned_score = challenge.score
@@ -148,7 +155,7 @@ class ChallengeSubmitView(APIView):
                     is_extra_dice_granted=is_extra_dice_granted,
                 )
             except IntegrityError:
-                return api_response("ALREADY_SOLVED", "이미 정답을 맞춘 문제입니다.", None, status=409)
+                return fail("ALREADY_SOLVED", "이미 정답을 맞춘 문제입니다.", 409)
 
             flag_lock.failed_count = 0
             flag_lock.locked_until = None
@@ -163,7 +170,7 @@ class ChallengeSubmitView(APIView):
                 result=FlagSubmission.SubmissionResult.CORRECT,
             )
 
-        return api_response(
+        return ok(
             message="정답입니다!",
             data={
                 "challenge_id": str(challenge.challenge_id),
