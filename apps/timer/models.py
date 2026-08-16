@@ -27,27 +27,24 @@ class Contest(models.Model):
     def __str__(self):
         return self.name
 
-    @property
-    def status(self):
-        now = timezone.now()
+    def snapshot(self, now=None):
+        if now is None:
+            now = timezone.now()
+
         if now < self.start_time:
-            return "BEFORE"
-        if now > self.end_time:
-            return "ENDED"
-        return "RUNNING"
-
-    @property
-    def remaining_time(self):
-        now = timezone.now()
-        if now >= self.end_time: 
-            return 0
-        if now < self.start_time: 
-            return int( (self.end_time - self.start_time).total_seconds())
-        return int( (self.end_time - now).total_seconds()) 
-
-    @property
-    def time_until_start(self):
-        now = timezone.now()
-        if now >= self.start_time:
-            return 0
-        return int( (self.start_time - now).total_seconds())
+            return {
+                "status": "BEFORE",
+                "remaining_seconds": 0,
+                "time_until_start": int((self.start_time - now).total_seconds()),
+            }
+        if now >= self.end_time:
+            return {
+                "status": "ENDED",
+                "remaining_seconds": 0,
+                "time_until_start": 0,
+            }
+        return {
+            "status": "RUNNING",
+            "remaining_seconds": int((self.end_time - now).total_seconds()),
+            "time_until_start": 0,
+        }
