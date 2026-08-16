@@ -132,3 +132,17 @@ class TimerAPITest(APITestCase):
                 end_time=now,
                 is_active=False,
             )
+
+    #BEFORE 상태에서 remaining_seconds와 remaining_display 값을 확인하는 테스트
+    def test_before_returns_total_contest_duration(self):
+        now = timezone.now()
+        Contest.objects.create(
+            name="test",
+            start_time=now + timedelta(hours=1),
+            end_time=now + timedelta(hours=13),
+            is_active=True,
+        )
+        data = self.client.get("/api/v1/timer").data["data"]
+        self.assertEqual(data["remaining_seconds"], 43200)
+        self.assertEqual(data["remaining_display"], "12:00:00")
+        self.assertAlmostEqual(data["time_until_start"], 3600, delta=5)

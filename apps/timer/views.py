@@ -1,4 +1,3 @@
-from django.shortcuts import render
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
@@ -19,7 +18,7 @@ def contest_timer(request):
     if contest is None:
         return Response({
             "code": "SUCCESS",
-            "message": "진행 중인 대회가 없습니다.",
+            "message": "활성화된 대회가 없습니다.",
             "data": None,
         })
 

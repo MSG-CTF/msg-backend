@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MSG CTF · 타이머 확인</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap');
+
+  :root {
+    --bg: #0a0e14;
+    --panel: #111823;
+    --line: #1e2a3a;
+    --dim: #4a5a72;
+    --text: #c8d4e4;
+    --accent: #3ddc97;   /* running */
+    --before: #f2c14e;   /* before */
+    --ended: #e06c75;    /* ended */
+    --none: #4a5a72;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Space Grotesk', sans-serif;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background-image:
+      radial-gradient(circle at 20% 0%, rgba(61,220,151,0.04), transparent 40%),
+      radial-gradient(circle at 80% 100%, rgba(242,193,78,0.03), transparent 40%);
+  }
+
+  .console {
+    width: 100%;
+    max-width: 560px;
+  }
+
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-bottom: 16px;
+    margin-bottom: 24px;
+    border-bottom: 1px solid var(--line);
+  }
+  .brand {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    letter-spacing: 0.18em;
+    color: var(--dim);
+    text-transform: uppercase;
+  }
+  .brand b { color: var(--text); font-weight: 700; }
+
+  .endpoint {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--dim);
+  }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 36px 32px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  /* status accent bar */
+  .card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 3px;
+    background: var(--curr, var(--none));
+    transition: background 0.4s;
+  }
+
+  .status-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 4px;
+  }
+  .dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    background: var(--curr, var(--none));
+    box-shadow: 0 0 12px var(--curr, transparent);
+  }
+  .status-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    letter-spacing: 0.16em;
+    color: var(--curr, var(--none));
+    font-weight: 700;
+  }
+
+  .contest-name {
+    font-size: 26px;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 28px;
+    letter-spacing: -0.01em;
+  }
+  .contest-name.empty { color: var(--dim); font-weight: 500; font-size: 20px; }
+
+  .countdown-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.16em;
+    color: var(--dim);
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+  .countdown {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 64px;
+    font-weight: 700;
+    line-height: 1;
+    color: var(--curr, var(--text));
+    letter-spacing: 0.02em;
+    font-variant-numeric: tabular-nums;
+  }
+  .countdown.dim { color: var(--dim); font-size: 40px; }
+
+  .meta {
+    margin-top: 28px;
+    padding-top: 20px;
+    border-top: 1px solid var(--line);
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px 20px;
+  }
+  .meta div { display: flex; flex-direction: column; gap: 3px; }
+  .meta .k {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    color: var(--dim);
+    text-transform: uppercase;
+  }
+  .meta .v {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    color: var(--text);
+  }
+
+  .controls {
+    margin-top: 24px;
+    display: flex;
+    gap: 10px;
+    align-items: center;
+  }
+  button {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    background: transparent;
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 10px 16px;
+    cursor: pointer;
+    transition: border-color 0.2s, color 0.2s;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .auto {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--dim);
+    display: flex; align-items: center; gap: 6px;
+    margin-left: auto;
+  }
+  .auto input { accent-color: var(--accent); }
+
+  .raw {
+    margin-top: 20px;
+    background: #0a0f16;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 14px 16px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--dim);
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 180px;
+    overflow-y: auto;
+  }
+  .raw .key { color: #7aa2d6; }
+  .raw .str { color: var(--accent); }
+  .raw .num { color: var(--before); }
+  .raw .null { color: var(--ended); }
+
+  .error {
+    color: var(--ended);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    line-height: 1.6;
+  }
+  .hint {
+    margin-top: 14px;
+    font-size: 11px;
+    color: var(--dim);
+    font-family: 'JetBrains Mono', monospace;
+    line-height: 1.7;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; }
+  }
+</style>
+</head>
+<body>
+  <div class="console">
+    <div class="topbar">
+      <div class="brand"><b>MSG CTF</b> · timer monitor</div>
+      <div class="endpoint">GET /api/v1/timer</div>
+    </div>
+
+    <div class="card" id="card">
+      <div class="status-row">
+        <span class="dot"></span>
+        <span class="status-label" id="statusLabel">CONNECTING…</span>
+      </div>
+      <div class="contest-name" id="contestName">—</div>
+
+      <div class="countdown-label" id="cdLabel">남은 시간</div>
+      <div class="countdown dim" id="countdown">--:--:--</div>
+
+      <div class="meta" id="meta" style="display:none">
+        <div><span class="k">start</span><span class="v" id="mStart">—</span></div>
+        <div><span class="k">end</span><span class="v" id="mEnd">—</span></div>
+        <div><span class="k">remaining_time</span><span class="v" id="mRemain">—</span></div>
+        <div><span class="k">contest_id</span><span class="v" id="mId">—</span></div>
+      </div>
+
+      <div class="controls">
+        <button id="refreshBtn">↻ 새로고침</button>
+        <label class="auto">
+          <input type="checkbox" id="autoChk" checked> 1초마다 자동
+        </label>
+      </div>
+
+      <div class="raw" id="raw">응답 대기 중…</div>
+      <div class="hint" id="hint"></div>
+    </div>
+  </div>
+
+<script>
+  const API = 'http://127.0.0.1:8000/api/v1/timer';
+
+  const el = (id) => document.getElementById(id);
+  const card = el('card');
+
+  const COLORS = {
+    RUNNING: 'var(--accent)',
+    BEFORE:  'var(--before)',
+    ENDED:   'var(--ended)',
+    NONE:    'var(--none)',
+  };
+
+  // 남은 초를 로컬에서 매초 줄여 보여주기 위한 상태
+  let localRemain = null;   // 초
+  let localMode = null;     // 'remaining' | 'until_start' | null
+  let tickTimer = null;
+
+  function fmt(sec) {
+    if (sec == null || sec < 0) sec = 0;
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = Math.floor(sec % 60);
+    const p = (n) => String(n).padStart(2, '0');
+    return `${p(h)}:${p(m)}:${p(s)}`;
+  }
+
+  function fmtTime(iso) {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    if (isNaN(d)) return iso;
+    // KST 변환은 프론트 책임 (규약)
+    return d.toLocaleString('ko-KR', { hour12: false });
+  }
+
+  function setStatus(status) {
+    const color = COLORS[status] || COLORS.NONE;
+    card.style.setProperty('--curr', color);
+    el('statusLabel').textContent = status || 'UNKNOWN';
+  }
+
+  function highlightJSON(obj) {
+    const json = JSON.stringify(obj, null, 2);
+    return json
+      .replace(/("(\\.|[^"\\])*")(\s*:)/g, '<span class="key">$1</span>$3')
+      .replace(/:\s*("(\\.|[^"\\])*")/g, ': <span class="str">$1</span>')
+      .replace(/:\s*(-?\d+\.?\d*)/g, ': <span class="num">$1</span>')
+      .replace(/:\s*(null)/g, ': <span class="null">$1</span>');
+  }
+
+  async function fetchTimer() {
+    try {
+      const res = await fetch(API, { headers: { 'Accept': 'application/json' } });
+      const body = await res.json();
+      el('raw').innerHTML = highlightJSON(body);
+      el('hint').textContent = '';
+      render(body);
+    } catch (err) {
+      setStatus('NONE');
+      el('statusLabel').textContent = 'NO CONNECTION';
+      el('contestName').textContent = '서버에 연결할 수 없습니다';
+      el('contestName').className = 'contest-name empty';
+      el('countdown').textContent = '--:--:--';
+      el('countdown').className = 'countdown dim';
+      el('meta').style.display = 'none';
+      el('raw').innerHTML = '<span class="error">' + String(err) + '</span>';
+      el('hint').innerHTML =
+        '· Django 서버가 켜져 있나요? <b>python3 manage.py runserver</b><br>' +
+        '· 브라우저 CORS 차단일 수 있어요 (아래 안내 참고).';
+      stopTick();
+    }
+  }
+
+  function render(body) {
+    const data = body && body.data;
+
+    // data: null → 활성 대회 없음
+    if (!data) {
+      setStatus('NONE');
+      el('statusLabel').textContent = 'NO CONTEST';
+      el('contestName').textContent = body.message || '진행 중인 대회가 없습니다';
+      el('contestName').className = 'contest-name empty';
+      el('cdLabel').textContent = '상태';
+      el('countdown').textContent = '대회 없음';
+      el('countdown').className = 'countdown dim';
+      el('meta').style.display = 'none';
+      stopTick();
+      return;
+    }
+
+    const status = data.status;
+    setStatus(status);
+    el('contestName').textContent = data.name || '(이름 없음)';
+    el('contestName').className = 'contest-name';
+    el('meta').style.display = 'grid';
+    el('mStart').textContent = fmtTime(data.start_time);
+    el('mEnd').textContent = fmtTime(data.end_time);
+    el('mRemain').textContent = (data.remaining_time ?? '—') + 's';
+    el('mId').textContent = (data.contest_id || '—').toString().slice(0, 8) + '…';
+
+    el('countdown').className = 'countdown';
+
+    if (status === 'BEFORE') {
+      el('cdLabel').textContent = '대회 시작까지';
+      localRemain = data.time_until_start ?? 0;
+      localMode = 'until_start';
+      startTick();
+    } else if (status === 'RUNNING') {
+      el('cdLabel').textContent = '종료까지 남은 시간';
+      localRemain = data.remaining_time ?? 0;
+      localMode = 'remaining';
+      startTick();
+    } else { // ENDED
+      el('cdLabel').textContent = '상태';
+      el('countdown').textContent = '대회 종료';
+      el('countdown').className = 'countdown dim';
+      stopTick();
+    }
+  }
+
+  function startTick() {
+    stopTick();
+    el('countdown').textContent = fmt(localRemain);
+    tickTimer = setInterval(() => {
+      if (localRemain == null) return;
+      localRemain = Math.max(0, localRemain - 1);
+      el('countdown').textContent = fmt(localRemain);
+    }, 1000);
+  }
+  function stopTick() {
+    if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
+  }
+
+  // 자동 폴링 (서버에 다시 물어봐서 값 보정)
+  let pollTimer = null;
+  function startPoll() {
+    stopPoll();
+    pollTimer = setInterval(fetchTimer, 5000); // 5초마다 서버 재조회
+  }
+  function stopPoll() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  }
+
+  el('refreshBtn').addEventListener('click', fetchTimer);
+  el('autoChk').addEventListener('change', (e) => {
+    if (e.target.checked) { startPoll(); } else { stopPoll(); }
+  });
+
+  // 시작
+  fetchTimer();
+  startPoll();
+</script>
+</body>
+</html>
