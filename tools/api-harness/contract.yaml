@@ -19,12 +19,18 @@ url_rules:
   # 리소스명 복수형 규칙 검사에서 예외로 둘 첫 세그먼트 (싱글턴/기능 도메인명이라 복수형이 안 맞음)
   resource_name_plural_skip: [me, auth, admin, internal, login, logout, refresh, board, koth, ranking, leaderboard, timer]
 
-# team_id 등은 정수(Long), card_id/token 등은 문자열이어야 한다.
 # instance_id는 규약 원문의 ID 타입 표에 없고, 실제 명세 전체가 스케줄러 발급 UUID 문자열을
 # 일관되게 쓰고 있어 Long 목록에 넣지 않는다.
+# team_id / club_id / koth_challenge_id는 2026-08-16 KOTH 템플릿 확정 반영으로 UUID 문자열이
+# 되었다. 명세와 출제자 배포용 템플릿이 모두 UUID를 쓰므로 Long 목록에서 옮긴다.
+# challenge_id도 2026-08-08 규약 개정으로 UUID 문자열이 됐다 (/api/v1/board/opened_challenges
+# 문서에 명시: "challenge_id: String(UUID), 2026-08-08 규약 개정으로 UUID 문자열"). contract.yaml이
+# 그 개정을 반영하지 못하고 있던 것을 여기서 맞춘다.
+# user_id / history_id도 UUID 문자열이다 (강지원 확인, 2026-08-16). 이제 모든 id 필드가
+# UUID 문자열이라 long_fields는 비운다.
 id_types:
-  long_fields: [team_id, user_id, challenge_id, club_id, history_id, koth_challenge_id]
-  string_fields: [card_id, token]
+  long_fields: []
+  string_fields: [card_id, token, team_id, club_id, koth_challenge_id, challenge_id, user_id, history_id, instance_id]
 
 # 타임스탬프 필드는 ISO-8601 UTC (끝에 Z) 형식이어야 한다.
 timestamp_must_be_iso_utc: true
@@ -55,6 +61,11 @@ enum_rules:
   - leaf: type
     parents: [cell, cells]
     values: [START, CHALLENGE, CHANCE, AIRPORT, QUARANTINE, ROULETTE]
+  # KOTH 문제 공개 상태. 동아리가 아니라 문제 단위로 관리한다(한 동아리의 문제 둘이 서로 다른
+  # open_group에 들어갈 수 있음).
+  - leaf: status
+    parents: [club, clubs, challenge, challenges]
+    values: [SCHEDULED, ACTIVE, CLOSED]
 
 # 공통 에러 코드: code 값이 이 목록에 있으면 http 값이 일치하는지 검증한다.
 common_error_codes:
@@ -66,3 +77,8 @@ common_error_codes:
   - {http: 400, code: INVALID_REQUEST}
   - {http: 404, code: USER_HAS_NO_TEAM}
   - {http: 500, code: INTERNAL_ERROR}
+  # KOTH 내부 API 전용 (/internal/koth/scores, /internal/koth/team_tokens/verify, /internal/teams)
+  - {http: 400, code: INVALID_PERIOD}
+  - {http: 401, code: INVALID_INTERNAL_TOKEN}
+  - {http: 409, code: PERIOD_NOT_READY}
+  - {http: 500, code: SCORING_FAILED}
