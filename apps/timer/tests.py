@@ -3,6 +3,8 @@ from datetime import timedelta
 from django.utils import timezone
 from rest_framework.test import APITestCase
 from apps.timer.models import Contest
+from django.db import IntegrityError
+
 
 class TimerAPITest(APITestCase):
     def test_running_when_contest_in_progress(self):
@@ -54,3 +56,79 @@ class TimerAPITest(APITestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["code"], "SUCCESS")
         self.assertIsNone(response.data["data"])
+
+    def test_response_has_exact_fields(self): #응답 필드 전체 확인
+        now = timezone.now()
+        Contest.objects.create(
+            name="test",
+            start_time=now - timedelta(hours=1),
+            end_time=now + timedelta(hours=11),
+            is_active=True,
+        )
+        response = self.client.get("/api/v1/timer")
+        self.assertEqual(
+            set(response.data["data"].keys()),
+            {
+                "name",
+                "status",
+                "start_time",
+                "end_time",
+                "remaining_seconds",
+                "remaining_display",
+                "time_until_start",
+            },
+        )
+
+
+    #remaining_seconds와 remaining_display 확인
+    def test_remaining_seconds_and_display_match(self): 
+        now = timezone.now()
+        Contest.objects.create(
+            name="test",
+            start_time=now - timedelta(hours=1),
+            end_time=now + timedelta(hours=2),
+            is_active=True,
+        )
+        data = self.client.get("/api/v1/timer").data["data"]
+        self.assertAlmostEqual(data["remaining_seconds"], 7200, delta=5)
+        self.assertRegex(data["remaining_display"], r"^01:59:\d{2}$")
+
+    #RUNNING + 0초 해결
+    def test_running_at_exact_end_time_is_ended(self):
+        now = timezone.now()
+        contest = Contest.objects.create(
+            name="test",
+            start_time=now - timedelta(hours=12),
+            end_time=now + timedelta(hours=1),
+            is_active=True,
+        )
+        snapshot = contest.snapshot(now=contest.end_time)
+        self.assertEqual(snapshot["status"], "ENDED")
+        self.assertEqual(snapshot["remaining_seconds"], 0)
+
+    #제약 위반 테스트
+    def test_second_active_contest_rejected(self):
+        now = timezone.now()
+        Contest.objects.create(
+            name="first",
+            start_time=now,
+            end_time=now + timedelta(hours=12),
+            is_active=True,
+        )
+        with self.assertRaises(IntegrityError):
+            Contest.objects.create(
+                name="second",
+                start_time=now,
+                end_time=now + timedelta(hours=12),
+                is_active=True,
+            )
+
+    def test_start_time_after_end_time_rejected(self):
+        now = timezone.now()
+        with self.assertRaises(IntegrityError):
+            Contest.objects.create(
+                name="invalid",
+                start_time=now + timedelta(hours=1),
+                end_time=now,
+                is_active=False,
+            )
