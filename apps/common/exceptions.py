@@ -1,6 +1,9 @@
 from rest_framework import status
 from rest_framework.exceptions import APIException
 from rest_framework.response import Response
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class APIError(APIException):
@@ -74,13 +77,25 @@ def envelope_exception_handler(exc, context):
 
     response = drf_exception_handler(exc, context)
     if response is None:
-        return None
+        # DRF 가 모르는 예외는 Django 기본 HTML 500 으로 넘어간다
+        # 프론트는 {code, message, data} 만 처리하므로 봉투로 감싼다
+        # 실제 오류 내용은 응답이 아니라 로그에만 남긴다
+        logger.exception("unhandled exception: %s", exc)
+        return Response(
+            {
+                "code": "INTERNAL_ERROR",
+                "message": "서버 오류가 발생했습니다",
+                "data": None
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
     fallback = {
         401: ("TOKEN_MISSING", "로그인이 필요합니다"),
         403: ("FORBIDDEN", "권한이 필요합니다"),
         404: ("NOT_FOUND", "대상을 찾을 수 없습니다"),
         405: ("METHOD_NOT_ALLOWED", "허용되지 않은 메서드입니다"),
+        429: ("TOO_MANY_REQUESTS", "요청이 너무 많습니다. 잠시 후 다시 시도해주세요"),
     }
     code, message = fallback.get(
         response.status_code, ("INVALID_REQUEST", "요청 값이 올바르지 않습니다")
