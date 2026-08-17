@@ -19,9 +19,11 @@ SORT_FIELDS = {
 
 DEFAULT_PAGE_SIZE = 20
 MAX_PAGE_SIZE = 100
+MAX_PAGE = 10_000
+MAX_BAN_REASON_LENGTH = 500
 
 
-def _page_number(raw, default):
+def _page_number(raw, default, maximum=None):
     if raw in (None, ""):
         return default
     try:
@@ -30,6 +32,8 @@ def _page_number(raw, default):
         raise InvalidRequest("page 와 size 는 정수여야 합니다")
     if value < 1:
         raise InvalidRequest("page 와 size 는 1 이상이어야 합니다")
+    if maximum and value > maximum:
+        raise InvalidRequest(f"page 는 {maximum} 이하여야 합니다")
     return value
 
 
@@ -42,7 +46,7 @@ def team_list(request):
     if sort not in SORT_FIELDS:
         raise InvalidRequest("정렬 기준이 올바르지 않습니다. (score, name 중 선택)")
 
-    page = _page_number(request.query_params.get("page"), 1)
+    page = _page_number(request.query_params.get("page"), 1, MAX_PAGE)
     size = min(_page_number(request.query_params.get("size"), DEFAULT_PAGE_SIZE), MAX_PAGE_SIZE)
 
     queryset = Team.objects.prefetch_related(
@@ -104,9 +108,13 @@ def _ban(request, team_id):
     reason = request.data.get("ban_reason")
     if reason is None:
         raise InvalidRequest("필수 항목이 누락되었습니다: ban_reason")
-    reason = str(reason).strip()
+    if not isinstance(reason, str):
+        raise InvalidRequest("ban_reason 은 문자열이어야 합니다")
+    reason = reason.strip()
     if not reason:
         raise InvalidRequest("벤 사유는 1자 이상 입력해야 합니다")
+    if len(reason) > MAX_BAN_REASON_LENGTH:
+        raise InvalidRequest(f"벤 사유는 {MAX_BAN_REASON_LENGTH}자 이하여야 합니다")
 
     with transaction.atomic():
         team = _get_team_for_update(team_id)

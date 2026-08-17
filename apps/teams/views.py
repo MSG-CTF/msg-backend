@@ -6,6 +6,7 @@ from django.db import transaction
 from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
 
+from apps.accounts.models import Team
 from apps.common.exceptions import UserHasNoTeam
 from apps.common.jwt import hash_token
 from apps.common.permissions import IsAuthenticated
@@ -82,6 +83,7 @@ def mileage_history(request):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def qr_token(request):
+    """POST /api/v1/teams/me/qr_token — QR 결제 토큰 발급 (5분 만료)."""
     team = _get_team(request)
 
     now = timezone.now().replace(microsecond=0)
@@ -89,11 +91,10 @@ def qr_token(request):
     expires_at = now + datetime.timedelta(minutes=QR_TOKEN_TTL_MINUTES)
 
     with transaction.atomic():
-        # 기존 ACTIVE 토큰을 먼저 무효화한다.
-        # uq_payment_tokens_one_active 제약 때문에 순서를 바꾸면 안 된다.
+        Team.objects.select_for_update().get(pk=team.team_id)
+
         old_ids = list(
-            PaymentToken.objects.select_for_update()
-            .filter(team=team, status=PaymentTokenStatus.ACTIVE)
+            PaymentToken.objects.filter(team=team, status=PaymentTokenStatus.ACTIVE)
             .values_list("pk", flat=True)
         )
         if old_ids:
