@@ -37,15 +37,17 @@
 
 ## ID 타입
 
+전부 UUID 문자열. (Long이던 시절은 폐기)
+
 | 필드 | 타입 | 예시 |
 | --- | --- | --- |
-| `team_id`, `club_id`, `koth_challenge_id`, `challenge_id`, `user_id`, `history_id` | `String` (UUID) | `"018f3f1e-0100-7a91-a30b-630000000003"` |
+| `team_id`, `user_id`, `challenge_id`, `club_id`, `history_id`, `koth_challenge_id`, `instance_id` | `String(UUID)` | `"018f3f1e-0100-7a91-a30b-630000000001"` |
 | `card_id` | `String` | `"card_reroll"` (enum 성격) |
 | `token` (QR 결제) | `String` | `"pt_9f8a3c2e"` |
 
 `team_id`, `club_id`, `koth_challenge_id`는 2026-08-16 KOTH 템플릿 확정에 맞춰 UUID 문자열로 바뀌었다. 출제자 배포용 템플릿과 KOTH 명세가 모두 UUID를 쓴다.
 `challenge_id`는 2026-08-08 규약 개정으로 이미 UUID 문자열이었으나 이 표에는 반영되지 않고 있었다. `/api/v1/board/opened_challenges` 명세가 근거다.
-`user_id`, `history_id`는 2026-08-17 플랫폼팀 확정으로 Long에서 UUID 문자열로 바뀌었다. 전 API의 ID 타입이 UUID로 통일된다.
+`user_id`, `history_id`도 UUID 문자열이다 (강지원 확인, 2026-08-16).
 
 ## 시간 포맷
 
