@@ -18,7 +18,7 @@
 
 - `club_id`: 동아리 식별값 (UUID)
 - `koth_challenge_id`: 문제 식별값 (UUID)
-- `category`: `WEB` / `SYSTEM` / `CRYPTO` / `REV` / `FORENSIC` / `MISC` 중 하나, 문제의 도메인 분류. `info.yaml`의 최상위 `category: koth`(챌린지 종류)와는 다른 값이며, 출제자가 직접 정하지 않음
+- `category`: `WEB` / `PWN` / `CRYPTO` / `REV` / `FORENSIC` / `MISC` 중 하나, 문제의 도메인 분류. `info.yaml`의 최상위 `category: koth`(챌린지 종류)와는 다른 값이며, 출제자가 직접 정하지 않음
 - `open_group`: 문제 공개 순번, 대회 전체 스케줄이라 플랫폼이 배정
 - `status`: `SCHEDULED` / `ACTIVE` / `CLOSED`, 플랫폼이 관리하며 출제자가 지정하지 않음
 - 팀 토큰 검증 API 주소: `/internal/koth/team_tokens/verify`

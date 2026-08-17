@@ -21,7 +21,7 @@ url_rules:
   # 리소스명 복수형 규칙 검사에서 예외로 둘 첫 세그먼트 (싱글턴/기능 도메인명이라 복수형이 안 맞음)
   resource_name_plural_skip: [me, auth, admin, internal, login, logout, refresh, board, koth, ranking, leaderboard, timer]
 
-# user_id 등은 정수(Long), card_id/token 등은 문자열이어야 한다.
+# card_id/token 등은 문자열이어야 한다.
 # instance_id는 규약 원문의 ID 타입 표에 없고, 실제 명세 전체가 스케줄러 발급 UUID 문자열을
 # 일관되게 쓰고 있어 Long 목록에 넣지 않는다.
 # team_id / club_id / koth_challenge_id는 2026-08-16 KOTH 템플릿 확정 반영으로 UUID 문자열이
@@ -29,9 +29,11 @@ url_rules:
 # challenge_id도 2026-08-08 규약 개정으로 UUID 문자열이 됐다 (/api/v1/board/opened_challenges
 # 문서에 명시: "challenge_id: String(UUID), 2026-08-08 규약 개정으로 UUID 문자열"). contract.yaml이
 # 그 개정을 반영하지 못하고 있던 것을 여기서 맞춘다.
+# user_id / history_id도 2026-08-17 플랫폼팀 확정으로 UUID 문자열로 옮긴다. 전 API가 UUID로
+# 통일된다.
 id_types:
-  long_fields: [user_id, history_id]
-  string_fields: [card_id, token, team_id, club_id, koth_challenge_id, challenge_id]
+  long_fields: []
+  string_fields: [card_id, token, team_id, club_id, koth_challenge_id, challenge_id, user_id, history_id]
 
 # 타임스탬프 필드는 ISO-8601 UTC (끝에 Z) 형식이어야 한다.
 timestamp_must_be_iso_utc: true
@@ -40,7 +42,7 @@ timestamp_must_be_iso_utc: true
 success_code_value: SUCCESS
 
 # 허용되는 HTTP status code 목록
-allowed_http_status: [200, 202, 400, 401, 403, 404, 409, 500]
+allowed_http_status: [200, 202, 400, 401, 403, 404, 409, 429, 500]
 
 # leaf: JSON에서 실제로 등장하는 필드명(예: "type", "status")
 # parents: 생략하면 leaf 이름만으로 전역 매칭 (role/difficulty/category 처럼 문맥 없이도 안전한 경우)
@@ -52,7 +54,7 @@ enum_rules:
   - leaf: difficulty
     values: [EASY, MEDIUM, HARD]
   - leaf: category
-    values: [WEB, SYSTEM, REV, CRYPTO, FORENSIC, MISC]
+    values: [WEB, PWN, REV, CRYPTO, FORENSIC, MISC]
   - leaf: status
     parents: [instance, instances]
     values: [REQUESTED, SCHEDULING, PROVISIONING, RUNNING, RESTARTING, RESETTING, STOPPING, STOPPED, FAILED, EXPIRED, CLEANUP_PENDING, CLEANED]
@@ -83,3 +85,5 @@ common_error_codes:
   - {http: 401, code: INVALID_INTERNAL_TOKEN}
   - {http: 409, code: PERIOD_NOT_READY}
   - {http: 500, code: SCORING_FAILED}
+  # KOTH team_tokens/verify, 플래그 제출 공통
+  - {http: 429, code: TOO_MANY_ATTEMPTS}
