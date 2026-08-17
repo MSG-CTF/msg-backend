@@ -84,5 +84,6 @@ common_error_codes:
   - {http: 401, code: INVALID_INTERNAL_TOKEN}
   - {http: 409, code: PERIOD_NOT_READY}
   - {http: 500, code: SCORING_FAILED}
-  # KOTH team_tokens/verify, 플래그 제출 공통
+  # 플래그 제출 전용. team_tokens/verify는 인증 전 단계라 플랫폼이 차단하지 않으므로
+  # 429를 반환하지 않는다 (admin.md "검증 제한 정책" 참고).
   - {http: 429, code: TOO_MANY_ATTEMPTS}
