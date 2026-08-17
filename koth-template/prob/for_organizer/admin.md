@@ -107,9 +107,9 @@ Header:
 
 ### 검증 제한 정책
 
-플래그 제출(`/api/v1/challenges/{challenge_id}/submit`)과 동일한 정책을 씁니다.
+숫자(3회 연속 실패, 30초 락)는 플래그 제출(`/api/v1/challenges/{challenge_id}/submit`)과 같지만, 제한 단위는 다릅니다. 플래그 제출은 이미 인증된 `team_id`(JWT)로 제한하지만, 팀 토큰 검증은 인증 전 단계라 안정적인 팀 식별자가 없습니다. 그래서 `koth_challenge_id` 단위로 제한합니다 — 어떤 팀 토큰을 시도하든 같은 문제에 대한 실패는 같은 카운터에 쌓이고, 어느 팀이든 한 번 성공하면 그 문제의 카운터가 초기화됩니다.
 
-- 제출 제한은 `team_token + koth_challenge_id` 단위로 적용합니다.
+- 제출 제한은 `koth_challenge_id` 단위로 적용합니다.
 - 검증 실패(`valid: false`) 시 연속 실패 횟수를 1 증가시킵니다.
 - 3번째 연속 실패가 발생한 요청은 락을 생성하고 429 `TOO_MANY_ATTEMPTS`를 반환합니다.
 - 락 시간은 30초이며, `locked_until = 현재 서버 시각 + 30초`로 계산합니다.
