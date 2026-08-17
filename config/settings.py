@@ -24,9 +24,16 @@ load_dotenv(BASE_DIR / ".env")
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "django-insecure-*%5a3*nw#g2)2%z8&36xna3lpt22!9_esyox_x9##%@+2q9o10")
+# 기본값을 두지 않도록 변경
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY")
+if not SECRET_KEY:
+    raise ImproperlyConfigured(
+        "DJANGO_SECRET_KEY 환경변수가 필요합니다.\n"
+        '  생성: python -c "import secrets; print(secrets.token_urlsafe(50))"'
+    )
 
 # SECURITY WARNING: don't run with debug turned on in production!
+# 기본값 False, True 가 기본이면 환경변수 누락 시 실서버에서도 디버그 모드로 뜨게됨.
 DEBUG = os.getenv("DJANGO_DEBUG", "True").lower() == "true"
 
 ALLOWED_HOSTS = [host.strip() for host in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if host.strip()]
@@ -156,17 +163,14 @@ PASSWORD_HASHERS = [
 ]
 
 # JWT 서명 키.
-# 실서버에서 누락되면 SECRET_KEY 로 대체되는데, 그 기본값이 settings.py 에
-# 커밋되어 있어 누구나 role=ADMIN 토큰을 위조할 수 있게 된다.
-# 로컬(DEBUG=True)은 개발 편의를 위해 허용한다.
+# DEBUG 여부와 무관하게 필수.
+# SECRET_KEY 로 대체하면 두 용도가 키를 공유해서 한쪽 유출이 양쪽 유출이 된다.
 JWT_SECRET = os.getenv("JWT_SECRET")
 if not JWT_SECRET:
-    if not DEBUG:
-        raise ImproperlyConfigured(
-            "실서버에서는 JWT_SECRET 환경변수가 필수입니다.\n"
-            '  생성: python -c "import secrets; print(secrets.token_urlsafe(48))"'
-        )
-    JWT_SECRET = SECRET_KEY
+    raise ImproperlyConfigured(
+        "JWT_SECRET 환경변수가 필요합니다.\n"
+        '  생성: python -c "import secrets; print(secrets.token_urlsafe(48))"'
+    )
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_HOURS = 1
 REFRESH_TOKEN_HOURS = 12
