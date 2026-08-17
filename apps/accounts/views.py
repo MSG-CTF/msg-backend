@@ -1,6 +1,7 @@
 import jwt
 from django.utils import timezone
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, permission_classes, throttle_classes
+from apps.common.throttling import LoginRateThrottle
 
 from apps.common.exceptions import InvalidRequest
 from apps.common.jwt import (
@@ -24,6 +25,7 @@ from .serializers import LoginSerializer, RefreshTokenSerializer
 
 
 @api_view(["POST"])
+@throttle_classes([LoginRateThrottle])
 def login(request):
     serializer = LoginSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)

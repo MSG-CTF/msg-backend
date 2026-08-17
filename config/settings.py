@@ -185,4 +185,7 @@ REST_FRAMEWORK = {
     ],
     "EXCEPTION_HANDLER": "apps.common.exceptions.envelope_exception_handler",
     "UNAUTHENTICATED_USER": None,
+    "DEFAULT_THROTTLE_RATES": {
+        "login": "10/min",
+    }
 }
