@@ -21,6 +21,7 @@ from .serializers import CellSerializer, ChallengeCandidateSerializer, ChanceCar
 from .services import (
     build_cell_states,
     build_chance_cards_view,
+    challenge_solve_deadline,
     compute_blocked_reason,
     confirm_chance_choice,
     confirm_dice_roll,
@@ -48,6 +49,19 @@ def _get_team(request):
 def _assert_no_body(request):
     if request.data:
         raise RequestBodyNotAllowed()
+
+
+def _serialize_active_challenge(access):
+    if access is None:
+        return None
+    deadline = challenge_solve_deadline(access)
+    remaining_seconds = max(0, int((deadline - timezone.now()).total_seconds()))
+    return {
+        "challenge_id": access.challenge_id,
+        "opened_at": access.opened_at,
+        "solve_deadline_at": deadline,
+        "remaining_seconds": remaining_seconds,
+    }
 
 
 class DashboardView(TemplateView):
@@ -98,11 +112,7 @@ class BoardMeView(APIView):
                 "consumed_cell_indexes": consumed_cell_indexes,
                 "cell_states": cell_states,
                 "chance_cards": build_chance_cards_view(team, state),
-                "active_challenge": (
-                    {"challenge_id": active_access.challenge_id, "opened_at": active_access.opened_at}
-                    if active_access is not None
-                    else None
-                ),
+                "active_challenge": _serialize_active_challenge(active_access),
             }
         )
 

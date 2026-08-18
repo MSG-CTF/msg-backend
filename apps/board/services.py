@@ -101,6 +101,18 @@ def apply_pending_dice_recharge(state):
     return state
 
 
+def grant_dice_roll(state, amount):
+    """회복 타이머 밖에서 주사위를 지급한다. 대기 중인 회복 타이머가 있으면 같이 지운다.
+
+    안 그러면 회복 타이머가 나중에 다시 발동해서(apply_pending_dice_recharge) 이미 채워진
+    주사위에 1회를 더 얹어준다 — START 통과/찬스카드/문제 해결로 회복된 뒤에도 옛 타이머가
+    남아 있던 사례에서 확인된 이중 지급 버그.
+    """
+    if amount <= 0:
+        return
+    state.dice_rolls_left += amount
+    if state.dice_rolls_left > 0:
+        state.next_dice_reset_at = None
 
 
 def apply_pending_quarantine_release(state):
@@ -132,6 +144,16 @@ def is_board_completed(team):
     return TeamCellConsumption.objects.filter(team=team).count() >= BOARD_SIZE
 
 
+def challenge_solve_deadline(access):
+    return access.opened_at + timedelta(seconds=SOLVE_LIMIT_SECONDS)
+
+
+def is_challenge_timer_running(access):
+    return access.status == TeamChallengeAccess.Status.OPENED and timezone.now() < challenge_solve_deadline(
+        access
+    )
+
+
 def compute_blocked_reason(team, state):
     if state.is_quarantined:
         return "QUARANTINED"
@@ -143,7 +165,7 @@ def compute_blocked_reason(team, state):
         access = TeamChallengeAccess.objects.filter(team=team, source_cell=cell).first()
         if access is None:
             return "CHALLENGE_NOT_SELECTED"
-        if access.status == TeamChallengeAccess.Status.OPENED:
+        if is_challenge_timer_running(access):
             return "TIMER_RUNNING"
 
     if PendingDiceRoll.objects.filter(team=team).exists():
@@ -205,8 +227,8 @@ def finalize_landing(team, state, cell, passed_start, landed_on_start):
     if passed_start:
         update_fields.append("has_passed_start")
     if reward["roll_gained"]:
-        state.dice_rolls_left += reward["roll_gained"]
-        update_fields.append("dice_rolls_left")
+        grant_dice_roll(state, reward["roll_gained"])
+        update_fields += ["dice_rolls_left", "next_dice_reset_at"]
     state.save(update_fields=update_fields)
 
     if reward["mileage_gained"]:
@@ -275,7 +297,7 @@ def _assert_can_roll(team, state):
         access = TeamChallengeAccess.objects.filter(team=team, source_cell=cell).first()
         if access is None:
             raise ChallengeNotSelected()
-        if access.status == TeamChallengeAccess.Status.OPENED:
+        if is_challenge_timer_running(access):
             raise TimerRunning()
 
     if PendingDiceRoll.objects.filter(team=team).exists():
@@ -547,12 +569,12 @@ def solve_active_challenge(team):
         access.status = TeamChallengeAccess.Status.CLEARED
         access.cleared_at = timezone.now()
         access.save(update_fields=["status", "cleared_at"])
-        state.dice_rolls_left += 1
+        grant_dice_roll(state, 1)
 
     state.active_challenge_access = None
     update_fields = ["active_challenge_access", "updated_at"]
     if is_extra_dice_granted:
-        update_fields.append("dice_rolls_left")
+        update_fields += ["dice_rolls_left", "next_dice_reset_at"]
     state.save(update_fields=update_fields)
     return state, access, is_extra_dice_granted
 
@@ -715,8 +737,8 @@ def draw_chance_card(team):
         draw = TeamChanceCard.objects.create(team=team, source_cell=cell, card=card)
 
         consume_cell(team, cell)
-        state.dice_rolls_left += CHANCE_DRAW_ROLL_BONUS
-        state.save(update_fields=["dice_rolls_left", "updated_at"])
+        grant_dice_roll(state, CHANCE_DRAW_ROLL_BONUS)
+        state.save(update_fields=["dice_rolls_left", "next_dice_reset_at", "updated_at"])
 
     awaiting_discard = _held_cards_queryset(team).count() >= 2
     return draw, state.dice_rolls_left, awaiting_discard
@@ -893,8 +915,8 @@ def _effect_free_move(team, state, draw, payload):
 
 
 def _effect_grant_extra_roll(team, state, draw, payload):
-    state.dice_rolls_left += 1
-    state.save(update_fields=["dice_rolls_left", "updated_at"])
+    grant_dice_roll(state, 1)
+    state.save(update_fields=["dice_rolls_left", "next_dice_reset_at", "updated_at"])
 
     draw.used_at = timezone.now()
     draw.save(update_fields=["used_at"])

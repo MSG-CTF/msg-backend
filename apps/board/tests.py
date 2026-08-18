@@ -18,7 +18,7 @@ from apps.board.models import (
     TeamChallengeAccess,
     TeamChanceCard,
 )
-from apps.board.services import get_or_create_board_state
+from apps.board.services import SOLVE_LIMIT_SECONDS, get_or_create_board_state
 from apps.teams.models import MileageHistory
 
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
@@ -140,6 +140,38 @@ class BoardApiTestCase(TestCase):
 
         self.assertEqual(response.json()["data"]["consumed_cell_indexes"], [])
 
+    def test_board_me_active_challenge_includes_solve_deadline_and_remaining_seconds(self):
+        # 새로고침해도 남은 시간을 다시 계산해서 내려줘야 한다 (cell/open 응답에만 있으면 새로고침 시 유실).
+        cell = self.set_position(2, consumed=True)
+        challenge = Challenge.objects.filter(difficulty=cell.difficulty).first()
+        access = TeamChallengeAccess.objects.create(team=self.team, challenge=challenge, source_cell=cell)
+        self.state.active_challenge_access = access
+        self.state.save(update_fields=["active_challenge_access"])
+
+        response = self.client.get("/api/v1/board/me")
+
+        active_challenge = response.json()["data"]["active_challenge"]
+        self.assertEqual(active_challenge["challenge_id"], str(challenge.id))
+        self.assertEqual(
+            active_challenge["solve_deadline_at"],
+            (access.opened_at + timedelta(seconds=SOLVE_LIMIT_SECONDS)).isoformat().replace("+00:00", "Z"),
+        )
+        self.assertGreater(active_challenge["remaining_seconds"], 0)
+        self.assertLessEqual(active_challenge["remaining_seconds"], SOLVE_LIMIT_SECONDS)
+
+    def test_board_me_active_challenge_remaining_seconds_floors_at_zero_past_deadline(self):
+        cell = self.set_position(2, consumed=True)
+        challenge = Challenge.objects.filter(difficulty=cell.difficulty).first()
+        access = TeamChallengeAccess.objects.create(team=self.team, challenge=challenge, source_cell=cell)
+        access.opened_at = timezone.now() - timedelta(seconds=SOLVE_LIMIT_SECONDS + 30)
+        access.save(update_fields=["opened_at"])
+        self.state.active_challenge_access = access
+        self.state.save(update_fields=["active_challenge_access"])
+
+        response = self.client.get("/api/v1/board/me")
+
+        self.assertEqual(response.json()["data"]["active_challenge"]["remaining_seconds"], 0)
+
     # ---------------------------------------------------------------- GET /board/dice/status
 
     def test_dice_status_initial(self):
@@ -165,6 +197,32 @@ class BoardApiTestCase(TestCase):
         response = self.client.get("/api/v1/board/dice/status")
 
         self.assertEqual(response.json()["data"]["blocked_reason"], "TIMER_RUNNING")
+
+    def test_dice_status_timer_running_releases_after_solve_deadline(self):
+        # 15분이 지나면 문제를 풀지 않았어도 TIMER_RUNNING이 풀려야 한다 (미해결 시 영구 차단 회귀 방지).
+        cell = self.set_position(2, consumed=True)
+        challenge = Challenge.objects.filter(difficulty=cell.difficulty).first()
+        access = TeamChallengeAccess.objects.create(team=self.team, challenge=challenge, source_cell=cell)
+        access.opened_at = timezone.now() - timedelta(seconds=SOLVE_LIMIT_SECONDS + 1)
+        access.save(update_fields=["opened_at"])
+
+        response = self.client.get("/api/v1/board/dice/status")
+
+        data = response.json()["data"]
+        self.assertIsNone(data["blocked_reason"])
+        self.assertTrue(data["can_roll"])
+
+    def test_dice_roll_succeeds_after_challenge_timer_expires(self):
+        cell = self.set_position(2, consumed=True)
+        challenge = Challenge.objects.filter(difficulty=cell.difficulty).first()
+        access = TeamChallengeAccess.objects.create(team=self.team, challenge=challenge, source_cell=cell)
+        access.opened_at = timezone.now() - timedelta(seconds=SOLVE_LIMIT_SECONDS + 1)
+        access.save(update_fields=["opened_at"])
+
+        with patch("apps.board.services.random.randint", side_effect=[1, 1]):
+            response = self.post_idem("/api/v1/board/dice/roll")
+
+        self.assertEqual(response.status_code, 200)
 
     def test_dice_status_quarantined(self):
         self.state.is_quarantined = True
@@ -493,6 +551,22 @@ class BoardApiTestCase(TestCase):
         self.assertEqual(data["dice_rolls_left"], 2)
         self.assertTrue(TeamCellConsumption.objects.filter(team=self.team, cell_id=7).exists())
 
+    def test_chance_now_clears_stale_dice_reset_timer(self):
+        # chance/now의 +1 지급도 grant_dice_roll을 거치므로 대기 중인 회복 타이머를 지워야 한다.
+        self.set_position(7, consumed=True)
+        self.state.dice_rolls_left = 0
+        self.state.next_dice_reset_at = timezone.now() + timedelta(minutes=15)
+        self.state.save(update_fields=["dice_rolls_left", "next_dice_reset_at"])
+
+        with patch("apps.board.services.random.choice") as choice_mock:
+            choice_mock.side_effect = lambda seq: seq[0]
+            response = self.post_idem("/api/v1/board/chance/now")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["data"]["dice_rolls_left"], 1)
+        self.state.refresh_from_db()
+        self.assertIsNone(self.state.next_dice_reset_at)
+
     def test_chance_now_requires_chance_cell(self):
         response = self.post_idem("/api/v1/board/chance/now")
         self.assertEqual(response.status_code, 409)
@@ -536,6 +610,22 @@ class BoardApiTestCase(TestCase):
         data = response.json()["data"]
         self.assertTrue(data["used"])
         self.assertEqual(data["dice_rolls_left"], 2)
+
+    def test_chance_use_grant_extra_roll_clears_stale_dice_reset_timer(self):
+        # 회귀 테스트: 주사위가 0개일 때 걸린 15분 회복 타이머가 이 카드로 먼저 채워진 뒤에도
+        # 그대로 남아 있으면, 나중에 타이머가 만료될 때 회복 로직이 이미 채워진 주사위 위에
+        # 1회를 더 얹어준다 (이중 지급). 카드 사용 시점에 타이머를 같이 지워야 한다.
+        self.state.dice_rolls_left = 0
+        self.state.next_dice_reset_at = timezone.now() + timedelta(minutes=15)
+        self.state.save(update_fields=["dice_rolls_left", "next_dice_reset_at"])
+        self.draw_card("card_extra_roll")
+
+        response = self.post_idem("/api/v1/board/chance/use", {"card_id": "card_extra_roll"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["data"]["dice_rolls_left"], 1)
+
+        self.state.refresh_from_db()
+        self.assertIsNone(self.state.next_dice_reset_at)
 
     def test_chance_use_free_move(self):
         self.draw_card("card_free_travel")
