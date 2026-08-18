@@ -1,6 +1,7 @@
 asgiref==3.12.1
 Django==5.2.16
 django-redis==7.0.0
+djangorestframework==3.17.1
 psycopg==3.3.4
 psycopg-binary==3.3.4
 redis==8.0.1

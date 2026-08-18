@@ -1,0 +1,767 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MSG Board Preview</title>
+  <style>
+    :root {
+      --bg: #f5f7fa;
+      --panel: #ffffff;
+      --ink: #17202a;
+      --muted: #687587;
+      --line: #d8e0ea;
+      --accent: #0f8b8d;
+      --accent-dark: #096a6c;
+      --challenge: #edf1f6;
+      --start: #cdeed5;
+      --chance: #ffefb8;
+      --airport: #dbe8ff;
+      --quarantine: #ffe0df;
+      --roulette: #eadfff;
+      --opened: #fff4d6;
+      --solved: #dff5e8;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Arial, "Noto Sans KR", sans-serif;
+    }
+
+    .shell {
+      width: min(1180px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 28px 0;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 18px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 26px;
+      line-height: 1.15;
+      letter-spacing: 0;
+    }
+
+    .status {
+      min-height: 34px;
+      padding: 8px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 340px;
+      gap: 18px;
+      align-items: start;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      box-shadow: 0 6px 18px rgba(20, 30, 45, 0.06);
+    }
+
+    .board-panel { padding: 16px; }
+
+    .side {
+      display: grid;
+      gap: 14px;
+    }
+
+    .side-section { padding: 16px; }
+
+    .section-title {
+      margin: 0 0 12px;
+      color: var(--muted);
+      font-size: 15px;
+    }
+
+    .board {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(84px, 1fr));
+      gap: 8px;
+    }
+
+    .tile {
+      position: relative;
+      min-height: 88px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--challenge);
+      overflow: hidden;
+    }
+
+    .tile.START { background: var(--start); }
+    .tile.CHANCE { background: var(--chance); }
+    .tile.AIRPORT { background: var(--airport); }
+    .tile.QUARANTINE { background: var(--quarantine); }
+    .tile.ROULETTE { background: var(--roulette); }
+
+    .tile.is-current {
+      outline: 3px solid var(--accent);
+      outline-offset: 0;
+    }
+
+    .tile.is-visited {
+      box-shadow: inset 0 0 0 2px rgba(15, 139, 141, 0.2);
+    }
+
+    .marker {
+      position: absolute;
+      right: 8px;
+      top: 8px;
+      display: none;
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      align-items: center;
+      justify-content: center;
+      background: var(--accent);
+      color: #fff;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .tile.is-current .marker { display: flex; }
+
+    .tile-index {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .tile-name {
+      margin-top: 8px;
+      font-size: 15px;
+      font-weight: 700;
+      line-height: 1.25;
+      overflow-wrap: anywhere;
+    }
+
+    .tile-type {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .visited-tag {
+      display: inline-block;
+      margin-top: 6px;
+      padding: 2px 6px;
+      border-radius: 999px;
+      background: rgba(15, 139, 141, 0.1);
+      color: var(--accent-dark);
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .kv {
+      display: grid;
+      gap: 10px;
+    }
+
+    .row {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--line);
+      font-size: 14px;
+    }
+
+    .row:last-child {
+      border-bottom: 0;
+      padding-bottom: 0;
+    }
+
+    .label { color: var(--muted); }
+
+    .value {
+      font-weight: 700;
+      text-align: right;
+    }
+
+    .actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 10px;
+    }
+
+    button {
+      min-height: 42px;
+      border: 1px solid var(--accent);
+      border-radius: 8px;
+      background: var(--accent);
+      color: #fff;
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    button.secondary {
+      background: #fff;
+      color: var(--accent-dark);
+    }
+
+    button:disabled {
+      border-color: #bdc7d3;
+      background: #d8dee6;
+      color: #778393;
+      cursor: not-allowed;
+    }
+
+    .result,
+    .challenge-box {
+      min-height: 78px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #f8fafc;
+      font-size: 14px;
+      line-height: 1.45;
+      white-space: pre-line;
+    }
+
+    .candidate {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 10px;
+      align-items: center;
+      padding: 10px 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .candidate:last-child { border-bottom: 0; }
+
+    .candidate-title {
+      margin: 0 0 4px;
+      font-weight: 700;
+    }
+
+    .candidate-meta {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .candidate button {
+      min-width: 68px;
+      min-height: 34px;
+    }
+
+    pre {
+      max-height: 280px;
+      margin: 0;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: #2c3745;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .lists-panel {
+      margin-top: 18px;
+      padding: 16px;
+    }
+
+    .lists-grid {
+      display: grid;
+      grid-template-columns: 1.3fr 1fr 1fr;
+      gap: 14px;
+      align-items: start;
+    }
+
+    .list-card {
+      min-height: 220px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfe;
+    }
+
+    .list-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    .list-head .section-title {
+      margin: 0;
+    }
+
+    .count-pill {
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: #e9eef5;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .challenge-list {
+      display: grid;
+      gap: 8px;
+      max-height: 360px;
+      overflow: auto;
+      padding-right: 4px;
+    }
+
+    .challenge-item {
+      display: grid;
+      gap: 5px;
+      padding: 9px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      font-size: 13px;
+    }
+
+    .challenge-item.is-opened { background: var(--opened); }
+    .challenge-item.is-solved { background: var(--solved); }
+
+    .challenge-item-title {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      font-weight: 700;
+    }
+
+    .challenge-item-meta {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .badge {
+      flex: 0 0 auto;
+      padding: 2px 6px;
+      border-radius: 999px;
+      background: #e9eef5;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .badge.opened {
+      background: #ffe1a8;
+      color: #7a4d00;
+    }
+
+    .badge.solved {
+      background: #bde8cd;
+      color: #176035;
+    }
+
+    .empty-list {
+      padding: 14px;
+      border: 1px dashed var(--line);
+      border-radius: 8px;
+      color: var(--muted);
+      font-size: 13px;
+      text-align: center;
+    }
+
+    @media (max-width: 860px) {
+      .layout { grid-template-columns: 1fr; }
+      .board { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .lists-grid { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 520px) {
+      .shell {
+        width: min(100vw - 20px, 1180px);
+        padding: 16px 0;
+      }
+
+      .topbar {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .board { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .actions { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <div class="topbar">
+      <h1>MSG Board Preview</h1>
+      <div class="status" id="status">연결 준비 중</div>
+    </div>
+
+    <div class="layout">
+      <section class="panel board-panel">
+        <div class="board" id="board"></div>
+      </section>
+
+      <aside class="side">
+        <section class="panel side-section">
+          <p class="section-title">팀 상태</p>
+          <div class="kv">
+            <div class="row"><span class="label">팀</span><span class="value" id="teamName">-</span></div>
+            <div class="row"><span class="label">현재 위치</span><span class="value" id="position">-</span></div>
+            <div class="row"><span class="label">칸 타입</span><span class="value" id="cellType">-</span></div>
+            <div class="row"><span class="label">남은 주사위</span><span class="value" id="rollsLeft">-</span></div>
+            <div class="row"><span class="label">점수</span><span class="value" id="score">-</span></div>
+            <div class="row"><span class="label">마일리지</span><span class="value" id="mileage">-</span></div>
+          </div>
+        </section>
+
+        <section class="panel side-section">
+          <p class="section-title">주사위</p>
+          <div class="actions">
+            <button id="rollButton" type="button">굴리기</button>
+            <button class="secondary" id="refreshButton" type="button">새로고침</button>
+            <button class="secondary" id="resetButton" type="button">리셋</button>
+          </div>
+          <div class="result" id="rollResult" style="margin-top: 12px;">아직 굴린 결과가 없습니다.</div>
+        </section>
+
+        <section class="panel side-section">
+          <p class="section-title">현재 칸 문제 후보</p>
+          <div class="challenge-box" id="challengeBox">문제 칸에 도착하면 후보 3개가 표시됩니다.</div>
+          <button class="secondary" id="solveButton" type="button" style="width: 100%; margin-top: 10px;" disabled>풀기 처리</button>
+        </section>
+
+        <section class="panel side-section">
+          <p class="section-title">최근 응답</p>
+          <pre id="debug">{}</pre>
+        </section>
+      </aside>
+    </div>
+
+    <section class="panel lists-panel">
+      <div class="lists-grid">
+        <section class="list-card">
+          <div class="list-head">
+            <p class="section-title">1~30번 전체 문제</p>
+            <span class="count-pill" id="challengeCount">0개</span>
+          </div>
+          <div class="challenge-list" id="allChallengeList"></div>
+        </section>
+
+        <section class="list-card">
+          <div class="list-head">
+            <p class="section-title">열린 문제</p>
+            <span class="count-pill" id="openedCount">0개</span>
+          </div>
+          <div class="challenge-list" id="openedChallengeList"></div>
+        </section>
+
+        <section class="list-card">
+          <div class="list-head">
+            <p class="section-title">푼 문제</p>
+            <span class="count-pill" id="solvedCount">0개</span>
+          </div>
+          <div class="challenge-list" id="solvedChallengeList"></div>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const boardEl = document.getElementById("board");
+    const statusEl = document.getElementById("status");
+    const teamNameEl = document.getElementById("teamName");
+    const positionEl = document.getElementById("position");
+    const cellTypeEl = document.getElementById("cellType");
+    const rollsLeftEl = document.getElementById("rollsLeft");
+    const scoreEl = document.getElementById("score");
+    const mileageEl = document.getElementById("mileage");
+    const rollButton = document.getElementById("rollButton");
+    const refreshButton = document.getElementById("refreshButton");
+    const resetButton = document.getElementById("resetButton");
+    const solveButton = document.getElementById("solveButton");
+    const rollResultEl = document.getElementById("rollResult");
+    const challengeBox = document.getElementById("challengeBox");
+    const debugEl = document.getElementById("debug");
+    const allChallengeListEl = document.getElementById("allChallengeList");
+    const openedChallengeListEl = document.getElementById("openedChallengeList");
+    const solvedChallengeListEl = document.getElementById("solvedChallengeList");
+    const challengeCountEl = document.getElementById("challengeCount");
+    const openedCountEl = document.getElementById("openedCount");
+    const solvedCountEl = document.getElementById("solvedCount");
+
+    let boardCells = [];
+    let boardMe = null;
+    let cellCurrent = null;
+    let openedChallenges = [];
+    let allChallenges = [];
+
+    const typeLabels = {
+      START: "출발",
+      CHALLENGE: "문제",
+      CHANCE: "황금열쇠",
+      AIRPORT: "기차",
+      QUARANTINE: "무인도",
+      ROULETTE: "룰렛",
+    };
+
+    async function fetchJson(url, options = {}) {
+      const response = await fetch(url, {
+        headers: { "Content-Type": "application/json" },
+        ...options,
+      });
+      const body = await response.json();
+      if (!response.ok) {
+        const message = body.message || response.statusText;
+        throw Object.assign(new Error(message), { response, body });
+      }
+      return body;
+    }
+
+    function renderBoard() {
+      const current = boardMe ? boardMe.position : null;
+      const visitedCells = new Set(openedChallenges.map((challenge) => challenge.cell_index));
+      boardEl.innerHTML = boardCells.map((cell) => {
+        const currentClass = cell.cell_index === current ? " is-current" : "";
+        const visitedClass = visitedCells.has(cell.cell_index) ? " is-visited" : "";
+        const visitedTag = visitedCells.has(cell.cell_index) ? '<div class="visited-tag">방문</div>' : "";
+        return `
+          <article class="tile ${cell.type}${currentClass}${visitedClass}">
+            <div class="marker">팀</div>
+            <div class="tile-index">#${cell.cell_index}</div>
+            <div class="tile-name">${cell.name}</div>
+            <div class="tile-type">${typeLabels[cell.type] || cell.type}</div>
+            ${visitedTag}
+          </article>
+        `;
+      }).join("");
+    }
+
+    function renderSummary(teamPayload, dicePayload) {
+      const team = teamPayload.data.team;
+      teamNameEl.textContent = team.name;
+      positionEl.textContent = boardMe ? boardMe.position : "-";
+      cellTypeEl.textContent = boardMe ? boardMe.type : "-";
+      rollsLeftEl.textContent = dicePayload.data.dice_rolls_left;
+      scoreEl.textContent = team.total_score;
+      mileageEl.textContent = team.mileage_balance;
+      rollButton.disabled = !dicePayload.data.can_roll;
+      solveButton.disabled = !boardMe || !boardMe.active_challenge;
+      statusEl.textContent = dicePayload.data.can_roll ? "주사위 가능" : dicePayload.data.blocked_reason || "대기";
+    }
+
+    function findOpenedChallenge(challengeId) {
+      return openedChallenges.find((item) => item.challenge_id === challengeId);
+    }
+
+    function renderChallengeBox() {
+      if (boardMe && boardMe.active_challenge) {
+        const active = boardMe.active_challenge;
+        const detail = findOpenedChallenge(active.challenge_id);
+        challengeBox.innerHTML = `
+          <p class="candidate-title">오픈된 문제 #${active.challenge_id} ${detail ? detail.title : ""}</p>
+          <p class="candidate-meta">${detail ? `${detail.category} · ${detail.score}점` : "진행 중"} · opened</p>
+        `;
+        return;
+      }
+
+      const candidates = cellCurrent ? cellCurrent.challenge_candidates : [];
+      if (!candidates.length) {
+        challengeBox.textContent = "문제 칸에 도착하면 후보 3개가 표시됩니다.";
+        return;
+      }
+
+      challengeBox.innerHTML = candidates.map((challenge) => `
+        <div class="candidate">
+          <div>
+            <p class="candidate-title">#${challenge.challenge_id} ${challenge.title}</p>
+            <p class="candidate-meta">${challenge.category} · ${challenge.score}점</p>
+          </div>
+          <button type="button" data-open-challenge="${challenge.challenge_id}">오픈</button>
+        </div>
+      `).join("");
+    }
+
+    function getDifficultyLabel(difficulty) {
+      return { EASY: "하", MEDIUM: "중", HARD: "상" }[difficulty] || difficulty || "-";
+    }
+
+    function renderChallengeItems(items, emptyMessage, options = {}) {
+      if (!items.length) {
+        return `<div class="empty-list">${emptyMessage}</div>`;
+      }
+
+      return items.map((challenge) => {
+        const isSolved = Boolean(challenge.is_solved);
+        const isOpened = Boolean(challenge.is_opened || challenge.opened_at);
+        const stateClass = isSolved ? " is-solved" : isOpened ? " is-opened" : "";
+        const badgeClass = isSolved ? "solved" : isOpened ? "opened" : "";
+        const badgeText = isSolved ? "풂" : isOpened ? "열림" : "미오픈";
+        const cellText = challenge.cell_index !== null && challenge.cell_index !== undefined
+          ? ` · ${challenge.cell_index}번 칸`
+          : "";
+        const difficultyText = challenge.difficulty
+          ? `${getDifficultyLabel(challenge.difficulty)} · `
+          : "";
+
+        return `
+          <article class="challenge-item${stateClass}">
+            <div class="challenge-item-title">
+              <span>#${challenge.challenge_id} ${challenge.title}</span>
+              <span class="badge ${badgeClass}">${badgeText}</span>
+            </div>
+            <div class="challenge-item-meta">${difficultyText}${challenge.category} · ${challenge.score}점${cellText}</div>
+          </article>
+        `;
+      }).join("");
+    }
+
+    function renderChallengeLists() {
+      const openedOnly = openedChallenges.filter((challenge) => !challenge.is_solved);
+      const solvedOnly = openedChallenges.filter((challenge) => challenge.is_solved);
+
+      challengeCountEl.textContent = `${allChallenges.length}개`;
+      openedCountEl.textContent = `${openedOnly.length}개`;
+      solvedCountEl.textContent = `${solvedOnly.length}개`;
+
+      allChallengeListEl.innerHTML = renderChallengeItems(
+        allChallenges,
+        "문제 목록이 없습니다.",
+      );
+      openedChallengeListEl.innerHTML = renderChallengeItems(
+        openedOnly,
+        "아직 열린 문제가 없습니다.",
+      );
+      solvedChallengeListEl.innerHTML = renderChallengeItems(
+        solvedOnly,
+        "아직 푼 문제가 없습니다.",
+      );
+    }
+
+    function setDebug(label, payload) {
+      debugEl.textContent = `${label}\n${JSON.stringify(payload, null, 2)}`;
+    }
+
+    async function refreshAll() {
+      statusEl.textContent = "API 조회 중";
+      try {
+        const [boardPayload, teamPayload, boardMePayload, dicePayload, cellPayload, openedPayload, challengesPayload] = await Promise.all([
+          fetchJson("/api/v1/board"),
+          fetchJson("/api/v1/teams/me"),
+          fetchJson("/api/v1/board/me"),
+          fetchJson("/api/v1/board/dice/status"),
+          fetchJson("/api/v1/board/cell/current"),
+          fetchJson("/api/v1/board/opened_challenges"),
+          fetchJson("/api/v1/board/challenges"),
+        ]);
+        boardCells = boardPayload.data.cells;
+        boardMe = boardMePayload.data;
+        cellCurrent = cellPayload.data;
+        openedChallenges = openedPayload.data.opened_challenges;
+        allChallenges = challengesPayload.data.challenges;
+        renderSummary(teamPayload, dicePayload);
+        renderBoard();
+        renderChallengeBox();
+        renderChallengeLists();
+        setDebug("GET /api/v1/board/cell/current", cellPayload);
+      } catch (error) {
+        statusEl.textContent = "API 오류";
+        rollButton.disabled = true;
+        setDebug("ERROR", error.body || error.message);
+      }
+    }
+
+    async function rollDice() {
+      rollButton.disabled = true;
+      rollResultEl.textContent = "굴리는 중...";
+      try {
+        const payload = await fetchJson("/api/v1/board/dice/roll", { method: "POST" });
+        const data = payload.data;
+        const skippedText = data.skipped_cells && data.skipped_cells.length
+          ? `\n건너뛴 방문 칸: ${data.skipped_cells.join(", ")}`
+          : "";
+        const startText = data.passed_start
+          ? `\n출발칸 통과! +${data.start_reward.mileage_gained} 마일리지`
+          : "";
+        rollResultEl.textContent = `주사위: ${data.dice_a} + ${data.dice_b} = ${data.rolled_number}\n${data.previous_position}번에서 ${data.current_position}번으로 이동${skippedText}${startText}\n이벤트: ${data.board_event_code}`;
+        setDebug("POST /api/v1/board/dice/roll", payload);
+        await refreshAll();
+      } catch (error) {
+        rollResultEl.textContent = error.message;
+        setDebug("ERROR", error.body || error.message);
+        await refreshAll();
+      }
+    }
+
+    async function openChallenge(challengeId) {
+      try {
+        const payload = await fetchJson("/api/v1/board/cell/open", {
+          method: "POST",
+          body: JSON.stringify({ challenge_id: challengeId }),
+        });
+        rollResultEl.textContent = `#${payload.data.challenge_id} 문제 오픈\n제한 시간: ${payload.data.remaining_seconds}초`;
+        setDebug("POST /api/v1/board/cell/open", payload);
+        await refreshAll();
+      } catch (error) {
+        rollResultEl.textContent = error.message;
+        setDebug("ERROR", error.body || error.message);
+      }
+    }
+
+    async function solveChallenge() {
+      solveButton.disabled = true;
+      try {
+        const payload = await fetchJson("/api/v1/board/challenge/solve", { method: "POST" });
+        const solved = payload.data.solved_challenge;
+        rollResultEl.textContent = solved
+          ? `#${solved.challenge.challenge_id} ${solved.challenge.title} 풀기 처리 완료`
+          : "현재 풀 문제가 없습니다.";
+        setDebug("POST /api/v1/board/challenge/solve", payload);
+        await refreshAll();
+      } catch (error) {
+        rollResultEl.textContent = error.message;
+        setDebug("ERROR", error.body || error.message);
+      }
+    }
+
+    async function resetDice() {
+      resetButton.disabled = true;
+      rollResultEl.textContent = "주사위 횟수 리셋 중...";
+      try {
+        const payload = await fetchJson("/api/v1/board/dice/reset", { method: "POST" });
+        rollResultEl.textContent = "주사위가 1회 충전됐습니다.";
+        setDebug("POST /api/v1/board/dice/reset", payload);
+        await refreshAll();
+      } catch (error) {
+        rollResultEl.textContent = error.message;
+        setDebug("ERROR", error.body || error.message);
+      } finally {
+        resetButton.disabled = false;
+      }
+    }
+
+    rollButton.addEventListener("click", rollDice);
+    refreshButton.addEventListener("click", refreshAll);
+    resetButton.addEventListener("click", resetDice);
+    solveButton.addEventListener("click", solveChallenge);
+    challengeBox.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-open-challenge]");
+      if (!button) return;
+      openChallenge(button.dataset.openChallenge);
+    });
+    refreshAll();
+  </script>
+</body>
+</html>
