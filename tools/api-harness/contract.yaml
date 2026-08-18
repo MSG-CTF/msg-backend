@@ -39,7 +39,7 @@ timestamp_must_be_iso_utc: true
 success_code_value: SUCCESS
 
 # 허용되는 HTTP status code 목록
-allowed_http_status: [200, 202, 400, 401, 403, 404, 409, 500]
+allowed_http_status: [200, 202, 400, 401, 403, 404, 409, 429, 500]
 
 # leaf: JSON에서 실제로 등장하는 필드명(예: "type", "status")
 # parents: 생략하면 leaf 이름만으로 전역 매칭 (role/difficulty/category 처럼 문맥 없이도 안전한 경우)
@@ -51,7 +51,7 @@ enum_rules:
   - leaf: difficulty
     values: [EASY, MEDIUM, HARD]
   - leaf: category
-    values: [WEB, SYSTEM, REV, CRYPTO, FORENSIC, MISC]
+    values: [WEB, PWN, REV, CRYPTO, FORENSIC, MISC]
   - leaf: status
     parents: [instance, instances]
     values: [REQUESTED, SCHEDULING, PROVISIONING, RUNNING, RESTARTING, RESETTING, STOPPING, STOPPED, FAILED, EXPIRED, CLEANUP_PENDING, CLEANED]
@@ -76,7 +76,22 @@ common_error_codes:
   - {http: 403, code: TEAM_BANNED}
   - {http: 400, code: INVALID_REQUEST}
   - {http: 404, code: USER_HAS_NO_TEAM}
+  - {http: 403, code: NOT_TEAM_LEADER}
+  - {http: 429, code: TOO_MANY_REQUESTS}
   - {http: 500, code: INTERNAL_ERROR}
+  # 로그인/인증 (apps/accounts)
+  - {http: 401, code: INVALID_CREDENTIALS}
+  - {http: 401, code: REFRESH_TOKEN_EXPIRED}
+  - {http: 401, code: REFRESH_TOKEN_INVALID}
+  - {http: 401, code: REFRESH_TOKEN_NOT_FOUND}
+  # 관리자 팀/밴 (apps/adminpanel)
+  - {http: 404, code: TEAM_NOT_FOUND}
+  - {http: 409, code: ALREADY_BANNED}
+  - {http: 409, code: NOT_BANNED}
+  # 프레임워크 폴백
+  - {http: 405, code: METHOD_NOT_ALLOWED}
+  # 도메인: 플래그 제출 3연속 오답 (요청 빈도 제한 TOO_MANY_REQUESTS 와 구분)
+  - {http: 429, code: TOO_MANY_ATTEMPTS}
   # KOTH 내부 API 전용 (/internal/koth/scores, /internal/koth/team_tokens/verify, /internal/teams)
   - {http: 400, code: INVALID_PERIOD}
   - {http: 401, code: INVALID_INTERNAL_TOKEN}
