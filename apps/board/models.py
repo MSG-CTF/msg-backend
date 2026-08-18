@@ -35,11 +35,16 @@ class Cell(models.Model):
 class ChanceCard(models.Model):
     """ERD: chance_cards — 찬스칸 도착 시 뽑는 카드의 종류 정의 (GET /api/v1/board/chance/catalog)"""
 
+    class UsageTiming(models.TextChoices):
+        PRE_ROLL = "PRE_ROLL"
+        POST_ROLL = "POST_ROLL"
+        QUARANTINE_STATE = "QUARANTINE_STATE"
+
     card_id = models.CharField(max_length=50, primary_key=True)
     name = models.CharField(max_length=100)
     description = models.CharField(max_length=500, blank=True)
     effect = models.CharField(max_length=50)
-    is_pre_roll = models.BooleanField(default=True)
+    usage_timing = models.CharField(max_length=20, choices=UsageTiming.choices)
     weight = models.PositiveIntegerField(null=True, blank=True)
 
     class Meta:
@@ -47,6 +52,106 @@ class ChanceCard(models.Model):
 
     def __str__(self):
         return self.card_id
+
+
+class TeamCellConsumption(models.Model):
+    """ERD: team_cell_consumptions — 팀이 최초로 소모(도착 확정)한 칸 기록. 문제칸/특수칸 공통."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    team = models.ForeignKey(
+        "accounts.Team",
+        on_delete=models.CASCADE,
+        related_name="cell_consumptions",
+    )
+    cell = models.ForeignKey(
+        Cell,
+        to_field="cell_index",
+        db_column="cell_index",
+        on_delete=models.CASCADE,
+        related_name="team_consumptions",
+    )
+    consumed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "team_cell_consumptions"
+        constraints = [
+            models.UniqueConstraint(fields=["team", "cell"], name="unique_team_cell_consumption"),
+        ]
+        indexes = [
+            models.Index(fields=["team"]),
+        ]
+
+    def __str__(self):
+        return f"{self.team_id}: {self.cell_id}"
+
+
+class TeamChanceCard(models.Model):
+    """ERD: team_chance_cards — 찬스칸에서 뽑은 카드 1건. 칸당 최대 1장(2개 찬스칸 → 팀당 최대 2장 보유 이력)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    team = models.ForeignKey(
+        "accounts.Team",
+        on_delete=models.CASCADE,
+        related_name="chance_draws",
+    )
+    source_cell = models.ForeignKey(
+        Cell,
+        to_field="cell_index",
+        db_column="source_cell_index",
+        on_delete=models.CASCADE,
+        related_name="chance_draws",
+    )
+    card = models.ForeignKey(ChanceCard, on_delete=models.PROTECT, related_name="draws")
+    drawn_at = models.DateTimeField(auto_now_add=True)
+    used_at = models.DateTimeField(null=True, blank=True)
+    pending_first_number = models.PositiveSmallIntegerField(null=True, blank=True)
+    pending_second_number = models.PositiveSmallIntegerField(null=True, blank=True)
+
+    class Meta:
+        db_table = "team_chance_cards"
+        ordering = ["-drawn_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["team", "source_cell"],
+                name="unique_team_chance_draw_per_cell",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["team", "used_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.team_id}: {self.card_id}"
+
+
+class PendingDiceRoll(models.Model):
+    """ERD: pending_dice_rolls — POST_ROLL 찬스카드를 보유한 채 굴린 주사위의 미확정 결과.
+
+    dice/confirm 또는 chance/use(POST_ROLL 카드)가 처리될 때까지 팀당 최대 1건만 존재한다.
+    """
+
+    team = models.OneToOneField(
+        "accounts.Team",
+        on_delete=models.CASCADE,
+        primary_key=True,
+        related_name="pending_roll",
+    )
+    dice_a = models.PositiveSmallIntegerField()
+    dice_b = models.PositiveSmallIntegerField()
+    rolled_number = models.PositiveSmallIntegerField()
+    previous_position = models.PositiveSmallIntegerField()
+    candidate_position = models.PositiveSmallIntegerField()
+    movement_path = models.JSONField(default=list)
+    skipped_cells = models.JSONField(default=list)
+    passed_start = models.BooleanField(default=False)
+    board_event_code = models.CharField(max_length=20)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "pending_dice_rolls"
+
+    def __str__(self):
+        return f"{self.team_id}: {self.previous_position} -> {self.candidate_position}"
 
 
 class Challenge(models.Model):
@@ -76,7 +181,7 @@ class TeamChallengeAccess(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     team = models.ForeignKey(
-        "teams.Team",
+        "accounts.Team",
         on_delete=models.CASCADE,
         related_name="challenge_accesses",
     )
@@ -125,7 +230,7 @@ class TeamCellCandidate(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     team = models.ForeignKey(
-        "teams.Team",
+        "accounts.Team",
         on_delete=models.CASCADE,
         related_name="cell_candidates",
     )
@@ -168,7 +273,7 @@ class TeamBoardState(models.Model):
     """Single row per team for board progress."""
 
     team = models.OneToOneField(
-        "teams.Team",
+        "accounts.Team",
         on_delete=models.CASCADE,
         primary_key=True,
         related_name="board_state",
@@ -208,7 +313,7 @@ class DiceRoll(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     team = models.ForeignKey(
-        "teams.Team",
+        "accounts.Team",
         on_delete=models.CASCADE,
         related_name="dice_rolls",
     )

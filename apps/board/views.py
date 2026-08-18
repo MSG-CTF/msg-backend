@@ -1,42 +1,51 @@
 import uuid
 
+from django.conf import settings
 from django.db import DatabaseError
+from django.http import Http404
 from django.utils import timezone
 from django.views.generic import TemplateView
-from rest_framework import status
 from rest_framework.generics import ListAPIView
-from rest_framework.response import Response
+from rest_framework.permissions import AllowAny
 from rest_framework.views import APIView
 
-from apps.board.models import Cell, ChanceCard
-from apps.board.serializers import (
-    CellSerializer,
-    ChallengeCandidateSerializer,
-    ChanceCardSerializer,
-    TeamChallengeAccessSerializer,
-    TeamBoardStateSerializer,
-)
-from apps.board.services import (
-    AirportMoveAlreadyUsedError,
-    BoardNotReadyError,
-    CellAlreadyOpenedError,
-    ChallengeNotCandidateError,
-    InvalidDestinationIndexError,
-    NoDiceRollsLeftError,
-    NotAirportCellError,
-    NotChallengeCellError,
-    QuarantinedError,
-    TimerRunningError,
-    get_challenges_progress_summary,
+from apps.common.exceptions import UserHasNoTeam
+from apps.common.permissions import IsAuthenticated
+from apps.common.response import ok
+
+from .exceptions import BoardLoadFailed, ChallengeIdRequired, RequestBodyNotAllowed
+from .idempotency import idempotent
+from .models import Cell, ChanceCard
+from .permissions import IsTeamLeader
+from .serializers import CellSerializer, ChallengeCandidateSerializer, ChanceCardSerializer
+from .services import (
+    build_cell_states,
+    build_chance_cards_view,
+    compute_blocked_reason,
+    confirm_chance_choice,
+    confirm_dice_roll,
+    draw_chance_card,
     get_current_cell_candidates,
     get_opened_challenges_summary,
-    get_or_create_default_team_state,
+    get_or_create_board_state,
+    is_board_completed,
     move_team_via_airport,
+    solve_active_challenge,
     open_current_cell_challenge,
-    reset_default_team_dice,
-    roll_default_team_dice,
-    solve_default_team_active_challenge,
+    roll_dice,
+    use_chance_card,
 )
+
+
+def _get_team(request):
+    if request.user.team_id is None:
+        raise UserHasNoTeam()
+    return request.user.team
+
+
+def _assert_no_body(request):
+    if request.data:
+        raise RequestBodyNotAllowed()
 
 
 class DashboardView(TemplateView):
@@ -44,8 +53,9 @@ class DashboardView(TemplateView):
 
 
 class BoardView(ListAPIView):
-    """GET /api/v1/board returns the fixed 36-cell board."""
+    """GET /api/v1/board — 고정 보드 배치, 인증 불필요."""
 
+    permission_classes = [AllowAny]
     queryset = Cell.objects.all()
     serializer_class = CellSerializer
 
@@ -56,454 +66,242 @@ class BoardView(ListAPIView):
             cells = []
 
         if not cells:
-            return Response(
-                {
-                    "code": "BOARD_LOAD_FAILED",
-                    "message": "보드 정보를 불러오지 못했습니다.",
-                    "data": None,
-                },
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+            raise BoardLoadFailed()
 
-        return Response({
-            "code": "SUCCESS",
-            "message": "성공",
-            "data": {
-                "total_cell_count": len(cells),
-                "cells": cells,
-            },
-        })
+        return ok({"total_cell_count": len(cells), "cells": cells})
 
 
 class BoardMeView(APIView):
-    """GET /api/v1/board/me returns the current team's board state."""
+    """GET /api/v1/board/me"""
+
+    permission_classes = [IsAuthenticated]
 
     def get(self, request, *args, **kwargs):
-        _, board_state = get_or_create_default_team_state()
-        if board_state is None:
-            return Response(
-                {
-                    "code": "BOARD_NOT_READY",
-                    "message": "보드를 먼저 시드해야 합니다.",
-                    "data": None,
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
+        team = _get_team(request)
+        state = get_or_create_board_state(team)
+        cell_states, consumed_cell_indexes = build_cell_states(team)
+        active_access = state.active_challenge_access
 
-        active_access = board_state.active_challenge_access
-        return Response({
-            "code": "SUCCESS",
-            "message": "성공",
-            "data": {
-                "position": board_state.position_id,
-                "type": board_state.position.type,
-                "is_quarantined": board_state.is_quarantined,
-                "dice_rolls_left": board_state.dice_rolls_left,
-                "next_dice_reset_at": board_state.next_dice_reset_at,
-                "quarantine_attempts_left": board_state.quarantine_attempts_left,
-                "airport_move_used": board_state.airport_move_used,
-                "has_passed_start": board_state.has_passed_start,
-                "chance_cards": [],
+        return ok(
+            {
+                "position": state.position_id,
+                "type": state.position.type,
+                "is_quarantined": state.is_quarantined,
+                "dice_rolls_left": state.dice_rolls_left,
+                "next_dice_reset_at": state.next_dice_reset_at,
+                "quarantine_attempts_left": state.quarantine_attempts_left,
+                "airport_move_used": state.airport_move_used,
+                "has_passed_start": state.has_passed_start,
+                "board_completed": is_board_completed(team),
+                "consumed_cell_indexes": consumed_cell_indexes,
+                "cell_states": cell_states,
+                "chance_cards": build_chance_cards_view(team, state),
                 "active_challenge": (
-                    {
-                        "challenge_id": active_access.challenge_id,
-                        "opened_at": active_access.opened_at,
-                    }
+                    {"challenge_id": active_access.challenge_id, "opened_at": active_access.opened_at}
                     if active_access is not None
                     else None
                 ),
-            },
-        })
+            }
+        )
 
 
 class CellCurrentView(APIView):
-    """GET /api/v1/board/cell/current returns current cell and challenge candidates."""
+    """GET /api/v1/board/cell/current"""
+
+    permission_classes = [IsAuthenticated]
 
     def get(self, request, *args, **kwargs):
-        try:
-            _, _, cell, candidates = get_current_cell_candidates()
-        except BoardNotReadyError:
-            return Response(
-                {
-                    "code": "BOARD_NOT_READY",
-                    "message": "보드를 먼저 시드해야 합니다.",
-                    "data": None,
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
+        team = _get_team(request)
+        _, cell, candidates = get_current_cell_candidates(team)
 
-        return Response({
-            "code": "SUCCESS",
-            "message": "성공",
-            "data": {
+        return ok(
+            {
                 "cell_index": cell.cell_index,
                 "type": cell.type,
                 "challenge_candidates": [
-                    ChallengeCandidateSerializer(candidate.challenge).data
-                    for candidate in candidates
+                    ChallengeCandidateSerializer(candidate.challenge).data for candidate in candidates
                 ],
-            },
-        })
+            }
+        )
 
 
 class CellOpenView(APIView):
-    """POST /api/v1/board/cell/open opens one candidate from the current cell."""
+    """POST /api/v1/board/cell/open"""
 
+    permission_classes = [IsAuthenticated]
+
+    @idempotent
     def post(self, request, *args, **kwargs):
+        team = _get_team(request)
         challenge_id = request.data.get("challenge_id")
         if challenge_id is None:
-            return Response(
-                {
-                    "code": "CHALLENGE_ID_REQUIRED",
-                    "message": "challenge_id가 필요합니다.",
-                    "data": None,
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
+            raise ChallengeIdRequired()
         try:
             challenge_id = uuid.UUID(str(challenge_id))
-            _, _, access, solve_deadline_at = open_current_cell_challenge(challenge_id)
         except ValueError:
-            return Response(
-                {
-                    "code": "CHALLENGE_ID_REQUIRED",
-                    "message": "challenge_id가 필요합니다.",
-                    "data": None,
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        except BoardNotReadyError:
-            return Response(
-                {
-                    "code": "BOARD_NOT_READY",
-                    "message": "보드를 먼저 시드해야 합니다.",
-                    "data": None,
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
-        except NotChallengeCellError:
-            return Response(
-                {
-                    "code": "NOT_CHALLENGE_CELL",
-                    "message": "현재 위치가 문제 칸이 아닙니다.",
-                    "data": None,
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
-        except CellAlreadyOpenedError:
-            return Response(
-                {
-                    "code": "CELL_ALREADY_OPENED",
-                    "message": "현재 칸에서는 이미 문제를 열었습니다.",
-                    "data": None,
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
-        except ChallengeNotCandidateError:
-            return Response(
-                {
-                    "code": "CHALLENGE_NOT_CANDIDATE",
-                    "message": "현재 칸에서 선택할 수 없는 문제입니다.",
-                    "data": None,
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
+            raise ChallengeIdRequired()
 
-        return Response({
-            "code": "SUCCESS",
-            "message": "성공",
-            "data": {
+        access, solve_deadline_at = open_current_cell_challenge(team, challenge_id)
+
+        return ok(
+            {
                 "cell_index": access.source_cell_id,
                 "challenge_id": access.challenge_id,
                 "opened_at": access.opened_at,
                 "solve_deadline_at": solve_deadline_at,
                 "remaining_seconds": 900,
-            },
-        })
+            }
+        )
 
 
 class ChanceCardCatalogView(ListAPIView):
-    """GET /api/v1/board/chance/catalog returns chance card definitions."""
+    """GET /api/v1/board/chance/catalog — 인증 불필요."""
 
+    permission_classes = [AllowAny]
     queryset = ChanceCard.objects.all()
     serializer_class = ChanceCardSerializer
 
     def list(self, request, *args, **kwargs):
         serializer = self.get_serializer(self.get_queryset(), many=True)
-        return Response({
-            "code": "SUCCESS",
-            "message": "성공",
-            "data": {
-                "cards": serializer.data,
-                "total_count": len(serializer.data),
-            },
-        })
+        return ok({"cards": serializer.data, "total_count": len(serializer.data)})
 
 
 class DiceStatusView(APIView):
-    """GET /api/v1/board/dice/status for the single-team development mode."""
+    """GET /api/v1/board/dice/status"""
+
+    permission_classes = [IsAuthenticated]
 
     def get(self, request, *args, **kwargs):
-        _, board_state = get_or_create_default_team_state()
-        if board_state is None:
-            return Response(
-                {
-                    "code": "BOARD_NOT_READY",
-                    "message": "보드를 먼저 시드해야 합니다.",
-                    "data": None,
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
+        team = _get_team(request)
+        state = get_or_create_board_state(team)
+        blocked_reason = compute_blocked_reason(team, state)
 
-        timer_running = board_state.active_challenge_access_id is not None
-        blocked_reason = None
-        if board_state.is_quarantined:
-            blocked_reason = "QUARANTINED"
-        elif timer_running:
-            blocked_reason = "TIMER_RUNNING"
-        elif board_state.dice_rolls_left <= 0:
-            blocked_reason = "NO_ROLL_LEFT"
-
-        return Response({
-            "code": "SUCCESS",
-            "message": "성공",
-            "data": {
+        return ok(
+            {
                 "can_roll": blocked_reason is None,
-                "dice_rolls_left": board_state.dice_rolls_left,
-                "is_quarantined": board_state.is_quarantined,
-                "timer_running": timer_running,
+                "dice_rolls_left": state.dice_rolls_left,
+                "is_quarantined": state.is_quarantined,
+                "timer_running": blocked_reason == "TIMER_RUNNING",
                 "blocked_reason": blocked_reason,
                 "server_time": timezone.now(),
-                "next_dice_reset_at": board_state.next_dice_reset_at,
-                "quarantine_released_at": board_state.quarantine_released_at,
-            },
-        })
+                "next_dice_reset_at": state.next_dice_reset_at,
+                "quarantine_released_at": state.quarantine_released_at,
+            }
+        )
 
 
 class DiceRollView(APIView):
-    """POST /api/v1/board/dice/roll for the single-team development mode."""
+    """POST /api/v1/board/dice/roll — 팀장만."""
 
+    permission_classes = [IsAuthenticated, IsTeamLeader]
+
+    @idempotent
     def post(self, request, *args, **kwargs):
-        try:
-            (
-                _,
-                _,
-                roll,
-                event_triggered,
-                skipped_cells,
-                passed_start,
-                start_reward,
-            ) = roll_default_team_dice()
-        except BoardNotReadyError:
-            return Response(
-                {
-                    "code": "BOARD_NOT_READY",
-                    "message": "보드를 먼저 시드해야 합니다.",
-                    "data": None,
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
-        except QuarantinedError:
-            return Response(
-                {
-                    "code": "QUARANTINED",
-                    "message": "무인도 상태에서는 주사위를 굴릴 수 없습니다.",
-                    "data": None,
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
-        except TimerRunningError:
-            return Response(
-                {
-                    "code": "TIMER_RUNNING",
-                    "message": "진행 중인 문제가 있어 주사위를 굴릴 수 없습니다.",
-                    "data": None,
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
-        except NoDiceRollsLeftError:
-            return Response(
-                {
-                    "code": "NO_ROLL_LEFT",
-                    "message": "남은 주사위 횟수가 없습니다.",
-                    "data": None,
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
+        _assert_no_body(request)
+        team = _get_team(request)
+        return ok(roll_dice(team))
 
-        return Response({
-            "code": "SUCCESS",
-            "message": "성공",
-            "data": {
-                "dice_a": roll.dice_a,
-                "dice_b": roll.dice_b,
-                "rolled_number": roll.rolled_number,
-                "previous_position": roll.previous_position,
-                "current_position": roll.current_position,
-                "skipped_cells": skipped_cells,
-                "passed_start": passed_start,
-                "start_reward": start_reward,
-                "board_event_code": event_triggered,
-            },
-        })
+
+class DiceConfirmView(APIView):
+    """POST /api/v1/board/dice/confirm — POST_ROLL 찬스카드를 보유한 채 굴린 결과를 확정한다. 팀장만."""
+
+    permission_classes = [IsAuthenticated, IsTeamLeader]
+
+    @idempotent
+    def post(self, request, *args, **kwargs):
+        _assert_no_body(request)
+        team = _get_team(request)
+        return ok(confirm_dice_roll(team))
 
 
 class AirportMoveView(APIView):
-    """POST /api/v1/board/airport/move moves the team from the airport cell to a chosen destination."""
+    """POST /api/v1/board/airport/move — 팀장만."""
 
+    permission_classes = [IsAuthenticated, IsTeamLeader]
+
+    @idempotent
     def post(self, request, *args, **kwargs):
+        team = _get_team(request)
         destination_index = request.data.get("destination_index")
-        if isinstance(destination_index, bool) or not isinstance(destination_index, int):
-            return Response(
-                {
-                    "code": "INVALID_DESTINATION_INDEX",
-                    "message": "이동할 수 없는 칸입니다.",
-                    "data": None,
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        try:
-            (
-                _,
-                _,
-                previous_position,
-                current_position,
-                event_triggered,
-                passed_start,
-                start_reward,
-            ) = move_team_via_airport(destination_index)
-        except InvalidDestinationIndexError:
-            return Response(
-                {
-                    "code": "INVALID_DESTINATION_INDEX",
-                    "message": "이동할 수 없는 칸입니다.",
-                    "data": None,
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        except BoardNotReadyError:
-            return Response(
-                {
-                    "code": "BOARD_NOT_READY",
-                    "message": "보드를 먼저 시드해야 합니다.",
-                    "data": None,
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
-        except NotAirportCellError:
-            return Response(
-                {
-                    "code": "NOT_AIRPORT_CELL",
-                    "message": "현재 위치가 공항 칸이 아닙니다.",
-                    "data": None,
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
-        except AirportMoveAlreadyUsedError:
-            return Response(
-                {
-                    "code": "AIRPORT_MOVE_ALREADY_USED",
-                    "message": "이미 공항 이동을 사용했습니다.",
-                    "data": None,
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
-
-        return Response({
-            "code": "SUCCESS",
-            "message": "성공",
-            "data": {
-                "previous_position": previous_position,
-                "current_position": current_position,
-                "board_event_code": event_triggered,
-                "passed_start": passed_start,
-                "start_reward": start_reward,
-            },
-        })
+        return ok(move_team_via_airport(team, destination_index))
 
 
-class DiceResetView(APIView):
-    """POST /api/v1/board/dice/reset for local preview convenience."""
+class ChanceNowView(APIView):
+    """POST /api/v1/board/chance/now — 찬스칸 도착 시 카드 뽑기. 팀장만."""
 
+    permission_classes = [IsAuthenticated, IsTeamLeader]
+
+    @idempotent
     def post(self, request, *args, **kwargs):
-        try:
-            _, board_state = reset_default_team_dice()
-        except BoardNotReadyError:
-            return Response(
-                {
-                    "code": "BOARD_NOT_READY",
-                    "message": "보드를 먼저 시드해야 합니다.",
-                    "data": None,
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
+        _assert_no_body(request)
+        team = _get_team(request)
+        draw, dice_rolls_left = draw_chance_card(team)
 
-        return Response({
-            "code": "SUCCESS",
-            "message": "주사위 리셋 성공",
-            "data": {
-                "can_roll": board_state.dice_rolls_left > 0,
-                "dice_rolls_left": board_state.dice_rolls_left,
-            },
-        })
+        return ok(
+            {
+                "card_id": draw.card_id,
+                "name": draw.card.name,
+                "description": draw.card.description,
+                "effect": draw.card.effect,
+                "usage_timing": draw.card.usage_timing,
+                "used": False,
+                "dice_rolls_left": dice_rolls_left,
+            }
+        )
+
+
+class ChanceUseView(APIView):
+    """POST /api/v1/board/chance/use — 팀장만."""
+
+    permission_classes = [IsAuthenticated, IsTeamLeader]
+
+    @idempotent
+    def post(self, request, *args, **kwargs):
+        team = _get_team(request)
+        card_id = request.data.get("card_id")
+        return ok(use_chance_card(team, card_id, request.data))
+
+
+class ChanceConfirmView(APIView):
+    """POST /api/v1/board/chance/confirm — 주사위 2회 굴림 후 선택 카드의 2단계 확정. 팀장만."""
+
+    permission_classes = [IsAuthenticated, IsTeamLeader]
+
+    @idempotent
+    def post(self, request, *args, **kwargs):
+        team = _get_team(request)
+        choice = request.data.get("choice")
+        return ok(confirm_chance_choice(team, choice))
 
 
 class OpenedChallengesView(APIView):
-    """GET /api/v1/board/opened_challenges returns opened challenge list."""
+    """GET /api/v1/board/opened_challenges"""
+
+    permission_classes = [IsAuthenticated]
 
     def get(self, request, *args, **kwargs):
-        return Response({
-            "code": "SUCCESS",
-            "message": "열린 문제 목록 조회 성공",
-            "data": get_opened_challenges_summary(),
-        })
+        team = _get_team(request)
+        return ok(get_opened_challenges_summary(team))
 
 
-class ChallengeListView(APIView):
-    """GET /api/v1/board/challenges returns all challenges with team progress."""
+class DebugSolveActiveChallengeView(APIView):
+    """POST /board/_debug/solve — 로컬 프리뷰 전용. 실제 플래그 제출 API가 아니다.
 
-    def get(self, request, *args, **kwargs):
-        return Response({
-            "code": "SUCCESS",
-            "message": "문제 목록 조회 성공",
-            "data": get_challenges_progress_summary(),
-        })
+    /api/v1 명세에 없고 DEBUG=True일 때만 열린다. 진행 중인 문제를 강제로 CLEARED 처리해
+    TIMER_RUNNING 상태를 수동 테스트에서 빠르게 벗어나게 해준다.
+    """
 
-
-class ChallengeSolveView(APIView):
-    """POST /api/v1/board/challenge/solve marks the active challenge as cleared."""
+    permission_classes = [IsAuthenticated]
 
     def post(self, request, *args, **kwargs):
-        try:
-            (
-                _,
-                board_state,
-                challenge_access,
-                is_extra_dice_granted,
-            ) = solve_default_team_active_challenge()
-        except BoardNotReadyError:
-            return Response(
-                {
-                    "code": "BOARD_NOT_READY",
-                    "message": "보드를 먼저 시드해야 합니다.",
-                    "data": None,
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
-
-        return Response({
-            "code": "SUCCESS",
-            "message": "문제 풀이 처리 성공",
-            "data": {
-                "solved_challenge": (
-                    TeamChallengeAccessSerializer(challenge_access).data
-                    if challenge_access is not None
-                    else None
-                ),
+        if not settings.DEBUG:
+            raise Http404
+        team = _get_team(request)
+        state, access, is_extra_dice_granted = solve_active_challenge(team)
+        return ok(
+            {
+                "solved_challenge_id": access.challenge_id if access is not None else None,
                 "is_extra_dice_granted": is_extra_dice_granted,
-                "dice_rolls_left": board_state.dice_rolls_left,
-                "board_state": TeamBoardStateSerializer(board_state).data,
-            },
-        })
+                "dice_rolls_left": state.dice_rolls_left,
+            }
+        )

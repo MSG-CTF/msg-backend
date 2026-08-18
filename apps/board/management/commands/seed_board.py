@@ -2,8 +2,20 @@ import random
 
 from django.core.management.base import BaseCommand
 
-from apps.board.models import Cell, Challenge, DiceRoll, TeamBoardState, TeamCellCandidate, TeamChallengeAccess
-from apps.teams.models import get_default_team
+from apps.board.models import (
+    Cell,
+    ChanceCard,
+    Challenge,
+    DiceRoll,
+    PendingDiceRoll,
+    TeamBoardState,
+    TeamCellCandidate,
+    TeamCellConsumption,
+    TeamChallengeAccess,
+    TeamChanceCard,
+)
+from apps.accounts.models import User
+from apps.board.services import get_default_team
 
 
 BOARD_SIZE = 36
@@ -32,17 +44,73 @@ DIFFICULTY_LABELS = {
 
 CATEGORIES = ["WEB", "SYSTEM", "CRYPTO", "REV", "MISC", "FORENSIC"]
 
+CHANCE_CARDS = [
+    {
+        "card_id": "card_reroll",
+        "name": "주사위 다시 굴리기",
+        "description": "굴리기 전 위치 기준으로 새로 굴려서 즉시 재이동합니다.",
+        "effect": "RE_ROLL",
+        "usage_timing": ChanceCard.UsageTiming.POST_ROLL,
+    },
+    {
+        "card_id": "card_roll_twice_choose",
+        "name": "주사위 2회 굴림 후 선택",
+        "description": "한 번 더 굴려 두 값 중 하나를 골라 이동합니다.",
+        "effect": "ROLL_TWICE_CHOOSE",
+        "usage_timing": ChanceCard.UsageTiming.POST_ROLL,
+    },
+    {
+        "card_id": "card_move_offset",
+        "name": "주변 칸 이동",
+        "description": "현재 위치에서 앞/뒤 1~3칸을 추가로 이동합니다.",
+        "effect": "MOVE_OFFSET",
+        "usage_timing": ChanceCard.UsageTiming.POST_ROLL,
+    },
+    {
+        "card_id": "card_free_travel",
+        "name": "세계여행",
+        "description": "원하는 칸으로 자유롭게 이동합니다.",
+        "effect": "FREE_MOVE",
+        "usage_timing": ChanceCard.UsageTiming.PRE_ROLL,
+    },
+    {
+        "card_id": "card_extra_roll",
+        "name": "주사위 보너스",
+        "description": "주사위를 굴릴 수 있는 횟수가 1회 늘어납니다.",
+        "effect": "GRANT_EXTRA_ROLL",
+        "usage_timing": ChanceCard.UsageTiming.PRE_ROLL,
+    },
+    {
+        "card_id": "card_quarantine_defense",
+        "name": "무인도 방어",
+        "description": "탈출 시도 소모 없이 즉시 무인도에서 탈출합니다.",
+        "effect": "QUARANTINE_ESCAPE_FREE",
+        "usage_timing": ChanceCard.UsageTiming.QUARANTINE_STATE,
+    },
+    {
+        "card_id": "card_move_to_quarantine",
+        "name": "무인도 이동",
+        "description": "즉시 무인도 칸으로 강제 이동합니다.",
+        "effect": "FORCE_MOVE_TO_QUARANTINE",
+        "usage_timing": ChanceCard.UsageTiming.PRE_ROLL,
+    },
+]
+
 
 class Command(BaseCommand):
     help = "Seed the fixed board, 30 demo challenges, and the single default team state."
 
     def handle(self, *args, **options):
+        PendingDiceRoll.objects.all().delete()
         DiceRoll.objects.all().delete()
+        TeamChanceCard.objects.all().delete()
+        TeamCellConsumption.objects.all().delete()
         TeamBoardState.objects.all().delete()
         TeamCellCandidate.objects.all().delete()
         TeamChallengeAccess.objects.all().delete()
         Challenge.objects.all().delete()
         Cell.objects.all().delete()
+        ChanceCard.objects.all().delete()
 
         pool = []
         for difficulty, count in DIFFICULTY_COUNTS.items():
@@ -101,6 +169,8 @@ class Command(BaseCommand):
 
         Challenge.objects.bulk_create(challenges)
 
+        ChanceCard.objects.bulk_create([ChanceCard(**card) for card in CHANCE_CARDS])
+
         team = get_default_team()
         TeamBoardState.objects.update_or_create(
             team=team,
@@ -111,7 +181,16 @@ class Command(BaseCommand):
             },
         )
 
+        if not User.objects.filter(login_id="demo_leader").exists():
+            leader = User(login_id="demo_leader", nickname="데모팀장", team=team, is_leader=True)
+            leader.set_password("demo1234")
+            leader.save()
+        if not User.objects.filter(login_id="demo_member").exists():
+            member = User(login_id="demo_member", nickname="데모팀원", team=team, is_leader=False)
+            member.set_password("demo1234")
+            member.save()
+
         self.stdout.write(
-            f"보드 칸 36개, 문제 {len(challenges)}개, 기본 팀 '{team.name}' 준비 완료 "
-            f"(문제 칸 {len(challenge_indexes)}개)"
+            f"보드 칸 36개, 문제 {len(challenges)}개, 기본 팀 '{team.team_name}' 준비 완료 "
+            f"(문제 칸 {len(challenge_indexes)}개, 로그인: demo_leader/demo_member, 비밀번호 demo1234)"
         )

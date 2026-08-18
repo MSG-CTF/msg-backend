@@ -1,767 +1,420 @@
-<!doctype html>
+{% load static %}
+<!DOCTYPE html>
 <html lang="ko">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>MSG Board Preview</title>
-  <style>
-    :root {
-      --bg: #f5f7fa;
-      --panel: #ffffff;
-      --ink: #17202a;
-      --muted: #687587;
-      --line: #d8e0ea;
-      --accent: #0f8b8d;
-      --accent-dark: #096a6c;
-      --challenge: #edf1f6;
-      --start: #cdeed5;
-      --chance: #ffefb8;
-      --airport: #dbe8ff;
-      --quarantine: #ffe0df;
-      --roulette: #eadfff;
-      --opened: #fff4d6;
-      --solved: #dff5e8;
-    }
-
-    * { box-sizing: border-box; }
-
-    body {
-      margin: 0;
-      min-height: 100vh;
-      background: var(--bg);
-      color: var(--ink);
-      font-family: Arial, "Noto Sans KR", sans-serif;
-    }
-
-    .shell {
-      width: min(1180px, calc(100vw - 32px));
-      margin: 0 auto;
-      padding: 28px 0;
-    }
-
-    .topbar {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 16px;
-      margin-bottom: 18px;
-    }
-
-    h1 {
-      margin: 0;
-      font-size: 26px;
-      line-height: 1.15;
-      letter-spacing: 0;
-    }
-
-    .status {
-      min-height: 34px;
-      padding: 8px 12px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--panel);
-      color: var(--muted);
-      font-size: 14px;
-    }
-
-    .layout {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) 340px;
-      gap: 18px;
-      align-items: start;
-    }
-
-    .panel {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--panel);
-      box-shadow: 0 6px 18px rgba(20, 30, 45, 0.06);
-    }
-
-    .board-panel { padding: 16px; }
-
-    .side {
-      display: grid;
-      gap: 14px;
-    }
-
-    .side-section { padding: 16px; }
-
-    .section-title {
-      margin: 0 0 12px;
-      color: var(--muted);
-      font-size: 15px;
-    }
-
-    .board {
-      display: grid;
-      grid-template-columns: repeat(6, minmax(84px, 1fr));
-      gap: 8px;
-    }
-
-    .tile {
-      position: relative;
-      min-height: 88px;
-      padding: 10px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--challenge);
-      overflow: hidden;
-    }
-
-    .tile.START { background: var(--start); }
-    .tile.CHANCE { background: var(--chance); }
-    .tile.AIRPORT { background: var(--airport); }
-    .tile.QUARANTINE { background: var(--quarantine); }
-    .tile.ROULETTE { background: var(--roulette); }
-
-    .tile.is-current {
-      outline: 3px solid var(--accent);
-      outline-offset: 0;
-    }
-
-    .tile.is-visited {
-      box-shadow: inset 0 0 0 2px rgba(15, 139, 141, 0.2);
-    }
-
-    .marker {
-      position: absolute;
-      right: 8px;
-      top: 8px;
-      display: none;
-      width: 24px;
-      height: 24px;
-      border-radius: 50%;
-      align-items: center;
-      justify-content: center;
-      background: var(--accent);
-      color: #fff;
-      font-size: 12px;
-      font-weight: 700;
-    }
-
-    .tile.is-current .marker { display: flex; }
-
-    .tile-index {
-      color: var(--muted);
-      font-size: 13px;
-    }
-
-    .tile-name {
-      margin-top: 8px;
-      font-size: 15px;
-      font-weight: 700;
-      line-height: 1.25;
-      overflow-wrap: anywhere;
-    }
-
-    .tile-type {
-      margin-top: 6px;
-      color: var(--muted);
-      font-size: 12px;
-    }
-
-    .visited-tag {
-      display: inline-block;
-      margin-top: 6px;
-      padding: 2px 6px;
-      border-radius: 999px;
-      background: rgba(15, 139, 141, 0.1);
-      color: var(--accent-dark);
-      font-size: 11px;
-      font-weight: 700;
-    }
-
-    .kv {
-      display: grid;
-      gap: 10px;
-    }
-
-    .row {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      padding-bottom: 10px;
-      border-bottom: 1px solid var(--line);
-      font-size: 14px;
-    }
-
-    .row:last-child {
-      border-bottom: 0;
-      padding-bottom: 0;
-    }
-
-    .label { color: var(--muted); }
-
-    .value {
-      font-weight: 700;
-      text-align: right;
-    }
-
-    .actions {
-      display: grid;
-      grid-template-columns: 1fr 1fr 1fr;
-      gap: 10px;
-    }
-
-    button {
-      min-height: 42px;
-      border: 1px solid var(--accent);
-      border-radius: 8px;
-      background: var(--accent);
-      color: #fff;
-      font-size: 14px;
-      font-weight: 700;
-      cursor: pointer;
-    }
-
-    button.secondary {
-      background: #fff;
-      color: var(--accent-dark);
-    }
-
-    button:disabled {
-      border-color: #bdc7d3;
-      background: #d8dee6;
-      color: #778393;
-      cursor: not-allowed;
-    }
-
-    .result,
-    .challenge-box {
-      min-height: 78px;
-      padding: 12px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: #f8fafc;
-      font-size: 14px;
-      line-height: 1.45;
-      white-space: pre-line;
-    }
-
-    .candidate {
-      display: grid;
-      grid-template-columns: 1fr auto;
-      gap: 10px;
-      align-items: center;
-      padding: 10px 0;
-      border-bottom: 1px solid var(--line);
-    }
-
-    .candidate:last-child { border-bottom: 0; }
-
-    .candidate-title {
-      margin: 0 0 4px;
-      font-weight: 700;
-    }
-
-    .candidate-meta {
-      margin: 0;
-      color: var(--muted);
-      font-size: 13px;
-    }
-
-    .candidate button {
-      min-width: 68px;
-      min-height: 34px;
-    }
-
-    pre {
-      max-height: 280px;
-      margin: 0;
-      overflow: auto;
-      white-space: pre-wrap;
-      word-break: break-word;
-      color: #2c3745;
-      font-size: 12px;
-      line-height: 1.45;
-    }
-
-    .lists-panel {
-      margin-top: 18px;
-      padding: 16px;
-    }
-
-    .lists-grid {
-      display: grid;
-      grid-template-columns: 1.3fr 1fr 1fr;
-      gap: 14px;
-      align-items: start;
-    }
-
-    .list-card {
-      min-height: 220px;
-      padding: 14px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: #fbfcfe;
-    }
-
-    .list-head {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-      margin-bottom: 10px;
-    }
-
-    .list-head .section-title {
-      margin: 0;
-    }
-
-    .count-pill {
-      padding: 3px 8px;
-      border-radius: 999px;
-      background: #e9eef5;
-      color: var(--muted);
-      font-size: 12px;
-      font-weight: 700;
-    }
-
-    .challenge-list {
-      display: grid;
-      gap: 8px;
-      max-height: 360px;
-      overflow: auto;
-      padding-right: 4px;
-    }
-
-    .challenge-item {
-      display: grid;
-      gap: 5px;
-      padding: 9px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: #fff;
-      font-size: 13px;
-    }
-
-    .challenge-item.is-opened { background: var(--opened); }
-    .challenge-item.is-solved { background: var(--solved); }
-
-    .challenge-item-title {
-      display: flex;
-      justify-content: space-between;
-      gap: 8px;
-      font-weight: 700;
-    }
-
-    .challenge-item-meta {
-      color: var(--muted);
-      font-size: 12px;
-    }
-
-    .badge {
-      flex: 0 0 auto;
-      padding: 2px 6px;
-      border-radius: 999px;
-      background: #e9eef5;
-      color: var(--muted);
-      font-size: 11px;
-      font-weight: 700;
-    }
-
-    .badge.opened {
-      background: #ffe1a8;
-      color: #7a4d00;
-    }
-
-    .badge.solved {
-      background: #bde8cd;
-      color: #176035;
-    }
-
-    .empty-list {
-      padding: 14px;
-      border: 1px dashed var(--line);
-      border-radius: 8px;
-      color: var(--muted);
-      font-size: 13px;
-      text-align: center;
-    }
-
-    @media (max-width: 860px) {
-      .layout { grid-template-columns: 1fr; }
-      .board { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-      .lists-grid { grid-template-columns: 1fr; }
-    }
-
-    @media (max-width: 520px) {
-      .shell {
-        width: min(100vw - 20px, 1180px);
-        padding: 16px 0;
-      }
-
-      .topbar {
-        align-items: flex-start;
-        flex-direction: column;
-      }
-
-      .board { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .actions { grid-template-columns: 1fr; }
-    }
-  </style>
+<meta charset="UTF-8" />
+<title>MSG Board Preview</title>
+<style>
+  :root {
+    --bg: #0f1420; --panel: #171d2c; --border: #2a3346; --text: #e6e9f2; --muted: #8b93a8;
+    --accent: #5b8cff; --good: #3ecf8e; --bad: #ff6b6b; --warn: #f5b74e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, "Segoe UI", Pretendard, sans-serif; font-size: 14px;
+  }
+  header {
+    padding: 14px 20px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  #authBox { display: flex; align-items: center; gap: 8px; }
+  #authBox input {
+    background: var(--panel); border: 1px solid var(--border); color: var(--text);
+    padding: 6px 8px; border-radius: 6px; width: 110px;
+  }
+  button {
+    background: var(--accent); color: white; border: none; border-radius: 6px;
+    padding: 6px 12px; cursor: pointer; font-size: 13px;
+  }
+  button.secondary { background: var(--panel); border: 1px solid var(--border); color: var(--text); }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  button:hover:not(:disabled) { filter: brightness(1.1); }
+  main {
+    display: grid; grid-template-columns: 1.3fr 1fr 1fr; gap: 14px; padding: 16px;
+    max-width: 1500px; margin: 0 auto;
+  }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .card h2 { font-size: 13px; margin: 0 0 4px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; font-size: 12.5px; }
+  .kv .k { color: var(--muted); }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; background: #232b40; }
+  .pill.on { background: rgba(62,207,142,0.2); color: var(--good); }
+  .pill.off { background: rgba(255,107,107,0.2); color: var(--bad); }
+  #boardGrid { display: grid; grid-template-columns: repeat(9, 1fr); gap: 3px; }
+  .cell {
+    aspect-ratio: 1; border-radius: 5px; background: #232b40; display: flex; align-items: center;
+    justify-content: center; font-size: 10px; color: var(--muted); position: relative; cursor: default;
+  }
+  .cell.consumed { background: #1c2233; color: #4a5473; }
+  .cell.START { background: #2f4a35; color: var(--good); }
+  .cell.CHANCE { background: #4a3f2f; color: var(--warn); }
+  .cell.AIRPORT { background: #2f3d4a; color: #6fb4ff; }
+  .cell.QUARANTINE { background: #4a2f2f; color: var(--bad); }
+  .cell.ROULETTE { background: #3f2f4a; color: #c48bff; }
+  .cell.here { outline: 2px solid white; z-index: 1; }
+  select, input[type=number], input[type=text] {
+    background: #0f1420; border: 1px solid var(--border); color: var(--text);
+    padding: 5px 8px; border-radius: 6px; font-size: 13px;
+  }
+  .candidate {
+    border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font-size: 12px;
+    display: flex; justify-content: space-between; align-items: center; gap: 6px;
+  }
+  #log {
+    grid-column: 1 / -1; max-height: 260px; overflow-y: auto; font-family: ui-monospace, Consolas, monospace;
+    font-size: 11.5px; white-space: pre-wrap;
+  }
+  #log .entry { border-bottom: 1px dashed var(--border); padding: 6px 0; }
+  #log .ok { color: var(--good); } #log .err { color: var(--bad); }
+  .muted { color: var(--muted); }
+  .small { font-size: 11.5px; }
+</style>
 </head>
 <body>
-  <main class="shell">
-    <div class="topbar">
-      <h1>MSG Board Preview</h1>
-      <div class="status" id="status">연결 준비 중</div>
+
+<header>
+  <div>
+    <h1>MSG Board / KOTH 프리뷰</h1>
+    <div class="sub">실제 API를 그대로 호출하는 로컬 확인용 페이지 (auth 필요)</div>
+  </div>
+  <div id="authBox">
+    <input id="loginId" placeholder="login_id" value="demo_leader" />
+    <input id="password" type="password" placeholder="password" value="demo1234" />
+    <button id="loginBtn" onclick="login()">로그인</button>
+    <span id="whoami" class="pill muted">로그아웃 상태</span>
+    <button class="secondary" onclick="logout()">로그아웃</button>
+  </div>
+</header>
+
+<main>
+
+  <div class="card">
+    <h2>보드 (36칸)</h2>
+    <div id="boardGrid"></div>
+    <div class="row small muted">
+      <span class="pill START">START</span><span class="pill CHANCE">CHANCE</span>
+      <span class="pill AIRPORT">AIRPORT</span><span class="pill QUARANTINE">무인도</span>
+      <span class="pill ROULETTE">룰렛</span><span class="pill consumed">소모됨</span>
     </div>
+  </div>
 
-    <div class="layout">
-      <section class="panel board-panel">
-        <div class="board" id="board"></div>
-      </section>
+  <div class="card">
+    <h2>내 팀 상태 (/board/me)</h2>
+    <div id="meBox" class="kv"></div>
+    <button class="secondary" onclick="loadMe()">새로고침</button>
+  </div>
 
-      <aside class="side">
-        <section class="panel side-section">
-          <p class="section-title">팀 상태</p>
-          <div class="kv">
-            <div class="row"><span class="label">팀</span><span class="value" id="teamName">-</span></div>
-            <div class="row"><span class="label">현재 위치</span><span class="value" id="position">-</span></div>
-            <div class="row"><span class="label">칸 타입</span><span class="value" id="cellType">-</span></div>
-            <div class="row"><span class="label">남은 주사위</span><span class="value" id="rollsLeft">-</span></div>
-            <div class="row"><span class="label">점수</span><span class="value" id="score">-</span></div>
-            <div class="row"><span class="label">마일리지</span><span class="value" id="mileage">-</span></div>
-          </div>
-        </section>
-
-        <section class="panel side-section">
-          <p class="section-title">주사위</p>
-          <div class="actions">
-            <button id="rollButton" type="button">굴리기</button>
-            <button class="secondary" id="refreshButton" type="button">새로고침</button>
-            <button class="secondary" id="resetButton" type="button">리셋</button>
-          </div>
-          <div class="result" id="rollResult" style="margin-top: 12px;">아직 굴린 결과가 없습니다.</div>
-        </section>
-
-        <section class="panel side-section">
-          <p class="section-title">현재 칸 문제 후보</p>
-          <div class="challenge-box" id="challengeBox">문제 칸에 도착하면 후보 3개가 표시됩니다.</div>
-          <button class="secondary" id="solveButton" type="button" style="width: 100%; margin-top: 10px;" disabled>풀기 처리</button>
-        </section>
-
-        <section class="panel side-section">
-          <p class="section-title">최근 응답</p>
-          <pre id="debug">{}</pre>
-        </section>
-      </aside>
+  <div class="card">
+    <h2>주사위</h2>
+    <div id="diceStatusBox" class="kv"></div>
+    <div class="row">
+      <button onclick="callApi('POST', '/api/v1/board/dice/roll', null, {idem: true})">주사위 굴리기</button>
+      <button class="secondary" onclick="callApi('POST', '/api/v1/board/dice/confirm', null, {idem: true})">확정(dice/confirm)</button>
     </div>
+    <div class="row small muted">
+      진행 중인 문제 때문에 막혔다면 ↓
+      <button class="secondary" onclick="callApi('POST', '/board/_debug/solve')">데모용 정답 처리 (API 명세 아님)</button>
+    </div>
+  </div>
 
-    <section class="panel lists-panel">
-      <div class="lists-grid">
-        <section class="list-card">
-          <div class="list-head">
-            <p class="section-title">1~30번 전체 문제</p>
-            <span class="count-pill" id="challengeCount">0개</span>
-          </div>
-          <div class="challenge-list" id="allChallengeList"></div>
-        </section>
+  <div class="card">
+    <h2>현재 칸 (/board/cell/current)</h2>
+    <button class="secondary" onclick="loadCellCurrent()">현재 칸 조회</button>
+    <div id="cellCurrentBox"></div>
+  </div>
 
-        <section class="list-card">
-          <div class="list-head">
-            <p class="section-title">열린 문제</p>
-            <span class="count-pill" id="openedCount">0개</span>
-          </div>
-          <div class="challenge-list" id="openedChallengeList"></div>
-        </section>
+  <div class="card">
+    <h2>찬스카드</h2>
+    <div class="row">
+      <button class="secondary" onclick="callApi('GET', '/api/v1/board/chance/catalog')">카탈로그</button>
+      <button onclick="callApi('POST', '/api/v1/board/chance/now', null, {idem: true})">뽑기 (chance/now)</button>
+    </div>
+    <div class="row">
+      <select id="chanceCardId">
+        <option value="card_reroll">card_reroll</option>
+        <option value="card_roll_twice_choose">card_roll_twice_choose</option>
+        <option value="card_move_offset">card_move_offset</option>
+        <option value="card_free_travel">card_free_travel</option>
+        <option value="card_extra_roll">card_extra_roll</option>
+        <option value="card_quarantine_defense">card_quarantine_defense</option>
+        <option value="card_move_to_quarantine">card_move_to_quarantine</option>
+      </select>
+      <input id="chanceExtra1" type="number" placeholder="offset/destination_index" style="width:150px" />
+    </div>
+    <button onclick="useChanceCard()">사용 (chance/use)</button>
+    <div class="row">
+      <select id="chanceChoice"><option value="FIRST">FIRST</option><option value="SECOND">SECOND</option></select>
+      <button class="secondary" onclick="callApi('POST', '/api/v1/board/chance/confirm', {choice: val('chanceChoice')}, {idem: true})">확정 (chance/confirm)</button>
+    </div>
+  </div>
 
-        <section class="list-card">
-          <div class="list-head">
-            <p class="section-title">푼 문제</p>
-            <span class="count-pill" id="solvedCount">0개</span>
+  <div class="card">
+    <h2>공항 이동</h2>
+    <div class="row">
+      <input id="airportDest" type="number" placeholder="destination_index" style="width:150px" />
+      <button onclick="callApi('POST', '/api/v1/board/airport/move', {destination_index: num('airportDest')}, {idem: true})">이동</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>열린 문제 목록</h2>
+    <button class="secondary" onclick="callApi('GET', '/api/v1/board/opened_challenges')">조회</button>
+    <div id="openedBox" class="small"></div>
+  </div>
+
+  <div class="card">
+    <h2>KOTH</h2>
+    <div class="row">
+      <button class="secondary" onclick="loadKothClubs()">클럽 목록</button>
+      <button class="secondary" onclick="loadKothMe()">내 점수</button>
+      <button class="secondary" onclick="callApi('GET', '/api/v1/koth/team_token')">팀 토큰</button>
+    </div>
+    <div id="kothClubsBox" class="small"></div>
+    <div id="kothMeBox" class="small"></div>
+    <div class="row">
+      <select id="kothChallengeId" style="width:260px"></select>
+      <button class="secondary" onclick="loadKothLeaderboard()">순위표</button>
+    </div>
+    <div id="kothLeaderboardBox" class="small"></div>
+  </div>
+
+  <div class="card" style="grid-column: span 3;">
+    <h2>요청 로그 (최근이 위)</h2>
+    <div id="log"></div>
+  </div>
+
+</main>
+
+<script>
+let token = localStorage.getItem('msg_token') || '';
+let cellCandidates = [];
+
+function val(id) { return document.getElementById(id).value; }
+function num(id) { const v = document.getElementById(id).value; return v === '' ? null : Number(v); }
+
+function setToken(t) {
+  token = t;
+  if (t) localStorage.setItem('msg_token', t); else localStorage.removeItem('msg_token');
+  document.getElementById('whoami').textContent = t ? '로그인됨' : '로그아웃 상태';
+  document.getElementById('whoami').className = 'pill ' + (t ? 'on' : 'muted');
+}
+
+function logEntry(method, path, status, body) {
+  const el = document.getElementById('log');
+  const div = document.createElement('div');
+  const ok = status >= 200 && status < 300;
+  div.className = 'entry ' + (ok ? 'ok' : 'err');
+  div.textContent = `[${new Date().toLocaleTimeString()}] ${method} ${path} -> ${status}\n${JSON.stringify(body, null, 2)}`;
+  el.prepend(div);
+}
+
+async function callApi(method, path, body, opts) {
+  opts = opts || {};
+  const headers = { 'Content-Type': 'application/json' };
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  if (opts.idem) headers['Idempotency-Key'] = crypto.randomUUID();
+
+  const res = await fetch(path, {
+    method,
+    headers,
+    body: (method === 'GET' || body === null || body === undefined) ? undefined : JSON.stringify(body),
+  });
+  let data;
+  try { data = await res.json(); } catch (e) { data = { code: 'PARSE_ERROR', message: String(e) }; }
+  logEntry(method, path, res.status, data);
+  if (res.ok || res.status < 500) {
+    afterCall(path, data);
+  }
+  return { status: res.status, data };
+}
+
+function afterCall(path, data) {
+  if (path.startsWith('/api/v1/board/me')) renderMe(data.data);
+  if (path === '/api/v1/board') renderBoard(data.data);
+  if (path === '/api/v1/board/dice/status') renderDiceStatus(data.data);
+  if (path === '/api/v1/board/cell/current') renderCellCurrent(data.data);
+  if (path === '/api/v1/board/opened_challenges') renderOpened(data.data);
+  if (path === '/api/v1/koth/clubs') renderKothClubs(data.data);
+  // 대부분의 쓰기 요청 뒤에는 최신 상태를 다시 그린다.
+  if (['/api/v1/board/dice/roll', '/api/v1/board/dice/confirm', '/api/v1/board/chance/use',
+       '/api/v1/board/chance/confirm', '/api/v1/board/chance/now', '/api/v1/board/airport/move',
+       '/api/v1/board/cell/open', '/board/_debug/solve'].includes(path)) {
+    loadMe(); loadDiceStatus();
+  }
+}
+
+async function login() {
+  const res = await fetch('/api/v1/auth/login', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ login_id: val('loginId'), password: val('password') }),
+  });
+  const data = await res.json();
+  logEntry('POST', '/api/v1/auth/login', res.status, data);
+  if (res.ok) {
+    setToken(data.data.access_token);
+    await Promise.all([loadMe(), loadDiceStatus(), callApi('GET', '/api/v1/board'), loadKothClubs()]);
+  } else {
+    alert('로그인 실패: ' + data.message);
+  }
+}
+
+function logout() { setToken(''); }
+
+async function loadMe() { return callApi('GET', '/api/v1/board/me'); }
+async function loadDiceStatus() { return callApi('GET', '/api/v1/board/dice/status'); }
+async function loadCellCurrent() { return callApi('GET', '/api/v1/board/cell/current'); }
+async function loadKothClubs() { return callApi('GET', '/api/v1/koth/clubs'); }
+
+async function loadKothMe() {
+  const res = await callApi('GET', '/api/v1/koth/me');
+  renderKothMe(res.data.data);
+}
+
+async function loadKothLeaderboard() {
+  const kothChallengeId = val('kothChallengeId');
+  if (!kothChallengeId) return;
+  const res = await callApi(
+    'GET', '/api/v1/koth/leaderboard?koth_challenge_id=' + encodeURIComponent(kothChallengeId)
+  );
+  renderKothLeaderboard(res.data.data);
+}
+
+let lastMe = null;
+let boardCells = [];
+
+function renderBoard(data) {
+  boardCells = data.cells;
+  paintBoard();
+}
+
+function paintBoard() {
+  const grid = document.getElementById('boardGrid');
+  grid.innerHTML = '';
+  const consumed = new Set((lastMe && lastMe.consumed_cell_indexes) || []);
+  const here = lastMe ? lastMe.position : null;
+  boardCells.forEach(cell => {
+    const div = document.createElement('div');
+    div.className = 'cell ' + cell.type + (consumed.has(cell.cell_index) ? ' consumed' : '') + (cell.cell_index === here ? ' here' : '');
+    div.title = `${cell.cell_index}: ${cell.name}${cell.difficulty ? ' (' + cell.difficulty + ')' : ''}`;
+    div.textContent = cell.cell_index;
+    grid.appendChild(div);
+  });
+}
+
+function renderMe(data) {
+  lastMe = data;
+  const box = document.getElementById('meBox');
+  box.innerHTML = '';
+  const rows = [
+    ['위치', data.position + ' (' + data.type + ')'],
+    ['주사위 남음', data.dice_rolls_left],
+    ['무인도', data.is_quarantined ? '예' : '아니오'],
+    ['보드 완료', data.board_completed ? '예' : '아니오'],
+    ['소모한 칸 수', data.consumed_cell_indexes.length + ' / 36'],
+    ['보유 찬스카드', data.chance_cards.map(c => `${c.card_id}${c.used ? '(사용됨)' : c.usable_now ? '(사용가능)' : ''}`).join(', ') || '없음'],
+    ['진행 중인 문제', data.active_challenge ? data.active_challenge.challenge_id : '없음'],
+  ];
+  for (const [k, v] of rows) {
+    box.innerHTML += `<div class="k">${k}</div><div>${v}</div>`;
+  }
+  paintBoard();
+}
+
+function renderDiceStatus(data) {
+  const box = document.getElementById('diceStatusBox');
+  box.innerHTML = `
+    <div class="k">굴릴 수 있음</div><div>${data.can_roll ? '예' : '아니오 (' + data.blocked_reason + ')'}</div>
+    <div class="k">남은 횟수</div><div>${data.dice_rolls_left}</div>
+  `;
+}
+
+function renderCellCurrent(data) {
+  cellCandidates = data.challenge_candidates || [];
+  const box = document.getElementById('cellCurrentBox');
+  if (!cellCandidates.length) {
+    box.innerHTML = `<div class="small muted">칸 타입: ${data.type} — 후보 문제 없음</div>`;
+    return;
+  }
+  box.innerHTML = cellCandidates.map(c => `
+    <div class="candidate">
+      <span>${c.title} (${c.category}, ${c.score}점)</span>
+      <button onclick="openChallenge('${c.challenge_id}')">열기</button>
+    </div>
+  `).join('');
+}
+
+async function openChallenge(challengeId) {
+  await callApi('POST', '/api/v1/board/cell/open', { challenge_id: challengeId }, { idem: true });
+  loadCellCurrent();
+}
+
+function renderOpened(data) {
+  const box = document.getElementById('openedBox');
+  box.innerHTML = `<div>총 ${data.total_count} / 해결 ${data.solved_count} / 점수 ${data.total_score}</div>` +
+    data.opened_challenges.map(c => `<div>${c.is_solved ? '✔' : '·'} ${c.title} (칸 ${c.cell_index})</div>`).join('');
+}
+
+function useChanceCard() {
+  const cardId = val('chanceCardId');
+  const extra = num('chanceExtra1');
+  const body = { card_id: cardId };
+  if (cardId === 'card_move_offset') body.offset = extra;
+  if (cardId === 'card_free_travel') body.destination_index = extra;
+  callApi('POST', '/api/v1/board/chance/use', body, { idem: true });
+}
+
+function renderKothClubs(data) {
+  const box = document.getElementById('kothClubsBox');
+  box.innerHTML = `<div class="muted">문제 ${data.total_count}개 (활성 ${data.active_count}개)</div>` +
+    data.clubs.map(club => `
+      <div><b>${club.name}</b>
+        ${club.challenges.map(c => `
+          <div style="margin-left:8px">
+            · ${c.title} [${c.category}] (${c.status}, open_group ${c.open_group})
+            — 1위: ${c.current_owner_team_name || '없음'} (${c.current_score}점)
+            <br/><span class="muted" style="margin-left:8px">koth_challenge_id: ${c.koth_challenge_id}</span>
           </div>
-          <div class="challenge-list" id="solvedChallengeList"></div>
-        </section>
+        `).join('')}
       </div>
-    </section>
-  </main>
+    `).join('<hr style="border-color:var(--border)"/>');
 
-  <script>
-    const boardEl = document.getElementById("board");
-    const statusEl = document.getElementById("status");
-    const teamNameEl = document.getElementById("teamName");
-    const positionEl = document.getElementById("position");
-    const cellTypeEl = document.getElementById("cellType");
-    const rollsLeftEl = document.getElementById("rollsLeft");
-    const scoreEl = document.getElementById("score");
-    const mileageEl = document.getElementById("mileage");
-    const rollButton = document.getElementById("rollButton");
-    const refreshButton = document.getElementById("refreshButton");
-    const resetButton = document.getElementById("resetButton");
-    const solveButton = document.getElementById("solveButton");
-    const rollResultEl = document.getElementById("rollResult");
-    const challengeBox = document.getElementById("challengeBox");
-    const debugEl = document.getElementById("debug");
-    const allChallengeListEl = document.getElementById("allChallengeList");
-    const openedChallengeListEl = document.getElementById("openedChallengeList");
-    const solvedChallengeListEl = document.getElementById("solvedChallengeList");
-    const challengeCountEl = document.getElementById("challengeCount");
-    const openedCountEl = document.getElementById("openedCount");
-    const solvedCountEl = document.getElementById("solvedCount");
+  const select = document.getElementById('kothChallengeId');
+  const allChallenges = data.clubs.flatMap(club => club.challenges.map(c => ({ ...c, clubName: club.name })));
+  select.innerHTML = allChallenges
+    .map(c => `<option value="${c.koth_challenge_id}">${c.clubName} - ${c.title}</option>`)
+    .join('');
+}
 
-    let boardCells = [];
-    let boardMe = null;
-    let cellCurrent = null;
-    let openedChallenges = [];
-    let allChallenges = [];
+function renderKothMe(data) {
+  const box = document.getElementById('kothMeBox');
+  box.innerHTML = `<div>총 KOTH 점수: ${data.total_koth_score}</div>` +
+    data.challenges.map(c => `
+      <div>· ${c.title}: ${c.earned_score}점${c.rank ? ` (${c.rank}위)` : ''} [${c.status}]</div>
+    `).join('');
+}
 
-    const typeLabels = {
-      START: "출발",
-      CHALLENGE: "문제",
-      CHANCE: "황금열쇠",
-      AIRPORT: "기차",
-      QUARANTINE: "무인도",
-      ROULETTE: "룰렛",
-    };
+function renderKothLeaderboard(data) {
+  const box = document.getElementById('kothLeaderboardBox');
+  box.innerHTML = `<div><b>${data.title}</b> 순위표 (${data.status})</div>` +
+    (data.leaderboard.length
+      ? data.leaderboard.map(row => `<div>${row.rank}. ${row.team_name} — ${row.earned_score}점</div>`).join('')
+      : `<div class="muted">아직 점수가 없습니다.</div>`);
+}
 
-    async function fetchJson(url, options = {}) {
-      const response = await fetch(url, {
-        headers: { "Content-Type": "application/json" },
-        ...options,
-      });
-      const body = await response.json();
-      if (!response.ok) {
-        const message = body.message || response.statusText;
-        throw Object.assign(new Error(message), { response, body });
-      }
-      return body;
-    }
+if (token) {
+  setToken(token);
+  Promise.all([loadMe(), loadDiceStatus(), callApi('GET', '/api/v1/board')]).catch(() => {});
+} else {
+  callApi('GET', '/api/v1/board');
+}
+</script>
 
-    function renderBoard() {
-      const current = boardMe ? boardMe.position : null;
-      const visitedCells = new Set(openedChallenges.map((challenge) => challenge.cell_index));
-      boardEl.innerHTML = boardCells.map((cell) => {
-        const currentClass = cell.cell_index === current ? " is-current" : "";
-        const visitedClass = visitedCells.has(cell.cell_index) ? " is-visited" : "";
-        const visitedTag = visitedCells.has(cell.cell_index) ? '<div class="visited-tag">방문</div>' : "";
-        return `
-          <article class="tile ${cell.type}${currentClass}${visitedClass}">
-            <div class="marker">팀</div>
-            <div class="tile-index">#${cell.cell_index}</div>
-            <div class="tile-name">${cell.name}</div>
-            <div class="tile-type">${typeLabels[cell.type] || cell.type}</div>
-            ${visitedTag}
-          </article>
-        `;
-      }).join("");
-    }
-
-    function renderSummary(teamPayload, dicePayload) {
-      const team = teamPayload.data.team;
-      teamNameEl.textContent = team.name;
-      positionEl.textContent = boardMe ? boardMe.position : "-";
-      cellTypeEl.textContent = boardMe ? boardMe.type : "-";
-      rollsLeftEl.textContent = dicePayload.data.dice_rolls_left;
-      scoreEl.textContent = team.total_score;
-      mileageEl.textContent = team.mileage_balance;
-      rollButton.disabled = !dicePayload.data.can_roll;
-      solveButton.disabled = !boardMe || !boardMe.active_challenge;
-      statusEl.textContent = dicePayload.data.can_roll ? "주사위 가능" : dicePayload.data.blocked_reason || "대기";
-    }
-
-    function findOpenedChallenge(challengeId) {
-      return openedChallenges.find((item) => item.challenge_id === challengeId);
-    }
-
-    function renderChallengeBox() {
-      if (boardMe && boardMe.active_challenge) {
-        const active = boardMe.active_challenge;
-        const detail = findOpenedChallenge(active.challenge_id);
-        challengeBox.innerHTML = `
-          <p class="candidate-title">오픈된 문제 #${active.challenge_id} ${detail ? detail.title : ""}</p>
-          <p class="candidate-meta">${detail ? `${detail.category} · ${detail.score}점` : "진행 중"} · opened</p>
-        `;
-        return;
-      }
-
-      const candidates = cellCurrent ? cellCurrent.challenge_candidates : [];
-      if (!candidates.length) {
-        challengeBox.textContent = "문제 칸에 도착하면 후보 3개가 표시됩니다.";
-        return;
-      }
-
-      challengeBox.innerHTML = candidates.map((challenge) => `
-        <div class="candidate">
-          <div>
-            <p class="candidate-title">#${challenge.challenge_id} ${challenge.title}</p>
-            <p class="candidate-meta">${challenge.category} · ${challenge.score}점</p>
-          </div>
-          <button type="button" data-open-challenge="${challenge.challenge_id}">오픈</button>
-        </div>
-      `).join("");
-    }
-
-    function getDifficultyLabel(difficulty) {
-      return { EASY: "하", MEDIUM: "중", HARD: "상" }[difficulty] || difficulty || "-";
-    }
-
-    function renderChallengeItems(items, emptyMessage, options = {}) {
-      if (!items.length) {
-        return `<div class="empty-list">${emptyMessage}</div>`;
-      }
-
-      return items.map((challenge) => {
-        const isSolved = Boolean(challenge.is_solved);
-        const isOpened = Boolean(challenge.is_opened || challenge.opened_at);
-        const stateClass = isSolved ? " is-solved" : isOpened ? " is-opened" : "";
-        const badgeClass = isSolved ? "solved" : isOpened ? "opened" : "";
-        const badgeText = isSolved ? "풂" : isOpened ? "열림" : "미오픈";
-        const cellText = challenge.cell_index !== null && challenge.cell_index !== undefined
-          ? ` · ${challenge.cell_index}번 칸`
-          : "";
-        const difficultyText = challenge.difficulty
-          ? `${getDifficultyLabel(challenge.difficulty)} · `
-          : "";
-
-        return `
-          <article class="challenge-item${stateClass}">
-            <div class="challenge-item-title">
-              <span>#${challenge.challenge_id} ${challenge.title}</span>
-              <span class="badge ${badgeClass}">${badgeText}</span>
-            </div>
-            <div class="challenge-item-meta">${difficultyText}${challenge.category} · ${challenge.score}점${cellText}</div>
-          </article>
-        `;
-      }).join("");
-    }
-
-    function renderChallengeLists() {
-      const openedOnly = openedChallenges.filter((challenge) => !challenge.is_solved);
-      const solvedOnly = openedChallenges.filter((challenge) => challenge.is_solved);
-
-      challengeCountEl.textContent = `${allChallenges.length}개`;
-      openedCountEl.textContent = `${openedOnly.length}개`;
-      solvedCountEl.textContent = `${solvedOnly.length}개`;
-
-      allChallengeListEl.innerHTML = renderChallengeItems(
-        allChallenges,
-        "문제 목록이 없습니다.",
-      );
-      openedChallengeListEl.innerHTML = renderChallengeItems(
-        openedOnly,
-        "아직 열린 문제가 없습니다.",
-      );
-      solvedChallengeListEl.innerHTML = renderChallengeItems(
-        solvedOnly,
-        "아직 푼 문제가 없습니다.",
-      );
-    }
-
-    function setDebug(label, payload) {
-      debugEl.textContent = `${label}\n${JSON.stringify(payload, null, 2)}`;
-    }
-
-    async function refreshAll() {
-      statusEl.textContent = "API 조회 중";
-      try {
-        const [boardPayload, teamPayload, boardMePayload, dicePayload, cellPayload, openedPayload, challengesPayload] = await Promise.all([
-          fetchJson("/api/v1/board"),
-          fetchJson("/api/v1/teams/me"),
-          fetchJson("/api/v1/board/me"),
-          fetchJson("/api/v1/board/dice/status"),
-          fetchJson("/api/v1/board/cell/current"),
-          fetchJson("/api/v1/board/opened_challenges"),
-          fetchJson("/api/v1/board/challenges"),
-        ]);
-        boardCells = boardPayload.data.cells;
-        boardMe = boardMePayload.data;
-        cellCurrent = cellPayload.data;
-        openedChallenges = openedPayload.data.opened_challenges;
-        allChallenges = challengesPayload.data.challenges;
-        renderSummary(teamPayload, dicePayload);
-        renderBoard();
-        renderChallengeBox();
-        renderChallengeLists();
-        setDebug("GET /api/v1/board/cell/current", cellPayload);
-      } catch (error) {
-        statusEl.textContent = "API 오류";
-        rollButton.disabled = true;
-        setDebug("ERROR", error.body || error.message);
-      }
-    }
-
-    async function rollDice() {
-      rollButton.disabled = true;
-      rollResultEl.textContent = "굴리는 중...";
-      try {
-        const payload = await fetchJson("/api/v1/board/dice/roll", { method: "POST" });
-        const data = payload.data;
-        const skippedText = data.skipped_cells && data.skipped_cells.length
-          ? `\n건너뛴 방문 칸: ${data.skipped_cells.join(", ")}`
-          : "";
-        const startText = data.passed_start
-          ? `\n출발칸 통과! +${data.start_reward.mileage_gained} 마일리지`
-          : "";
-        rollResultEl.textContent = `주사위: ${data.dice_a} + ${data.dice_b} = ${data.rolled_number}\n${data.previous_position}번에서 ${data.current_position}번으로 이동${skippedText}${startText}\n이벤트: ${data.board_event_code}`;
-        setDebug("POST /api/v1/board/dice/roll", payload);
-        await refreshAll();
-      } catch (error) {
-        rollResultEl.textContent = error.message;
-        setDebug("ERROR", error.body || error.message);
-        await refreshAll();
-      }
-    }
-
-    async function openChallenge(challengeId) {
-      try {
-        const payload = await fetchJson("/api/v1/board/cell/open", {
-          method: "POST",
-          body: JSON.stringify({ challenge_id: challengeId }),
-        });
-        rollResultEl.textContent = `#${payload.data.challenge_id} 문제 오픈\n제한 시간: ${payload.data.remaining_seconds}초`;
-        setDebug("POST /api/v1/board/cell/open", payload);
-        await refreshAll();
-      } catch (error) {
-        rollResultEl.textContent = error.message;
-        setDebug("ERROR", error.body || error.message);
-      }
-    }
-
-    async function solveChallenge() {
-      solveButton.disabled = true;
-      try {
-        const payload = await fetchJson("/api/v1/board/challenge/solve", { method: "POST" });
-        const solved = payload.data.solved_challenge;
-        rollResultEl.textContent = solved
-          ? `#${solved.challenge.challenge_id} ${solved.challenge.title} 풀기 처리 완료`
-          : "현재 풀 문제가 없습니다.";
-        setDebug("POST /api/v1/board/challenge/solve", payload);
-        await refreshAll();
-      } catch (error) {
-        rollResultEl.textContent = error.message;
-        setDebug("ERROR", error.body || error.message);
-      }
-    }
-
-    async function resetDice() {
-      resetButton.disabled = true;
-      rollResultEl.textContent = "주사위 횟수 리셋 중...";
-      try {
-        const payload = await fetchJson("/api/v1/board/dice/reset", { method: "POST" });
-        rollResultEl.textContent = "주사위가 1회 충전됐습니다.";
-        setDebug("POST /api/v1/board/dice/reset", payload);
-        await refreshAll();
-      } catch (error) {
-        rollResultEl.textContent = error.message;
-        setDebug("ERROR", error.body || error.message);
-      } finally {
-        resetButton.disabled = false;
-      }
-    }
-
-    rollButton.addEventListener("click", rollDice);
-    refreshButton.addEventListener("click", refreshAll);
-    resetButton.addEventListener("click", resetDice);
-    solveButton.addEventListener("click", solveChallenge);
-    challengeBox.addEventListener("click", (event) => {
-      const button = event.target.closest("[data-open-challenge]");
-      if (!button) return;
-      openChallenge(button.dataset.openChallenge);
-    });
-    refreshAll();
-  </script>
 </body>
 </html>

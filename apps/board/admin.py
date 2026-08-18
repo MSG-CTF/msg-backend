@@ -5,9 +5,12 @@ from apps.board.models import (
     Challenge,
     ChanceCard,
     DiceRoll,
+    PendingDiceRoll,
     TeamBoardState,
     TeamCellCandidate,
+    TeamCellConsumption,
     TeamChallengeAccess,
+    TeamChanceCard,
 )
 
 
@@ -18,7 +21,22 @@ class CellAdmin(admin.ModelAdmin):
 
 @admin.register(ChanceCard)
 class ChanceCardAdmin(admin.ModelAdmin):
-    list_display = ["card_id", "name", "effect", "is_pre_roll", "weight"]
+    list_display = ["card_id", "name", "effect", "usage_timing", "weight"]
+
+
+@admin.register(TeamCellConsumption)
+class TeamCellConsumptionAdmin(admin.ModelAdmin):
+    list_display = ["id", "team", "cell", "consumed_at"]
+
+
+@admin.register(TeamChanceCard)
+class TeamChanceCardAdmin(admin.ModelAdmin):
+    list_display = ["id", "team", "card", "source_cell", "drawn_at", "used_at"]
+
+
+@admin.register(PendingDiceRoll)
+class PendingDiceRollAdmin(admin.ModelAdmin):
+    list_display = ["team", "previous_position", "candidate_position", "created_at"]
 
 
 @admin.register(Challenge)

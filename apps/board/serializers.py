@@ -12,7 +12,7 @@ class CellSerializer(serializers.ModelSerializer):
 class ChanceCardSerializer(serializers.ModelSerializer):
     class Meta:
         model = ChanceCard
-        fields = ["card_id", "name", "description", "effect", "is_pre_roll", "weight"]
+        fields = ["card_id", "name", "description", "effect", "usage_timing"]
 
 
 class ChallengeCandidateSerializer(serializers.ModelSerializer):
