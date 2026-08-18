@@ -106,6 +106,8 @@ class InstanceDeleteView(APIView):
             {
                 "instance_id": str(instance.instance_id),
                 "challenge_id": str(instance.challenge_id),
+                "host": instance.host,
+                "ports": instance.ports,
                 "status": instance.status,
             },
             message="인스턴스 종료 요청이 접수되었습니다.",
@@ -164,19 +166,14 @@ class InstanceExtendView(APIView):
             return fail("INVALID_STATE_TRANSITION", "현재 상태에서는 요청을 처리할 수 없습니다.", 400)
 
         if instance.extend_count >= MAX_EXTEND_COUNT:
-            return fail("TTL_EXTENSION_LIMIT_EXCEEDED", "더 이상 인스턴스 시간을 연장할 수 없습니다.", 400)
+            return fail("HARD_TIMEOUT_EXCEEDED", "더 이상 인스턴스 시간을 연장할 수 없습니다.", 400)
 
         instance.extend_count += 1
         instance.save(update_fields=["extend_count", "updated_at"])
         enqueue_instance_job(build_extend_payload(instance))
 
         return ok(
-            {
-                "instance_id": str(instance.instance_id),
-                "challenge_id": str(instance.challenge_id),
-                "status": instance.status,
-                "expires_at": serialize_instance(instance)["expires_at"],
-            },
+            serialize_instance(instance),
             message="TTL 연장 요청이 접수되었습니다.",
             status=202,
         )
