@@ -2,11 +2,13 @@
 # 팀 상대 비교가 아니라 이 문서에 명시된 '정답'과 명세를 직접 대조하는 절대 기준 검증에 쓰인다.
 # harness/checks/contract.py 가 이 파일을 읽는다.
 #
-# envelope_keys/forbidden_terms는 board/KOTH가 아직 응답 envelope를 안 쓰기로 한 상태
-# (공통 규약 문서 6-1절 "미합의")라 endpoint마다 같은 지적을 반복해서 노이즈만 커져
-# 일부러 비활성화했다. 필요해지면 아래 두 키를 다시 채우면 된다:
-#   envelope_keys: [code, message, data]
-#   forbidden_terms: [tile]
+# envelope_keys/forbidden_terms는 원래 board/KOTH가 응답 envelope 미합의라 꺼둔 상태였다.
+# 2026-08-16 로그인(/api/v1/auth/login), 마이페이지(/api/v1/teams/me, .../qr_token)를
+# 직접 확인해 board/KOTH뿐 아니라 구현 완료된 API 전체가 이미 code/message/data를
+# 일관되게 쓰고 있음을 확인해 다시 켠다.
+envelope_keys: [code, message, data]
+# tile은 확정 보드 규칙에서 cell로 통일한 옛 용어라 명세에 남아 있으면 안 된다.
+forbidden_terms: [tile]
 
 # 모든 경로가 이걸로 시작해야 함 (단, base_url_exceptions에 있는 접두어는 예외)
 base_url: /api/v1
@@ -19,12 +21,18 @@ url_rules:
   # 리소스명 복수형 규칙 검사에서 예외로 둘 첫 세그먼트 (싱글턴/기능 도메인명이라 복수형이 안 맞음)
   resource_name_plural_skip: [me, auth, admin, internal, login, logout, refresh, board, koth, ranking, leaderboard, timer]
 
-# team_id 등은 정수(Long), card_id/token 등은 문자열이어야 한다.
 # instance_id는 규약 원문의 ID 타입 표에 없고, 실제 명세 전체가 스케줄러 발급 UUID 문자열을
 # 일관되게 쓰고 있어 Long 목록에 넣지 않는다.
+# team_id / club_id / koth_challenge_id는 2026-08-16 KOTH 템플릿 확정 반영으로 UUID 문자열이
+# 되었다. 명세와 출제자 배포용 템플릿이 모두 UUID를 쓰므로 Long 목록에서 옮긴다.
+# challenge_id도 2026-08-08 규약 개정으로 UUID 문자열이 됐다 (/api/v1/board/opened_challenges
+# 문서에 명시: "challenge_id: String(UUID), 2026-08-08 규약 개정으로 UUID 문자열"). contract.yaml이
+# 그 개정을 반영하지 못하고 있던 것을 여기서 맞춘다.
+# user_id / history_id도 UUID 문자열이다 (강지원 확인, 2026-08-16). 이제 모든 id 필드가
+# UUID 문자열이라 long_fields는 비운다.
 id_types:
-  long_fields: [team_id, user_id, challenge_id, club_id, history_id, koth_challenge_id]
-  string_fields: [card_id, token]
+  long_fields: []
+  string_fields: [card_id, token, team_id, club_id, koth_challenge_id, challenge_id, user_id, history_id, instance_id]
 
 # 타임스탬프 필드는 ISO-8601 UTC (끝에 Z) 형식이어야 한다.
 timestamp_must_be_iso_utc: true
@@ -33,7 +41,7 @@ timestamp_must_be_iso_utc: true
 success_code_value: SUCCESS
 
 # 허용되는 HTTP status code 목록
-allowed_http_status: [200, 202, 400, 401, 403, 404, 409, 500]
+allowed_http_status: [200, 202, 400, 401, 403, 404, 409, 429, 500]
 
 # leaf: JSON에서 실제로 등장하는 필드명(예: "type", "status")
 # parents: 생략하면 leaf 이름만으로 전역 매칭 (role/difficulty/category 처럼 문맥 없이도 안전한 경우)
@@ -45,7 +53,7 @@ enum_rules:
   - leaf: difficulty
     values: [EASY, MEDIUM, HARD]
   - leaf: category
-    values: [WEB, SYSTEM, REV, CRYPTO, FORENSIC, MISC]
+    values: [WEB, PWN, REV, CRYPTO, FORENSIC, MISC]
   - leaf: status
     parents: [instance, instances]
     values: [REQUESTED, SCHEDULING, PROVISIONING, RUNNING, RESTARTING, RESETTING, STOPPING, STOPPED, FAILED, EXPIRED, CLEANUP_PENDING, CLEANED]
@@ -55,6 +63,11 @@ enum_rules:
   - leaf: type
     parents: [cell, cells]
     values: [START, CHALLENGE, CHANCE, AIRPORT, QUARANTINE, ROULETTE]
+  # KOTH 문제 공개 상태. 동아리가 아니라 문제 단위로 관리한다(한 동아리의 문제 둘이 서로 다른
+  # open_group에 들어갈 수 있음).
+  - leaf: status
+    parents: [club, clubs, challenge, challenges]
+    values: [SCHEDULED, ACTIVE, CLOSED]
 
 # 공통 에러 코드: code 값이 이 목록에 있으면 http 값이 일치하는지 검증한다.
 common_error_codes:
@@ -66,3 +79,11 @@ common_error_codes:
   - {http: 400, code: INVALID_REQUEST}
   - {http: 404, code: USER_HAS_NO_TEAM}
   - {http: 500, code: INTERNAL_ERROR}
+  # KOTH 내부 API 전용 (/internal/koth/scores, /internal/koth/team_tokens/verify, /internal/teams)
+  - {http: 400, code: INVALID_PERIOD}
+  - {http: 401, code: INVALID_INTERNAL_TOKEN}
+  - {http: 409, code: PERIOD_NOT_READY}
+  - {http: 500, code: SCORING_FAILED}
+  # 플래그 제출 전용. team_tokens/verify는 인증 전 단계라 플랫폼이 차단하지 않으므로
+  # 429를 반환하지 않는다 (admin.md "검증 제한 정책" 참고).
+  - {http: 429, code: TOO_MANY_ATTEMPTS}
