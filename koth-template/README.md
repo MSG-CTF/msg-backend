@@ -109,7 +109,7 @@ Header:
 - 원본 팀 토큰은 저장하거나 로그에 남기지 않습니다.
 - 잘못된 팀 토큰이 들어오면 문제 서버는 참가자 세션을 만들지 않아야 합니다.
 - 문제 서버가 플랫폼을 호출할 때 쓰는 `X-Internal-Token`과 플랫폼이 문제 서버를 호출할 때 쓰는 `X-KOTH-Internal-Token`은 서로 다른 값입니다.
-- 같은 `koth_challenge_id` + `team_token` 조합으로 3회 연속 실패하면 30초간 429 `TOO_MANY_ATTEMPTS`가 반환됩니다. 자세한 정책은 `prob/for_organizer/admin.md` 참고.
+- 잘못된 팀 토큰 연속 제출은 문제 서버가 참가자 세션 또는 IP 단위로 제한합니다. 자세한 정책은 `prob/for_organizer/admin.md` 참고.
 
 ### 팀 상태
 
