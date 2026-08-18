@@ -6,7 +6,11 @@
 
 ## 문제 세팅 방법
 
-로컬 테스트(출제자 편의용, 실제 배포는 `info.yaml`의 `deployment`와 `koth`가 담당):
+문제 디렉토리 이름은 다른 분야와 같은 규칙을 씁니다. `분야-문제명` 형태이므로 KOTH 문제는 `koth-문제명`으로 만듭니다. 소문자와 하이픈만 사용합니다.
+
+`info.yaml`은 일반 문제 양식에 `deployment.healthcheck`만 추가한 형태입니다. 그 외 KOTH 전용 필드는 없습니다. 팀 토큰 인증과 점수 API 규칙은 이 README와 `prob/for_organizer/admin.md`가 담당합니다.
+
+로컬 테스트(출제자 편의용, 실제 배포는 `info.yaml`의 `deployment`가 담당):
 
 ```bash
 cd prob/for_organizer
@@ -17,6 +21,8 @@ docker compose up --build
 
 실제 대회 배포는 플랫폼이 `info.yaml`의 `deployment.containers` 명세로 쿠버네티스 리소스를 생성합니다.
 출제자는 컨테이너별 Dockerfile, KOTH 문제 서버 코드, `GET /internal/koth/scores` 공통 API 코드, `info.yaml`을 정확히 작성하면 됩니다.
+
+`club_id`와 `koth_challenge_id`는 플랫폼이 발급해서 전달하는 값입니다. `info.yaml`에 적지 않고, 문제 서버에는 환경 변수로 주입받습니다.
 
 ## 출제 지문
 
@@ -38,16 +44,29 @@ KOTH 문제는 일반 web 문제와 달리 팀 토큰 인증과 15분 점수 API
 ### 팀 토큰 인증
 
 1. 참가자가 문제 서버에서 팀 토큰을 입력합니다.
-2. 문제 서버가 플랫폼 백엔드의 `/internal/koth/team-tokens/verify`를 호출합니다.
+2. 문제 서버가 플랫폼 백엔드의 `/internal/koth/team_tokens/verify`를 호출합니다.
 3. 검증 성공 시 응답의 `team_id`와 `team_name`을 세션 또는 서버 상태에 저장합니다.
 4. 이후 모든 팀 상태, 제출 코드, 점유 정보, 성능 측정값은 `team_id` 기준으로 관리합니다.
 5. 브라우저가 직접 보낸 `team_id`는 사용하지 않습니다.
+
+Method: `POST`
+
+URL: `/internal/koth/team_tokens/verify`
+
+Header:
+
+```json
+{
+  "X-Internal-Token": "<INTERNAL_TOKEN>",
+  "Content-Type": "application/json"
+}
+```
 
 검증 요청:
 
 ```json
 {
-  "koth_challenge_id": 10,
+  "koth_challenge_id": "018f3f1e-0700-7a91-a30b-630000000010",
   "team_token": "<TEAM_TOKEN>"
 }
 ```
@@ -60,9 +79,9 @@ KOTH 문제는 일반 web 문제와 달리 팀 토큰 인증과 15분 점수 API
   "message": "성공",
   "data": {
     "valid": true,
-    "team_id": 3,
+    "team_id": "018f3f1e-0100-7a91-a30b-630000000003",
     "team_name": "MJSEC",
-    "koth_challenge_id": 10
+    "koth_challenge_id": "018f3f1e-0700-7a91-a30b-630000000010"
   }
 }
 ```
@@ -77,10 +96,12 @@ KOTH 문제는 일반 web 문제와 달리 팀 토큰 인증과 15분 점수 API
     "valid": false,
     "team_id": null,
     "team_name": null,
-    "koth_challenge_id": 10
+    "koth_challenge_id": "018f3f1e-0700-7a91-a30b-630000000010"
   }
 }
 ```
+
+`koth_challenge_id`와 `team_id`는 UUID 문자열입니다. 정수가 아니므로 정수로 파싱하지 마세요.
 
 주의사항:
 
@@ -88,6 +109,7 @@ KOTH 문제는 일반 web 문제와 달리 팀 토큰 인증과 15분 점수 API
 - 원본 팀 토큰은 저장하거나 로그에 남기지 않습니다.
 - 잘못된 팀 토큰이 들어오면 문제 서버는 참가자 세션을 만들지 않아야 합니다.
 - 문제 서버가 플랫폼을 호출할 때 쓰는 `X-Internal-Token`과 플랫폼이 문제 서버를 호출할 때 쓰는 `X-KOTH-Internal-Token`은 서로 다른 값입니다.
+- 잘못된 팀 토큰 연속 제출은 문제 서버가 참가자 세션 또는 IP 단위로 제한합니다. 자세한 정책은 `prob/for_organizer/admin.md` 참고.
 
 ### 팀 상태
 
@@ -132,20 +154,18 @@ Query:
   "code": "SUCCESS",
   "message": "성공",
   "data": {
-    "koth_challenge_id": 10,
+    "koth_challenge_id": "018f3f1e-0700-7a91-a30b-630000000010",
     "period_id": "2026-07-31T10:15:00Z",
     "results": [
       {
-        "team_id": 3,
-        "rank": 1,
-        "metric_score": 98.73,
-        "awarded_score": 100
+        "team_id": "018f3f1e-0100-7a91-a30b-630000000003",
+        "period_rank": 1,
+        "metric_score": 98.73
       },
       {
-        "team_id": 4,
-        "rank": 2,
-        "metric_score": 92.15,
-        "awarded_score": 70
+        "team_id": "018f3f1e-0100-7a91-a30b-630000000004",
+        "period_rank": 2,
+        "metric_score": 92.15
       }
     ],
     "total_count": 2
@@ -174,6 +194,7 @@ Query:
 7. `team_id`는 팀 토큰 검증 API에서 받은 값만 사용합니다.
 8. 응답 body는 항상 `code`, `message`, `data` 3개 키를 포함합니다.
 9. 목록은 `data.results`로 감쌉니다.
+10. 점수는 반환하지 않습니다. 문제 서버는 등수까지만 계산하고, 등수에 배점을 적용하는 것은 플랫폼 백엔드가 합니다.
 
 ### 등수 계산
 
@@ -181,12 +202,14 @@ Query:
 
 - 등수 기준 값: 예시 `처리량`, `생존 시간`, `점유 시간`, `최적화 점수`
 - 정렬 방향: 높은 값이 좋은지, 낮은 값이 좋은지
-- 동점 처리: 같은 점수일 때 같은 등수인지, 먼저 달성한 팀 우선인지
 - 순위 제외 조건: 인증 실패, 서비스 장애, 제출 코드 오류 등
-- 등수별 지급 점수: 1등, 2등, 3등, 그 외
+
+동점 처리는 출제자 재량이 아니라 공통 규칙입니다. 같은 등수 부여 시 다음 등수는 동점 팀 수만큼 건너뜁니다 (예: 공동 1등이 2팀이면 다음 등수는 3등). 배점표의 동점 합산 규칙이 이 방식을 전제로 계산되어 있습니다.
+
+등수별 지급 점수는 출제자가 정하지 않습니다. 12개 문제의 배점 스케일을 맞추기 위해 플랫폼이 배점표를 관리하며, 문제 서버는 등수까지만 계산해서 반환합니다.
 
 `metric_score`는 등수 계산에 사용한 성능 측정값입니다. 타입은 Double입니다.
-`awarded_score`는 해당 15분 구간에 지급할 정수 점수입니다. 타입은 Long입니다.
+`period_rank`는 해당 15분 구간의 등수입니다. 타입은 Long입니다. 대회 전체 누적 등수는 플랫폼이 따로 계산하므로 이름이 다릅니다.
 
 ## 문제 풀이 (writeup)
 
