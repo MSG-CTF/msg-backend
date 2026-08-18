@@ -139,3 +139,11 @@ class AuthTests(TestCase):
             self.login(password="wrong")
         res = self.login(login_id="other", password="pw1234")
         self.assertEqual(res.status_code, 200)
+    
+    def test_banned_team_login_shows_ban_info(self):
+        from apps.accounts.models import Team
+        Team.objects.filter(pk=self.team.pk).update(is_banned=True, ban_reason="어뷰징")
+        res = self.login()
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res.data["data"]["is_banned"])
+        self.assertEqual(res.data["data"]["ban_reason"], "어뷰징")
