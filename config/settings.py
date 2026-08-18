@@ -53,6 +53,8 @@ INSTALLED_APPS = [
     "apps.adminpanel",
     "apps.common",
     "apps.teams",
+    "apps.challenge",
+    "apps.instances",
 
 ]
 

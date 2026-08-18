@@ -22,4 +22,6 @@ urlpatterns = [
     path("api/v1/", include("apps.accounts.urls")),
     path("api/v1/", include("apps.adminpanel.urls")),
     path("api/v1/", include("apps.teams.urls")),
+    path("api/v1/", include("apps.challenge.urls")),
+    path("api/v1/", include("apps.instances.urls")),
 ]
