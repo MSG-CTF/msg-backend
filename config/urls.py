@@ -27,6 +27,7 @@ urlpatterns = [
     path("api/v1/", include("apps.teams.urls")),
     path("api/v1/board", BoardView.as_view(), name="board"),
     path("api/v1/board/", include("apps.board.urls")),
+    path("", include("apps.koth.urls")),
     # /api/v1 명세 밖, 로컬 프리뷰 전용 (DEBUG=True에서만 응답).
     path("board/_debug/solve", DebugSolveActiveChallengeView.as_view(), name="board-debug-solve"),
 ]

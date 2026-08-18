@@ -53,6 +53,7 @@ INSTALLED_APPS = [
     "apps.adminpanel",
     "apps.board",
     "apps.common",
+    "apps.koth",
     "apps.teams",
 ]
 
@@ -174,6 +175,9 @@ if not JWT_SECRET:
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_HOURS = 1
 REFRESH_TOKEN_HOURS = 12
+
+# KOTH 문제 서버 -> 플랫폼 내부 API(X-Internal-Token) 공유 시크릿.
+KOTH_INTERNAL_TOKEN = os.getenv("KOTH_INTERNAL_TOKEN", "")
 
 
 REST_FRAMEWORK = {
