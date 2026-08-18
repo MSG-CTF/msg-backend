@@ -12,18 +12,28 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 
 import os
 from pathlib import Path
+from dotenv import load_dotenv
+from django.core.exceptions import ImproperlyConfigured
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+load_dotenv(BASE_DIR / ".env")
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "django-insecure-*%5a3*nw#g2)2%z8&36xna3lpt22!9_esyox_x9##%@+2q9o10")
+# 기본값을 두지 않도록 변경
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY")
+if not SECRET_KEY:
+    raise ImproperlyConfigured(
+        "DJANGO_SECRET_KEY 환경변수가 필요합니다.\n"
+        '  생성: python -c "import secrets; print(secrets.token_urlsafe(50))"'
+    )
 
 # SECURITY WARNING: don't run with debug turned on in production!
+# 기본값 False, True 가 기본이면 환경변수 누락 시 실서버에서도 디버그 모드로 뜨게됨.
 DEBUG = os.getenv("DJANGO_DEBUG", "True").lower() == "true"
 
 ALLOWED_HOSTS = [host.strip() for host in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if host.strip()]
@@ -38,7 +48,12 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
-    "apps.challenge",
+    "rest_framework",
+    "apps.accounts",
+    "apps.adminpanel",
+    "apps.common",
+    "apps.teams",
+
 ]
 
 MIDDLEWARE = [
@@ -137,3 +152,40 @@ STATIC_URL = "static/"
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+AUTH_USER_MODEL = "accounts.User"
+
+APPEND_SLASH = False
+
+PASSWORD_HASHERS = [
+    "django.contrib.auth.hashers.Argon2PasswordHasher",
+    "django.contrib.auth.hashers.PBKDF2PasswordHasher",
+]
+
+# JWT 서명 키.
+# DEBUG 여부와 무관하게 필수.
+# SECRET_KEY 로 대체하면 두 용도가 키를 공유해서 한쪽 유출이 양쪽 유출이 된다.
+JWT_SECRET = os.getenv("JWT_SECRET")
+if not JWT_SECRET:
+    raise ImproperlyConfigured(
+        "JWT_SECRET 환경변수가 필요합니다.\n"
+        '  생성: python -c "import secrets; print(secrets.token_urlsafe(48))"'
+    )
+JWT_ALGORITHM = "HS256"
+ACCESS_TOKEN_HOURS = 1
+REFRESH_TOKEN_HOURS = 12
+
+
+REST_FRAMEWORK = {
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "apps.common.authentication.JWTAuthentication",
+    ],
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.AllowAny",
+    ],
+    "EXCEPTION_HANDLER": "apps.common.exceptions.envelope_exception_handler",
+    "UNAUTHENTICATED_USER": None,
+    "DEFAULT_THROTTLE_RATES": {
+        "login": "10/min",
+    }
+}
