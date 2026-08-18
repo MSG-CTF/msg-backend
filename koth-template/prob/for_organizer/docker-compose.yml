@@ -1,0 +1,24 @@
+# 로컬 테스트 편의용입니다. 실제 배포 계약이 아닙니다.
+# 대회 배포는 상위 info.yaml의 deployment.containers 명세로 플랫폼이 처리합니다.
+services:
+  service:
+    build: ./service
+    ports:
+      - "8080:8080"
+    environment:
+      KOTH_CHALLENGE_ID: "10"
+      KOTH_INTERNAL_TOKEN: local-koth-internal-token
+      PLATFORM_INTERNAL_TOKEN: local-platform-internal-token
+      TEAM_TOKEN_VERIFY_URL: http://platform.example/internal/koth/team-tokens/verify
+      TEAM_LIST_URL: http://platform.example/internal/teams
+
+  checker:
+    build: ./checker
+    # 로컬 점수 계산 검증용 보조 컨테이너입니다. 참가자에게 노출하지 않습니다.
+    environment:
+      TARGET_HOST: service
+      TARGET_PORT: "8080"
+      TEAM_ID: "3"
+      CLUB_ID: "1"
+    depends_on:
+      - service

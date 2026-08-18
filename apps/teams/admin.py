@@ -1,8 +1,16 @@
 from django.contrib import admin
 
-from apps.teams.models import Team
+from .models import MileageHistory, PaymentToken
+
+# Register your models here.
+
+@admin.register(MileageHistory)
+class MileageHistoryAdmin(admin.ModelAdmin):
+    list_display = ("team", "type", "amount", "item_name", "is_refunded", "created_at")
+    list_filter = ("type", "is_refunded")
 
 
-@admin.register(Team)
-class TeamAdmin(admin.ModelAdmin):
-    list_display = ["id", "name", "total_score", "mileage_balance", "board_position", "is_banned"]
+@admin.register(PaymentToken)
+class PaymentTokenAdmin(admin.ModelAdmin):
+    list_display = ("team", "status", "expires_at", "used_at", "created_at")
+    list_filter = ("status",)

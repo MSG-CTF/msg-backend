@@ -22,3 +22,10 @@ runserver.err.log
 tools/api-harness/harness/models.py
 tools/api-harness/reports/
 tools/api-harness/config.yaml
+
+seed.py
+accounts_generated.csv
+teams.csv
+apps/common/static/devtools.html
+CLAUDE.md
+TODO.md

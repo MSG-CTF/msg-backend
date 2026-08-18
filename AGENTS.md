@@ -80,6 +80,38 @@ MSG CTF 백엔드(`MSG-CTF/msg-backend`) 저장소에서 AI 에이전트(Claude 
 
 구현이 명세와 다를 때는 코드를 명세에 맞추는 게 기본이다. 명세 쪽이 틀렸다고 판단되면 코드를 먼저 바꾸지 말고 사람에게 알린다.
 
+## 5-1. API 명세 기반 개발 절차
+
+API 구현은 명세에 적힌 endpoint를 하나도 빠뜨리지 않는 것을 우선 목표로 한다. 모델, serializer, view 중 일부만 작성한 상태는 구현 완료가 아니다.
+
+1. 개발을 시작하기 전에 확정 기획안, 해당 노션 API 명세, `tools/api-harness/specs/`, `tools/api-harness/contract.yaml`을 모두 읽는다. 노션 명세가 CSV 표 형식이면 모든 행을 읽고, 내 담당(Board/KOTH)의 `메소드 + URL` 조합 전체를 endpoint 목록으로 먼저 작성한다.
+2. endpoint 목록에는 HTTP method, path, 설명, 백엔드 상태, 인증·권한, 요청값, 성공 code·data, 실패 code, 구현 상태, 테스트 상태를 포함한다. 명세에 endpoint가 있으나 구현 대상에서 제외해야 한다면 사람의 명시적 승인 없이는 제외하지 않는다.
+3. CSV의 `백엔드 상태`는 endpoint를 빼도 되는 기준이 아니다. `완료` 항목은 실제 URL, 로직, 테스트가 있는지 검증하고, `진행 중`과 `시작 전` 항목은 구현 대상으로 관리한다. `논의`, `[수치 미정]` 등 미확정 표기가 있으면 해당 API의 미확정 부분을 사람에게 질문한다.
+4. 같은 노션 표가 일반 CSV와 `_all.csv`로 함께 제공되면 HTTP method와 path가 같은 행은 하나의 endpoint로 합친다. 두 파일의 설명이나 상태가 다르면 임의로 선택하지 말고 차이를 보고한다.
+5. 목록 작성이 끝나기 전에는 일부 endpoint만 골라 구현을 시작하지 않는다. 명세에 같은 기능의 목록·상세·생성·수정·삭제 API가 함께 있으면 각각 별도 항목으로 관리한다.
+6. 목록 표에 인증 방식, 권한, 요청값, 응답 data, 기본값, 상태 전이, 실패 code, 동시 요청 처리 규칙이 빠졌으면 상세 기획안과 관련 명세를 추가로 찾는다. 끝까지 확인할 수 없으면 추측으로 구현하지 않고 사람에게 질문한다.
+
+각 endpoint는 아래 항목을 모두 만족해야 완료로 표시한다.
+
+1. 명세와 일치하는 URL과 HTTP method가 URLconf에 등록되어 있다.
+2. 인증과 권한 검사가 명세대로 적용되어 있다.
+3. path parameter, query parameter, request body의 필수값·형식·범위 검증이 구현되어 있다.
+4. 실제 DB 조회·생성·수정·삭제와 필요한 비즈니스 로직이 구현되어 있다. 고정 응답, mock 응답, 빈 view로 완료 처리하지 않는다.
+5. 필요한 경우 트랜잭션, 중복 요청, 이미 처리된 상태, 동시 요청에 대한 처리가 구현되어 있다.
+6. 성공·실패 응답 모두 `{code, message, data}` 형식을 지키며, 명세의 code와 data 구조를 따른다.
+7. 존재하지 않는 리소스, 잘못된 입력, 미인증, 권한 없음, 허용되지 않는 상태 등 명세에 정의된 실패 상황을 처리한다.
+8. 성공 케이스와 주요 실패 케이스를 API 테스트로 작성한다. 테스트는 status만 보지 않고 `code`, `message`, `data`, DB 변경 결과를 검증한다.
+
+작업을 끝내기 전에 다음 누락 검사를 반드시 한다.
+
+1. 최초 endpoint 목록과 실제 URLconf를 method와 path 단위로 대조한다. 노션 CSV의 모든 행이 대조 대상이며, `완료`, `진행 중`, `시작 전` 상태만으로 행을 제외하지 않는다.
+2. 최초 endpoint 목록의 모든 항목이 구현 완료와 테스트 완료 상태인지 확인한다. 기존에 `완료`로 표시된 endpoint도 실제 코드와 테스트를 확인한 뒤에만 완료로 유지한다.
+3. 각 endpoint에 정상 요청뿐 아니라 인증·권한·입력 검증·리소스 없음·상태 오류 테스트가 있는지 확인한다.
+4. `TODO`, `FIXME`, `NotImplementedError`, 임시 `pass`, 하드코딩된 응답이 남아 있는지 확인하고, 남아 있다면 그 API를 완료로 표시하지 않는다.
+5. 마이그레이션 검사, 전체 테스트, 해당 API 하네스 검증을 실행한다. 하나라도 실패하면 커밋하거나 완료 보고하지 않고 먼저 원인을 해결한다.
+
+명세상 endpoint가 하나라도 미구현이거나 검증에 실패했으면 “완료”라고 보고하지 않는다. “부분 구현”으로 보고하고, 미구현 endpoint와 막힌 이유를 method와 path까지 적는다.
+
 ## 6. 아키텍처 경계 (플랫폼팀 web/api)
 
 MSG CTF는 플랫폼(web/api), 스케줄러, 리소스 브로커, 런타임/쿠버네티스, DevSecOps로 역할이 나뉘어 있다. 이 저장소는 플랫폼 담당이다.
@@ -103,18 +135,42 @@ MSG CTF는 플랫폼(web/api), 스케줄러, 리소스 브로커, 런타임/쿠�
 
 ## 8. 실행 환경
 
-로컬 개발은 sqlite(`config.dev_settings`), 테스트는 인메모리 sqlite(`config.test_settings`)를 쓴다.
+프로젝트의 기준 실행 환경은 다음과 같다. 에이전트는 다른 버전이나 다른 데이터베이스를 임의로 사용하지 않는다.
+
+1. Python: `3.12.10`
+2. Django: `5.2.16`
+3. 패키지 관리: `requirements.txt`
+4. 데이터베이스: PostgreSQL `16.14`
+5. 캐시 및 메시지 브로커: Redis
+6. 개발 서버 실행: `python manage.py runserver`
+
+Python 버전은 기존보다 낮아진 `3.12.10`을 사용한다. Django는 `5.2.16`을 기준으로 구현한다. 패키지를 추가하거나 변경할 때는 반드시 `requirements.txt`를 함께 수정한다. Poetry, uv, pipenv 등 다른 패키지 관리 파일을 새로 만들지 않는다.
+
+로컬 개발·테스트는 `docker-compose`로 PostgreSQL과 Redis를 띄운 뒤 기본 `config.settings`에 연결한다. 별도 SQLite 설정이나 SQLite 전용 코드를 추가하지 않는다.
+
+작업 시작 전에 다음을 확인한다.
 
 ```bash
-python manage.py runserver 8000 --settings=config.dev_settings
+python --version
+python -m django --version
+```
+
+출력 버전이 위 기준과 다르면 환경을 임의로 바꾸지 말고 사람에게 알린다.
+
+```bash
+docker-compose up -d
 ```
 
 ```bash
-python manage.py test --settings=config.test_settings
+python manage.py runserver
 ```
 
 ```bash
-python manage.py seed_board --settings=config.dev_settings
+python manage.py test
+```
+
+```bash
+python manage.py seed_board
 ```
 
 보드판(36칸: 문제 30 + 찬스 2 + START/공항/무인도/룰렛 각 1)은 코드에 하드코딩하지 않고 `seed_board` 커맨드로 DB에 넣는다.
@@ -131,7 +187,9 @@ python manage.py seed_board --settings=config.dev_settings
 
 ## 10. 작업 끝났을 때 보고 형식
 
-1. 바꾼 파일 목록
-2. 테스트와 하네스 실행 결과(통과/실패, 실패면 출력 그대로)
-3. 노션 명세와 다르게 구현한 부분이 있으면 그 이유
-4. 사람이 해야 할 남은 일(push, PR 생성, 노션 반영, 팀원 확인 필요 사항)
+1. 명세에서 추출한 endpoint 전체 목록과 endpoint별 구현·테스트 상태
+2. 바꾼 파일 목록
+3. 테스트와 하네스 실행 결과(통과/실패, 실패면 출력 그대로)
+4. 노션 명세와 다르게 구현한 부분이 있으면 그 이유
+5. 미구현 endpoint, 검증 실패 항목, 사람이 결정해야 할 사항
+6. 사람이 해야 할 남은 일(push, PR 생성, 노션 반영, 팀원 확인 필요 사항)
