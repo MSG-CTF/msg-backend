@@ -17,18 +17,20 @@ from .exceptions import (
     ChallengeIdRequired,
     ChallengeNotCandidate,
     ChallengeNotSelected,
-    ChanceCardAlreadyHeld,
     ChanceCardAlreadyUsed,
+    ChanceCardAwaitingDiscard,
     ChanceCardNotFound,
     ChanceCardWrongTiming,
     ChanceConfirmNotFound,
     InvalidDestinationIndex,
+    NoCardToDiscard,
     NoPendingRoll,
     NoRollLeft,
     NotAirportCell,
     NotChallengeCell,
     NotChanceCell,
     NotTeamLeader,
+    PendingRollUnresolved,
     Quarantined,
     TimerRunning,
 )
@@ -99,12 +101,23 @@ def apply_pending_dice_recharge(state):
     return state
 
 
+
+
 def apply_pending_quarantine_release(state):
     if not state.is_quarantined or state.quarantine_released_at is None:
         return state
     if timezone.now() < state.quarantine_released_at:
         return state
 
+    state.is_quarantined = False
+    state.quarantine_released_at = None
+    state.save(update_fields=["is_quarantined", "quarantine_released_at", "updated_at"])
+    return state
+
+
+def debug_force_release_quarantine(team):
+    """로컬 프리뷰 전용. 15분 잠금을 기다리지 않고 즉시 무인도에서 풀어준다."""
+    state = get_or_create_board_state(team)
     state.is_quarantined = False
     state.quarantine_released_at = None
     state.save(update_fields=["is_quarantined", "quarantine_released_at", "updated_at"])
@@ -133,6 +146,8 @@ def compute_blocked_reason(team, state):
         if access.status == TeamChallengeAccess.Status.OPENED:
             return "TIMER_RUNNING"
 
+    if PendingDiceRoll.objects.filter(team=team).exists():
+        return "PENDING_CONFIRM"
     if state.dice_rolls_left <= 0:
         return "NO_ROLL_LEFT"
     return None
@@ -234,7 +249,12 @@ def compute_movement(consumed_indexes, from_index, steps, direction=1):
 def get_usable_post_roll_card(team):
     return (
         TeamChanceCard.objects.select_related("card")
-        .filter(team=team, used_at__isnull=True, card__usage_timing=ChanceCard.UsageTiming.POST_ROLL)
+        .filter(
+            team=team,
+            used_at__isnull=True,
+            discarded_at__isnull=True,
+            card__usage_timing=ChanceCard.UsageTiming.POST_ROLL,
+        )
         .first()
     )
 
@@ -258,6 +278,8 @@ def _assert_can_roll(team, state):
         if access.status == TeamChallengeAccess.Status.OPENED:
             raise TimerRunning()
 
+    if PendingDiceRoll.objects.filter(team=team).exists():
+        raise PendingRollUnresolved()
     if state.dice_rolls_left <= 0:
         raise NoRollLeft()
 
@@ -649,18 +671,34 @@ def _card_usable_now(card, state, blocked_reason, has_pending):
     return card.effect == "GRANT_EXTRA_ROLL" and blocked_reason == "NO_ROLL_LEFT"
 
 
+def _held_cards_queryset(team):
+    """아직 쓰지도 버리지도 않은, 현재 보유 중인 찬스카드."""
+    return TeamChanceCard.objects.filter(team=team, used_at__isnull=True, discarded_at__isnull=True)
+
+
 def build_chance_cards_view(team, state):
     draws = TeamChanceCard.objects.select_related("card").filter(team=team).order_by("drawn_at")
     blocked_reason = compute_blocked_reason(team, state)
     has_pending = PendingDiceRoll.objects.filter(team=team).exists()
+    awaiting_discard = _held_cards_queryset(team).count() >= 2
 
     result = []
     for draw in draws:
         used = draw.used_at is not None
+        discarded = draw.discarded_at is not None
         usable_now = (
-            _card_usable_now(draw.card, state, blocked_reason, has_pending) if not used else False
+            _card_usable_now(draw.card, state, blocked_reason, has_pending)
+            if not used and not discarded and not awaiting_discard
+            else False
         )
-        result.append({"card_id": draw.card_id, "used": used, "usable_now": usable_now})
+        result.append(
+            {
+                "card_id": draw.card_id,
+                "used": used,
+                "discarded": discarded,
+                "usable_now": usable_now,
+            }
+        )
     return result
 
 
@@ -670,10 +708,8 @@ def draw_chance_card(team):
         cell = state.position
         if cell.type != Cell.CellType.CHANCE:
             raise NotChanceCell()
-        if TeamCellConsumption.objects.filter(team=team, cell=cell).exists():
+        if TeamChanceCard.objects.filter(team=team, source_cell=cell).exists():
             raise NotChanceCell()
-        if TeamChanceCard.objects.filter(team=team, used_at__isnull=True).exists():
-            raise ChanceCardAlreadyHeld()
 
         card = random.choice(list(ChanceCard.objects.all()))
         draw = TeamChanceCard.objects.create(team=team, source_cell=cell, card=card)
@@ -682,10 +718,35 @@ def draw_chance_card(team):
         state.dice_rolls_left += CHANCE_DRAW_ROLL_BONUS
         state.save(update_fields=["dice_rolls_left", "updated_at"])
 
-    return draw, state.dice_rolls_left
+    awaiting_discard = _held_cards_queryset(team).count() >= 2
+    return draw, state.dice_rolls_left, awaiting_discard
+
+
+def discard_chance_card(team, card_id):
+    """찬스카드를 2장 들고 있을 때(재드로우), 팀장이 직접 하나를 골라 버린다."""
+    if not card_id:
+        raise CardIdRequired()
+
+    with transaction.atomic():
+        held = list(_held_cards_queryset(team).select_for_update().select_related("card"))
+        if len(held) < 2:
+            raise NoCardToDiscard()
+
+        target = next((draw for draw in held if draw.card_id == card_id), None)
+        if target is None:
+            raise ChanceCardNotFound()
+
+        target.discarded_at = timezone.now()
+        target.save(update_fields=["discarded_at"])
+
+        remaining = next(draw for draw in held if draw.pk != target.pk)
+
+    return {"discarded_card_id": target.card_id, "kept_card_id": remaining.card_id}
 
 
 def _assert_timing_ok(team, state, card):
+    if _held_cards_queryset(team).count() >= 2:
+        raise ChanceCardAwaitingDiscard()
     blocked_reason = compute_blocked_reason(team, state)
     has_pending = PendingDiceRoll.objects.filter(team=team).exists()
     if not _card_usable_now(card, state, blocked_reason, has_pending):
@@ -901,7 +962,7 @@ def use_chance_card(team, card_id, payload):
         state = TeamBoardState.objects.select_for_update().get(team=team)
         draw = (
             TeamChanceCard.objects.select_related("card")
-            .filter(team=team, card_id=card_id, used_at__isnull=True)
+            .filter(team=team, card_id=card_id, used_at__isnull=True, discarded_at__isnull=True)
             .first()
         )
         if draw is None:
@@ -925,7 +986,12 @@ def confirm_chance_choice(team, choice):
         state = TeamBoardState.objects.select_for_update().get(team=team)
         draw = (
             TeamChanceCard.objects.select_related("card")
-            .filter(team=team, used_at__isnull=True, pending_first_number__isnull=False)
+            .filter(
+                team=team,
+                used_at__isnull=True,
+                discarded_at__isnull=True,
+                pending_first_number__isnull=False,
+            )
             .first()
         )
         pending = PendingDiceRoll.objects.filter(team=team).first()

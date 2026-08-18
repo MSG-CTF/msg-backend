@@ -17,7 +17,12 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import include, path
 
-from apps.board.views import BoardView, DashboardView, DebugSolveActiveChallengeView
+from apps.board.views import (
+    BoardView,
+    DashboardView,
+    DebugReleaseQuarantineView,
+    DebugSolveActiveChallengeView,
+)
 
 urlpatterns = [
     path("", DashboardView.as_view(), name="dashboard"),
@@ -30,4 +35,9 @@ urlpatterns = [
     path("", include("apps.koth.urls")),
     # /api/v1 명세 밖, 로컬 프리뷰 전용 (DEBUG=True에서만 응답).
     path("board/_debug/solve", DebugSolveActiveChallengeView.as_view(), name="board-debug-solve"),
+    path(
+        "board/_debug/release_quarantine",
+        DebugReleaseQuarantineView.as_view(),
+        name="board-debug-release-quarantine",
+    ),
 ]

@@ -104,6 +104,7 @@ class TeamChanceCard(models.Model):
     card = models.ForeignKey(ChanceCard, on_delete=models.PROTECT, related_name="draws")
     drawn_at = models.DateTimeField(auto_now_add=True)
     used_at = models.DateTimeField(null=True, blank=True)
+    discarded_at = models.DateTimeField(null=True, blank=True)
     pending_first_number = models.PositiveSmallIntegerField(null=True, blank=True)
     pending_second_number = models.PositiveSmallIntegerField(null=True, blank=True)
 

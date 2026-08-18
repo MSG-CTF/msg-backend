@@ -111,10 +111,16 @@ class NotChanceCell(APIError):
     message = "현재 위치가 찬스 칸이 아닙니다."
 
 
-class ChanceCardAlreadyHeld(APIError):
+class ChanceCardAwaitingDiscard(APIError):
     status_code = status.HTTP_409_CONFLICT
-    code = "CHANCE_CARD_ALREADY_HELD"
-    message = "이미 보유한 찬스카드가 있습니다."
+    code = "CHANCE_CARD_AWAITING_DISCARD"
+    message = "찬스카드 2장 중 하나를 먼저 버려야 합니다."
+
+
+class NoCardToDiscard(APIError):
+    status_code = status.HTTP_409_CONFLICT
+    code = "NO_CARD_TO_DISCARD"
+    message = "지금은 버릴 찬스카드가 없습니다."
 
 
 class CardIdRequired(APIError):
@@ -151,3 +157,9 @@ class NoPendingRoll(APIError):
     status_code = status.HTTP_409_CONFLICT
     code = "NO_PENDING_ROLL"
     message = "확정할 주사위 결과가 없습니다."
+
+
+class PendingRollUnresolved(APIError):
+    status_code = status.HTTP_409_CONFLICT
+    code = "PENDING_CONFIRM"
+    message = "이전 주사위 결과를 먼저 확정해야 합니다."

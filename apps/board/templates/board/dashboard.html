@@ -122,6 +122,10 @@
       진행 중인 문제 때문에 막혔다면 ↓
       <button class="secondary" onclick="callApi('POST', '/board/_debug/solve')">데모용 정답 처리 (API 명세 아님)</button>
     </div>
+    <div class="row small muted">
+      무인도 15분 잠금 때문에 막혔다면 ↓
+      <button class="secondary" onclick="callApi('POST', '/board/_debug/release_quarantine')">데모용 무인도 즉시 해제 (API 명세 아님)</button>
+    </div>
   </div>
 
   <div class="card">
@@ -136,6 +140,7 @@
       <button class="secondary" onclick="callApi('GET', '/api/v1/board/chance/catalog')">카탈로그</button>
       <button onclick="callApi('POST', '/api/v1/board/chance/now', null, {idem: true})">뽑기 (chance/now)</button>
     </div>
+    <div id="heldCardsBox" class="small"></div>
     <div class="row">
       <select id="chanceCardId">
         <option value="card_reroll">card_reroll</option>
@@ -244,8 +249,9 @@ function afterCall(path, data) {
   if (path === '/api/v1/koth/clubs') renderKothClubs(data.data);
   // 대부분의 쓰기 요청 뒤에는 최신 상태를 다시 그린다.
   if (['/api/v1/board/dice/roll', '/api/v1/board/dice/confirm', '/api/v1/board/chance/use',
-       '/api/v1/board/chance/confirm', '/api/v1/board/chance/now', '/api/v1/board/airport/move',
-       '/api/v1/board/cell/open', '/board/_debug/solve'].includes(path)) {
+       '/api/v1/board/chance/confirm', '/api/v1/board/chance/now', '/api/v1/board/chance/discard',
+       '/api/v1/board/airport/move', '/api/v1/board/cell/open', '/board/_debug/solve',
+       '/board/_debug/release_quarantine'].includes(path)) {
     loadMe(); loadDiceStatus();
   }
 }
@@ -318,13 +324,34 @@ function renderMe(data) {
     ['무인도', data.is_quarantined ? '예' : '아니오'],
     ['보드 완료', data.board_completed ? '예' : '아니오'],
     ['소모한 칸 수', data.consumed_cell_indexes.length + ' / 36'],
-    ['보유 찬스카드', data.chance_cards.map(c => `${c.card_id}${c.used ? '(사용됨)' : c.usable_now ? '(사용가능)' : ''}`).join(', ') || '없음'],
+    ['찬스카드 이력', data.chance_cards.map(c => {
+      const state = c.discarded ? '버림' : c.used ? '사용됨' : c.usable_now ? '사용가능' : '보유 중(대기)';
+      return `${c.card_id}(${state})`;
+    }).join(', ') || '없음'],
     ['진행 중인 문제', data.active_challenge ? data.active_challenge.challenge_id : '없음'],
   ];
   for (const [k, v] of rows) {
     box.innerHTML += `<div class="k">${k}</div><div>${v}</div>`;
   }
   paintBoard();
+  renderHeldCards(data.chance_cards);
+}
+
+function renderHeldCards(chanceCards) {
+  const box = document.getElementById('heldCardsBox');
+  const held = chanceCards.filter(c => !c.used && !c.discarded);
+  if (held.length < 2) { box.innerHTML = ''; return; }
+  box.innerHTML = `<div class="muted">카드 2장 보유 중 — 하나를 버려야 사용 가능</div>` +
+    held.map(c => `
+      <div class="candidate">
+        <span>${c.card_id}</span>
+        <button onclick="discardCard('${c.card_id}')">버리기</button>
+      </div>
+    `).join('');
+}
+
+async function discardCard(cardId) {
+  await callApi('POST', '/api/v1/board/chance/discard', { card_id: cardId }, { idem: true });
 }
 
 function renderDiceStatus(data) {

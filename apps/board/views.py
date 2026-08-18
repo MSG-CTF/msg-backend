@@ -24,6 +24,8 @@ from .services import (
     compute_blocked_reason,
     confirm_chance_choice,
     confirm_dice_roll,
+    debug_force_release_quarantine,
+    discard_chance_card,
     draw_chance_card,
     get_current_cell_candidates,
     get_opened_challenges_summary,
@@ -235,7 +237,7 @@ class ChanceNowView(APIView):
     def post(self, request, *args, **kwargs):
         _assert_no_body(request)
         team = _get_team(request)
-        draw, dice_rolls_left = draw_chance_card(team)
+        draw, dice_rolls_left, awaiting_discard = draw_chance_card(team)
 
         return ok(
             {
@@ -246,8 +248,21 @@ class ChanceNowView(APIView):
                 "usage_timing": draw.card.usage_timing,
                 "used": False,
                 "dice_rolls_left": dice_rolls_left,
+                "awaiting_discard": awaiting_discard,
             }
         )
+
+
+class ChanceDiscardView(APIView):
+    """POST /api/v1/board/chance/discard — 찬스카드 2장을 들고 있을 때 하나를 버린다. 팀장만."""
+
+    permission_classes = [IsAuthenticated, IsTeamLeader]
+
+    @idempotent
+    def post(self, request, *args, **kwargs):
+        team = _get_team(request)
+        card_id = request.data.get("card_id")
+        return ok(discard_chance_card(team, card_id))
 
 
 class ChanceUseView(APIView):
@@ -305,3 +320,16 @@ class DebugSolveActiveChallengeView(APIView):
                 "dice_rolls_left": state.dice_rolls_left,
             }
         )
+
+
+class DebugReleaseQuarantineView(APIView):
+    """POST /board/_debug/release_quarantine — 로컬 프리뷰 전용. 15분 잠금을 즉시 해제한다."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, *args, **kwargs):
+        if not settings.DEBUG:
+            raise Http404
+        team = _get_team(request)
+        state = debug_force_release_quarantine(team)
+        return ok({"is_quarantined": state.is_quarantined})

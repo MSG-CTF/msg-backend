@@ -287,6 +287,33 @@ class BoardApiTestCase(TestCase):
         self.assertTrue(PendingDiceRoll.objects.filter(team=self.team).exists())
         self.assertFalse(TeamCellConsumption.objects.filter(team=self.team, cell_id=3).exists())
 
+    def test_dice_roll_blocked_while_previous_roll_still_pending(self):
+        self.draw_card("card_reroll")
+        self.state.dice_rolls_left = 2
+        self.state.save(update_fields=["dice_rolls_left"])
+        with patch("apps.board.services.random.randint", side_effect=[1, 1]):
+            self.post_idem("/api/v1/board/dice/roll", key="roll-1")
+
+        response = self.post_idem("/api/v1/board/dice/roll", key="roll-2")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["code"], "PENDING_CONFIRM")
+        # 두 번째 시도가 막혔으니 주사위는 첫 번째 굴림만큼만 소모돼야 한다
+        self.state.refresh_from_db()
+        self.assertEqual(self.state.dice_rolls_left, 1)
+        self.assertEqual(PendingDiceRoll.objects.filter(team=self.team).count(), 1)
+
+    def test_dice_status_reports_pending_confirm_as_blocked_reason(self):
+        self.draw_card("card_reroll")
+        with patch("apps.board.services.random.randint", side_effect=[1, 1]):
+            self.post_idem("/api/v1/board/dice/roll")
+
+        response = self.client.get("/api/v1/board/dice/status")
+
+        data = response.json()["data"]
+        self.assertFalse(data["can_roll"])
+        self.assertEqual(data["blocked_reason"], "PENDING_CONFIRM")
+
     # ---------------------------------------------------------------- POST /board/dice/confirm
 
     def test_dice_confirm_without_pending_fails(self):
@@ -453,7 +480,9 @@ class BoardApiTestCase(TestCase):
     # ---------------------------------------------------------------- chance/now
 
     def test_chance_now_draws_card_and_grants_roll(self):
-        self.set_position(7, consumed=False)
+        # consumed=True: 실제 플레이에서는 도착 즉시 칸이 소모된다 (finalize_landing).
+        # 소모 여부와 "카드를 뽑았는지"는 별개 신호여야 한다 — 회귀 테스트.
+        self.set_position(7, consumed=True)
 
         with patch("apps.board.services.random.choice") as choice_mock:
             choice_mock.side_effect = lambda seq: seq[0]
@@ -479,14 +508,23 @@ class BoardApiTestCase(TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["code"], "NOT_CHANCE_CELL")
 
-    def test_chance_now_rejects_when_already_holding_card(self):
+    def test_chance_now_draws_second_card_and_flags_awaiting_discard(self):
         self.draw_card("card_reroll", source_cell_index=7)
-        self.set_position(30)
+        self.set_position(30, consumed=True)
 
-        response = self.post_idem("/api/v1/board/chance/now")
+        with patch("apps.board.services.random.choice") as choice_mock:
+            choice_mock.side_effect = lambda seq: next(c for c in seq if c.card_id == "card_extra_roll")
+            response = self.post_idem("/api/v1/board/chance/now")
 
-        self.assertEqual(response.status_code, 409)
-        self.assertEqual(response.json()["code"], "CHANCE_CARD_ALREADY_HELD")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()["data"]
+        self.assertTrue(data["awaiting_discard"])
+        self.assertEqual(
+            TeamChanceCard.objects.filter(
+                team=self.team, used_at__isnull=True, discarded_at__isnull=True
+            ).count(),
+            2,
+        )
 
     # ---------------------------------------------------------------- chance/use
 
@@ -512,19 +550,16 @@ class BoardApiTestCase(TestCase):
         self.assertEqual(self.state.position_id, 10)
         self.assertTrue(TeamCellConsumption.objects.filter(team=self.team, cell_id=10).exists())
 
-    def test_chance_use_wrong_timing_pre_roll_card_while_pending(self):
+    def test_chance_use_blocked_while_awaiting_discard(self):
         self.draw_card("card_reroll", source_cell_index=7)
         self.draw_card("card_free_travel", source_cell_index=30)
-        # 2장 보유는 실제로는 chance/now에서 막히지만, 서비스 단 타이밍 검증만 확인한다.
-        with patch("apps.board.services.random.randint", side_effect=[1, 1]):
-            self.post_idem("/api/v1/board/dice/roll")
 
         response = self.post_idem(
             "/api/v1/board/chance/use", {"card_id": "card_free_travel", "destination_index": 10}
         )
 
         self.assertEqual(response.status_code, 409)
-        self.assertEqual(response.json()["code"], "CHANCE_CARD_WRONG_TIMING")
+        self.assertEqual(response.json()["code"], "CHANCE_CARD_AWAITING_DISCARD")
 
     def test_chance_use_reroll_finalizes_new_position(self):
         self.draw_card("card_reroll")
@@ -618,3 +653,56 @@ class BoardApiTestCase(TestCase):
         response = self.post_idem("/api/v1/board/chance/confirm", {"choice": "FIRST"})
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()["code"], "CHANCE_CONFIRM_NOT_FOUND")
+
+    # ---------------------------------------------------------------- chance/discard
+
+    def test_chance_discard_leaves_the_other_card_usable(self):
+        first = self.draw_card("card_extra_roll", source_cell_index=7)
+        self.draw_card("card_free_travel", source_cell_index=30)
+
+        response = self.post_idem(
+            "/api/v1/board/chance/discard", {"card_id": "card_free_travel"}, key="discard-1"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()["data"]
+        self.assertEqual(data["discarded_card_id"], "card_free_travel")
+        self.assertEqual(data["kept_card_id"], "card_extra_roll")
+
+        first.refresh_from_db()
+        self.assertIsNone(first.used_at)
+        self.assertIsNone(first.discarded_at)
+        discarded = TeamChanceCard.objects.get(card_id="card_free_travel")
+        self.assertIsNotNone(discarded.discarded_at)
+
+        # 1장만 남았으니 이제 정상적으로 사용할 수 있다
+        use_response = self.post_idem(
+            "/api/v1/board/chance/use", {"card_id": "card_extra_roll"}, key="use-1"
+        )
+        self.assertEqual(use_response.status_code, 200)
+
+    def test_chance_discard_requires_two_held_cards(self):
+        self.draw_card("card_extra_roll")
+
+        response = self.post_idem("/api/v1/board/chance/discard", {"card_id": "card_extra_roll"})
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["code"], "NO_CARD_TO_DISCARD")
+
+    def test_chance_discard_rejects_unknown_card_id(self):
+        self.draw_card("card_reroll", source_cell_index=7)
+        self.draw_card("card_free_travel", source_cell_index=30)
+
+        response = self.post_idem("/api/v1/board/chance/discard", {"card_id": "card_move_offset"})
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["code"], "CHANCE_CARD_NOT_FOUND")
+
+    def test_chance_discard_forbidden_for_non_leader(self):
+        self.draw_card("card_reroll", source_cell_index=7)
+        self.draw_card("card_free_travel", source_cell_index=30)
+        self.as_member()
+
+        response = self.post_idem("/api/v1/board/chance/discard", {"card_id": "card_free_travel"})
+
+        self.assertEqual(response.status_code, 403)
