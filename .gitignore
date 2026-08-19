@@ -4,7 +4,6 @@ __pycache__/
 *.py[cod]
 db.sqlite3
 .env
-
 # 참고용 외부 저장소 사본
 _external_2026_MSG_CTF/
 _external_MSG_CTF_WEB/
