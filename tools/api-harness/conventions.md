@@ -90,7 +90,7 @@
 | --- | --- |
 | `role` | `PARTICIPANT`, `ADMIN` |
 | `difficulty` | `EASY`, `MEDIUM`, `HARD` |
-| `category` | `WEB`, `SYSTEM`, `REV`, `CRYPTO`, `FORENSIC`, `MISC` |
+| `category` | `WEB`, `PWN`, `REV`, `CRYPTO`, `FORENSIC`, `MISC` |
 | `instance.status` | `REQUESTED`, `SCHEDULING`, `PROVISIONING`, `RUNNING`, `RESTARTING`, `RESETTING`, `STOPPING`, `STOPPED`, `FAILED`, `EXPIRED`, `CLEANUP_PENDING`, `CLEANED` (scheduler 정의) |
 | `mileage.type` | `CHALLENGE_SOLVE`, `START_BONUS`, `ROULETTE`, `KOTH_REWARD`, `ADMIN_GRANT`, `REFUND`, `PURCHASE`, `ADMIN_DEDUCT` |
 | `cell.type` | `START`, `CHALLENGE`, `CHANCE`, `AIRPORT`, `QUARANTINE`, `ROULETTE` |

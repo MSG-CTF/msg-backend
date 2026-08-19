@@ -5,11 +5,12 @@ services:
     build: ./service
     ports:
       - "8080:8080"
+      - "9090:9090"   # 헬스체크 전용, 참가자 진입점(8080)과 분리
     environment:
-      KOTH_CHALLENGE_ID: "10"
+      KOTH_CHALLENGE_ID: "018f3f1e-0700-7a91-a30b-630000000010"
       KOTH_INTERNAL_TOKEN: local-koth-internal-token
       PLATFORM_INTERNAL_TOKEN: local-platform-internal-token
-      TEAM_TOKEN_VERIFY_URL: http://platform.example/internal/koth/team-tokens/verify
+      TEAM_TOKEN_VERIFY_URL: http://platform.example/internal/koth/team_tokens/verify
       TEAM_LIST_URL: http://platform.example/internal/teams
 
   checker:
@@ -18,7 +19,7 @@ services:
     environment:
       TARGET_HOST: service
       TARGET_PORT: "8080"
-      TEAM_ID: "3"
-      CLUB_ID: "1"
+      TEAM_ID: "018f3f1e-0100-7a91-a30b-630000000003"
+      KOTH_CHALLENGE_ID: "018f3f1e-0700-7a91-a30b-630000000010"
     depends_on:
       - service
