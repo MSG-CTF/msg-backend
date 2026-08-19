@@ -20,7 +20,7 @@ class ChallengeCandidateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Challenge
-        fields = ["challenge_id", "title", "category", "score"]
+        fields = ["challenge_id", "title", "category", "club_name", "score"]
 
 
 class ChallengeSerializer(serializers.ModelSerializer):
@@ -28,7 +28,7 @@ class ChallengeSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Challenge
-        fields = ["challenge_id", "title", "category", "difficulty", "description", "score"]
+        fields = ["challenge_id", "title", "category", "club_name", "difficulty", "description", "score"]
 
 
 class TeamChallengeAccessSerializer(serializers.ModelSerializer):

@@ -14,4 +14,4 @@
 | POST | /api/v1/board/cell/open | 도착한 칸에서 문제 선택해 오픈 (경로에서 index 제거) |
 | POST | /api/v1/board/quarantine/escape | 무인도 탈출 |
 | GET | /api/v1/board/opened_challenges | 열린 문제 목록 + 풀이 여부(is_solved) 조회 |
-| POST | /api/v1/board/roulette/spin | [수치 미정] 룰렛칸 도착 시 룰렛 돌려 마일리지 획득 |
+| POST | /api/v1/board/roulette/spin | 룰렛칸 도착 시 50/100/150/200 중 하나를 25% 확률로 뽑아 마일리지 획득 |

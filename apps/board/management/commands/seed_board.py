@@ -1,5 +1,3 @@
-import random
-
 from django.core.management.base import BaseCommand
 
 from apps.board.models import (
@@ -36,13 +34,77 @@ DIFFICULTY_COUNTS = {
     Cell.Difficulty.EASY: 12,
 }
 
+# 강지원 확정 (2026-08-19): 칸별 난이도. cell_index -> Cell.Difficulty
+CELL_DIFFICULTY = {
+    2: Cell.Difficulty.HARD,
+    3: Cell.Difficulty.MEDIUM,
+    4: Cell.Difficulty.HARD,
+    5: Cell.Difficulty.EASY,
+    6: Cell.Difficulty.MEDIUM,
+    8: Cell.Difficulty.MEDIUM,
+    9: Cell.Difficulty.EASY,
+    10: Cell.Difficulty.HARD,
+    11: Cell.Difficulty.EASY,
+    12: Cell.Difficulty.MEDIUM,
+    13: Cell.Difficulty.MEDIUM,
+    14: Cell.Difficulty.EASY,
+    15: Cell.Difficulty.MEDIUM,
+    17: Cell.Difficulty.EASY,
+    18: Cell.Difficulty.MEDIUM,
+    19: Cell.Difficulty.EASY,
+    20: Cell.Difficulty.MEDIUM,
+    22: Cell.Difficulty.MEDIUM,
+    23: Cell.Difficulty.EASY,
+    24: Cell.Difficulty.MEDIUM,
+    26: Cell.Difficulty.HARD,
+    27: Cell.Difficulty.EASY,
+    28: Cell.Difficulty.EASY,
+    29: Cell.Difficulty.HARD,
+    31: Cell.Difficulty.MEDIUM,
+    32: Cell.Difficulty.MEDIUM,
+    33: Cell.Difficulty.EASY,
+    34: Cell.Difficulty.EASY,
+    35: Cell.Difficulty.HARD,
+    36: Cell.Difficulty.EASY,
+}
+
 DIFFICULTY_LABELS = {
     Cell.Difficulty.HARD: "상",
     Cell.Difficulty.MEDIUM: "중",
     Cell.Difficulty.EASY: "하",
 }
 
-CATEGORIES = ["WEB", "SYSTEM", "CRYPTO", "REV", "MISC", "FORENSIC"]
+# 강지원 확정 (2026-08-19): 동아리 배정표 기준 분야 x 난이도별 출제 동아리.
+# 슬래시(/)로 두 동아리가 적힌 칸은 문제 2개(동아리별 1개)를 뜻한다.
+# 동아리명 철자는 강지원 확정: SeKurity, CodeCure
+CATEGORY_CLUB_ASSIGNMENTS = {
+    Cell.Difficulty.HARD: {
+        "PWN": ["SWING"],
+        "WEB": ["MJSEC"],
+        "REV": ["Y-CERT"],
+        "CRYPTO": ["SeKurity"],
+        "WEB3": ["CodeCure"],
+        "MISC": ["Aegis"],
+    },
+    Cell.Difficulty.MEDIUM: {
+        "PWN": ["SeKurity", "Aegis"],
+        "WEB": ["Aegis", "Y-CERT"],
+        "REV": ["MJSEC"],
+        "FORENSIC": ["CodeCure", "SWING"],
+        "CRYPTO": ["SWING", "Y-CERT"],
+        "MISC": ["SeKurity", "MJSEC"],
+        "OSINT": ["CodeCure"],
+    },
+    Cell.Difficulty.EASY: {
+        "PWN": ["Y-CERT", "CodeCure"],
+        "WEB": ["CodeCure", "SeKurity"],
+        "REV": ["SWING", "Aegis"],
+        "FORENSIC": ["Y-CERT", "MJSEC"],
+        "WEB3": ["SeKurity"],
+        "MISC": ["SWING"],
+        "OSINT": ["MJSEC", "Aegis"],
+    },
+}
 
 CHANCE_CARDS = [
     {
@@ -112,19 +174,21 @@ class Command(BaseCommand):
         Cell.objects.all().delete()
         ChanceCard.objects.all().delete()
 
-        pool = []
-        for difficulty, count in DIFFICULTY_COUNTS.items():
-            pool.extend([difficulty] * count)
-
         board_indexes = range(FIRST_CELL_INDEX, FIRST_CELL_INDEX + BOARD_SIZE)
         challenge_indexes = [i for i in board_indexes if i not in SPECIAL_CELLS]
-        if len(challenge_indexes) != len(pool):
+        if set(challenge_indexes) != set(CELL_DIFFICULTY):
             self.stderr.write(
-                f"challenge cells({len(challenge_indexes)}) != difficulty pool({len(pool)})"
+                f"challenge cells({len(challenge_indexes)}) != difficulty map({len(CELL_DIFFICULTY)})"
             )
             return
 
-        random.Random(0).shuffle(pool)
+        for difficulty, count in DIFFICULTY_COUNTS.items():
+            club_total = sum(len(clubs) for clubs in CATEGORY_CLUB_ASSIGNMENTS[difficulty].values())
+            if club_total != count:
+                self.stderr.write(
+                    f"{difficulty} club assignment count({club_total}) != difficulty count({count})"
+                )
+                return
 
         cells = []
         for cell_index in board_indexes:
@@ -133,7 +197,7 @@ class Command(BaseCommand):
                 cells.append(Cell(cell_index=cell_index, type=cell_type, name=name))
                 continue
 
-            difficulty = pool[challenge_indexes.index(cell_index)]
+            difficulty = CELL_DIFFICULTY[cell_index]
             cells.append(
                 Cell(
                     cell_index=cell_index,
@@ -148,24 +212,26 @@ class Command(BaseCommand):
         challenges = []
         challenge_number = 1
         for difficulty in [Cell.Difficulty.EASY, Cell.Difficulty.MEDIUM, Cell.Difficulty.HARD]:
-            for _ in range(DIFFICULTY_COUNTS[difficulty]):
-                label = DIFFICULTY_LABELS[difficulty]
-                challenges.append(
-                    Challenge(
-                        challenge_number=challenge_number,
-                        title=f"{label} 문제 {challenge_number}",
-                        category=CATEGORIES[(challenge_number - 1) % len(CATEGORIES)],
-                        difficulty=difficulty,
-                        description=f"{label} 난이도 데모 문제입니다.",
-                        flag=f"MSG{{challenge_{challenge_number:02d}}}",
-                        score={
-                            Cell.Difficulty.EASY: 100,
-                            Cell.Difficulty.MEDIUM: 200,
-                            Cell.Difficulty.HARD: 300,
-                        }[difficulty],
+            label = DIFFICULTY_LABELS[difficulty]
+            for category, clubs in CATEGORY_CLUB_ASSIGNMENTS[difficulty].items():
+                for club_name in clubs:
+                    challenges.append(
+                        Challenge(
+                            challenge_number=challenge_number,
+                            title=f"{label} 문제 {challenge_number}",
+                            category=category,
+                            club_name=club_name,
+                            difficulty=difficulty,
+                            description=f"{label} 난이도 데모 문제입니다.",
+                            flag=f"MSG{{challenge_{challenge_number:02d}}}",
+                            score={
+                                Cell.Difficulty.EASY: 100,
+                                Cell.Difficulty.MEDIUM: 200,
+                                Cell.Difficulty.HARD: 300,
+                            }[difficulty],
+                        )
                     )
-                )
-                challenge_number += 1
+                    challenge_number += 1
 
         Challenge.objects.bulk_create(challenges)
 

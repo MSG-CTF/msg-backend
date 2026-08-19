@@ -13,6 +13,7 @@ from apps.board.models import (
     ChanceCard,
     Challenge,
     PendingDiceRoll,
+    QuarantineEscapeCode,
     TeamBoardState,
     TeamCellConsumption,
     TeamChallengeAccess,
@@ -794,5 +795,150 @@ class BoardApiTestCase(TestCase):
         self.as_member()
 
         response = self.post_idem("/api/v1/board/chance/discard", {"card_id": "card_free_travel"})
+
+        self.assertEqual(response.status_code, 403)
+
+    # ---------------------------------------------------------------- roulette/spin
+
+    def test_roulette_spin_grants_one_of_fixed_rewards(self):
+        self.set_position(25, consumed=True)
+        self.team.mileage = 10
+        self.team.save(update_fields=["mileage"])
+
+        with patch("apps.board.services.random.choice", return_value=150):
+            response = self.post_idem("/api/v1/board/roulette/spin")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()["data"]
+        self.assertEqual(data["roulette_result"], {"label": "마일리지 150"})
+        self.assertEqual(data["mileage_gained"], 150)
+        self.assertEqual(data["total_mileage"], 160)
+
+        self.team.refresh_from_db()
+        self.assertEqual(self.team.mileage, 160)
+        self.assertTrue(TeamCellConsumption.objects.filter(team=self.team, cell_id=25).exists())
+        self.assertTrue(
+            MileageHistory.objects.filter(
+                team=self.team,
+                type="ROULETTE",
+                amount=150,
+                reason="ROULETTE_CELL:25",
+            ).exists()
+        )
+
+    def test_roulette_spin_replays_response_for_same_idempotency_key(self):
+        self.set_position(25, consumed=True)
+
+        with patch("apps.board.services.random.choice", return_value=50):
+            first = self.post_idem("/api/v1/board/roulette/spin", key="roulette-1")
+        second = self.post_idem("/api/v1/board/roulette/spin", key="roulette-1")
+
+        self.assertEqual(first.json(), second.json())
+        self.assertEqual(
+            MileageHistory.objects.filter(team=self.team, type="ROULETTE").count(),
+            1,
+        )
+
+    def test_roulette_spin_cannot_be_used_twice_with_new_key(self):
+        self.set_position(25, consumed=True)
+
+        with patch("apps.board.services.random.choice", return_value=50):
+            self.post_idem("/api/v1/board/roulette/spin", key="roulette-1")
+        response = self.post_idem("/api/v1/board/roulette/spin", key="roulette-2")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["code"], "ROULETTE_ALREADY_SPUN")
+        self.assertEqual(
+            MileageHistory.objects.filter(team=self.team, type="ROULETTE").count(),
+            1,
+        )
+
+    def test_roulette_spin_requires_roulette_cell(self):
+        response = self.post_idem("/api/v1/board/roulette/spin")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["code"], "NOT_ROULETTE_CELL")
+
+    def test_roulette_spin_rejects_request_body(self):
+        self.set_position(25, consumed=True)
+
+        response = self.post_idem("/api/v1/board/roulette/spin", {"value": 50})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["code"], "REQUEST_BODY_NOT_ALLOWED")
+
+    def test_roulette_spin_forbidden_for_non_leader(self):
+        self.set_position(25, consumed=True)
+        self.as_member()
+
+        response = self.post_idem("/api/v1/board/roulette/spin")
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["code"], "NOT_TEAM_LEADER")
+
+    # ---------------------------------------------------------------- quarantine/escape
+
+    def enter_quarantine(self):
+        self.state.is_quarantined = True
+        self.state.quarantine_released_at = timezone.now() + timedelta(minutes=15)
+        self.state.save(update_fields=["is_quarantined", "quarantine_released_at"])
+
+    def test_quarantine_escape_with_valid_code_succeeds(self):
+        self.enter_quarantine()
+        QuarantineEscapeCode.objects.create(code="AAAAAAAA")
+
+        response = self.post_idem("/api/v1/board/quarantine/escape", {"code": "AAAAAAAA"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["data"]["is_quarantined"])
+        self.state.refresh_from_db()
+        self.assertFalse(self.state.is_quarantined)
+        escape_code = QuarantineEscapeCode.objects.get(code="AAAAAAAA")
+        self.assertEqual(escape_code.used_by_team, self.team)
+        self.assertIsNotNone(escape_code.used_at)
+
+    def test_quarantine_escape_code_cannot_be_reused_by_another_team(self):
+        self.enter_quarantine()
+        QuarantineEscapeCode.objects.create(
+            code="AAAAAAAA", used_by_team=self.other_team, used_at=timezone.now()
+        )
+
+        response = self.post_idem("/api/v1/board/quarantine/escape", {"code": "AAAAAAAA"})
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["code"], "QUARANTINE_CODE_ALREADY_USED")
+        self.state.refresh_from_db()
+        self.assertTrue(self.state.is_quarantined)
+
+    def test_quarantine_escape_unknown_code_not_found(self):
+        self.enter_quarantine()
+
+        response = self.post_idem("/api/v1/board/quarantine/escape", {"code": "NOPE0000"})
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["code"], "QUARANTINE_CODE_INVALID")
+
+    def test_quarantine_escape_requires_code(self):
+        self.enter_quarantine()
+
+        response = self.post_idem("/api/v1/board/quarantine/escape", {})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["code"], "QUARANTINE_CODE_REQUIRED")
+
+    def test_quarantine_escape_requires_being_quarantined(self):
+        QuarantineEscapeCode.objects.create(code="AAAAAAAA")
+
+        response = self.post_idem("/api/v1/board/quarantine/escape", {"code": "AAAAAAAA"})
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["code"], "NOT_QUARANTINED")
+
+    def test_quarantine_escape_forbidden_for_non_leader(self):
+        self.enter_quarantine()
+        QuarantineEscapeCode.objects.create(code="AAAAAAAA")
+        self.as_member()
+
+        response = self.post_idem("/api/v1/board/quarantine/escape", {"code": "AAAAAAAA"})
 
         self.assertEqual(response.status_code, 403)

@@ -28,6 +28,7 @@ from .services import (
     debug_force_release_quarantine,
     discard_chance_card,
     draw_chance_card,
+    escape_quarantine_with_code,
     get_current_cell_candidates,
     get_opened_challenges_summary,
     get_or_create_board_state,
@@ -36,6 +37,7 @@ from .services import (
     solve_active_challenge,
     open_current_cell_challenge,
     roll_dice,
+    spin_roulette,
     use_chance_card,
 )
 
@@ -330,6 +332,30 @@ class DebugSolveActiveChallengeView(APIView):
                 "dice_rolls_left": state.dice_rolls_left,
             }
         )
+
+
+class QuarantineEscapeView(APIView):
+    """POST /api/v1/board/quarantine/escape — 팀장만."""
+
+    permission_classes = [IsAuthenticated, IsTeamLeader]
+
+    @idempotent
+    def post(self, request, *args, **kwargs):
+        team = _get_team(request)
+        code = request.data.get("code")
+        return ok(escape_quarantine_with_code(team, code))
+
+
+class RouletteSpinView(APIView):
+    """POST /api/v1/board/roulette/spin — 팀장만."""
+
+    permission_classes = [IsAuthenticated, IsTeamLeader]
+
+    @idempotent
+    def post(self, request, *args, **kwargs):
+        _assert_no_body(request)
+        team = _get_team(request)
+        return ok(spin_roulette(team))
 
 
 class DebugReleaseQuarantineView(APIView):

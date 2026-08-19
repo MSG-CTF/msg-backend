@@ -29,9 +29,15 @@ from .exceptions import (
     NotAirportCell,
     NotChallengeCell,
     NotChanceCell,
+    NotQuarantined,
+    NotRouletteCell,
     NotTeamLeader,
     PendingRollUnresolved,
     Quarantined,
+    QuarantineCodeAlreadyUsed,
+    QuarantineCodeInvalid,
+    QuarantineCodeRequired,
+    RouletteAlreadySpun,
     TimerRunning,
 )
 from .models import (
@@ -40,6 +46,7 @@ from .models import (
     ChanceCard,
     DiceRoll,
     PendingDiceRoll,
+    QuarantineEscapeCode,
     TeamBoardState,
     TeamCellCandidate,
     TeamCellConsumption,
@@ -58,6 +65,8 @@ START_ROLL_BONUS = 1
 CHANCE_DRAW_ROLL_BONUS = 1
 MOVE_OFFSET_MIN = -3
 MOVE_OFFSET_MAX = 3
+ROULETTE_REWARDS = (50, 100, 150, 200)
+ROULETTE_REASON_PREFIX = "ROULETTE_CELL"
 DICE_RECHARGE_INTERVAL = timedelta(minutes=15)
 QUARANTINE_LOCK_INTERVAL = timedelta(minutes=15)
 
@@ -127,6 +136,32 @@ def apply_pending_quarantine_release(state):
     return state
 
 
+def escape_quarantine_with_code(team, code):
+    if not code:
+        raise QuarantineCodeRequired()
+
+    state = get_or_create_board_state(team)
+    if not state.is_quarantined:
+        raise NotQuarantined()
+
+    with transaction.atomic():
+        escape_code = QuarantineEscapeCode.objects.select_for_update().filter(code=code).first()
+        if escape_code is None:
+            raise QuarantineCodeInvalid()
+        if escape_code.used_by_team_id is not None:
+            raise QuarantineCodeAlreadyUsed()
+
+        escape_code.used_by_team = team
+        escape_code.used_at = timezone.now()
+        escape_code.save(update_fields=["used_by_team", "used_at"])
+
+        state.is_quarantined = False
+        state.quarantine_released_at = None
+        state.save(update_fields=["is_quarantined", "quarantine_released_at", "updated_at"])
+
+    return {"is_quarantined": False}
+
+
 def debug_force_release_quarantine(team):
     """로컬 프리뷰 전용. 15분 잠금을 기다리지 않고 즉시 무인도에서 풀어준다."""
     state = get_or_create_board_state(team)
@@ -194,6 +229,10 @@ def grant_mileage(team, amount, mileage_type, reason=None):
     Team.objects.filter(pk=team.pk).update(mileage=F("mileage") + amount)
     team.mileage += amount
     MileageHistory.objects.create(team=team, type=mileage_type, amount=amount, reason=reason)
+
+
+def roulette_reason(cell):
+    return f"{ROULETTE_REASON_PREFIX}:{cell.cell_index}"
 
 
 def consume_cell(team, cell):
@@ -463,6 +502,37 @@ def move_team_via_airport(team, destination_index):
     }
 
 
+def spin_roulette(team):
+    state = get_or_create_board_state(team)
+
+    with transaction.atomic():
+        locked_team = Team.objects.select_for_update().get(pk=team.pk)
+        state = TeamBoardState.objects.select_for_update().select_related("position").get(team=team)
+        cell = state.position
+        if cell.type != Cell.CellType.ROULETTE:
+            raise NotRouletteCell()
+
+        reason = roulette_reason(cell)
+        if MileageHistory.objects.filter(
+            team=locked_team,
+            type=MileageType.ROULETTE,
+            reason=reason,
+        ).exists():
+            raise RouletteAlreadySpun()
+
+        amount = random.choice(ROULETTE_REWARDS)
+        consume_cell(locked_team, cell)
+        grant_mileage(locked_team, amount, MileageType.ROULETTE, reason=reason)
+
+    return {
+        "roulette_result": {
+            "label": f"마일리지 {amount}",
+        },
+        "mileage_gained": amount,
+        "total_mileage": locked_team.mileage,
+    }
+
+
 # ---------------------------------------------------------------------------
 # 문제 칸
 # ---------------------------------------------------------------------------
@@ -596,6 +666,7 @@ def get_opened_challenges_summary(team):
                 "cell_index": access.source_cell_id,
                 "title": access.challenge.title,
                 "category": access.challenge.category,
+                "club_name": access.challenge.club_name,
                 "score": access.challenge.score,
                 "is_solved": access.status == TeamChallengeAccess.Status.CLEARED,
                 "solved_at": access.cleared_at,
@@ -657,7 +728,7 @@ def build_cell_states(team):
     consumed_indexes = sorted(get_consumed_indexes(team))
     accesses = {
         access.source_cell_id: access
-        for access in TeamChallengeAccess.objects.filter(team=team)
+        for access in TeamChallengeAccess.objects.filter(team=team).select_related("challenge")
     }
 
     states = []
@@ -669,7 +740,13 @@ def build_cell_states(team):
             status = "OPENED"
         else:
             status = "CONSUMED"
-        states.append({"cell_index": cell_index, "status": status})
+        states.append(
+            {
+                "cell_index": cell_index,
+                "status": status,
+                "category": access.challenge.category if access is not None else None,
+            }
+        )
     return states, consumed_indexes
 
 

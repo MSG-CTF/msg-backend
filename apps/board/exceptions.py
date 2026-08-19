@@ -111,6 +111,18 @@ class NotChanceCell(APIError):
     message = "현재 위치가 찬스 칸이 아닙니다."
 
 
+class NotRouletteCell(APIError):
+    status_code = status.HTTP_409_CONFLICT
+    code = "NOT_ROULETTE_CELL"
+    message = "현재 위치가 룰렛 칸이 아닙니다."
+
+
+class RouletteAlreadySpun(APIError):
+    status_code = status.HTTP_409_CONFLICT
+    code = "ROULETTE_ALREADY_SPUN"
+    message = "이미 룰렛을 돌렸습니다."
+
+
 class ChanceCardAwaitingDiscard(APIError):
     status_code = status.HTTP_409_CONFLICT
     code = "CHANCE_CARD_AWAITING_DISCARD"
@@ -163,3 +175,27 @@ class PendingRollUnresolved(APIError):
     status_code = status.HTTP_409_CONFLICT
     code = "PENDING_CONFIRM"
     message = "이전 주사위 결과를 먼저 확정해야 합니다."
+
+
+class NotQuarantined(APIError):
+    status_code = status.HTTP_409_CONFLICT
+    code = "NOT_QUARANTINED"
+    message = "무인도 상태가 아닙니다."
+
+
+class QuarantineCodeRequired(APIError):
+    status_code = status.HTTP_400_BAD_REQUEST
+    code = "QUARANTINE_CODE_REQUIRED"
+    message = "code가 필요합니다."
+
+
+class QuarantineCodeInvalid(APIError):
+    status_code = status.HTTP_404_NOT_FOUND
+    code = "QUARANTINE_CODE_INVALID"
+    message = "존재하지 않는 탈출 코드입니다."
+
+
+class QuarantineCodeAlreadyUsed(APIError):
+    status_code = status.HTTP_409_CONFLICT
+    code = "QUARANTINE_CODE_ALREADY_USED"
+    message = "이미 사용된 탈출 코드입니다."

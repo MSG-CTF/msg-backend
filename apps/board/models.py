@@ -160,6 +160,7 @@ class Challenge(models.Model):
     challenge_number = models.PositiveSmallIntegerField(unique=True)
     title = models.CharField(max_length=100)
     category = models.CharField(max_length=20, default="MISC")
+    club_name = models.CharField(max_length=50, blank=True)
     difficulty = models.CharField(max_length=10, choices=Cell.Difficulty.choices)
     description = models.TextField(blank=True)
     flag = models.CharField(max_length=100, blank=True)
@@ -307,6 +308,29 @@ class TeamBoardState(models.Model):
 
     def __str__(self):
         return f"{self.team_id}: {self.position_id}"
+
+
+class QuarantineEscapeCode(models.Model):
+    """ERD: quarantine_escape_codes — 무인도 탈출 코드 150개(75팀 × 2), 선착순 1회용.
+
+    특정 팀에 배정되지 않은 공용 풀. POST /api/v1/board/quarantine/escape 에서 검증한다.
+    """
+
+    code = models.CharField(max_length=20, primary_key=True)
+    used_by_team = models.ForeignKey(
+        "accounts.Team",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="quarantine_escape_codes",
+    )
+    used_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "quarantine_escape_codes"
+
+    def __str__(self):
+        return self.code
 
 
 class DiceRoll(models.Model):
