@@ -92,8 +92,6 @@ common_error_codes:
   - {http: 409, code: NOT_BANNED}
   # 프레임워크 폴백
   - {http: 405, code: METHOD_NOT_ALLOWED}
-  # 도메인: 플래그 제출 3연속 오답 (요청 빈도 제한 TOO_MANY_REQUESTS 와 구분)
-  - {http: 429, code: TOO_MANY_ATTEMPTS}
   # KOTH 내부 API 전용 (/internal/koth/scores, /internal/koth/team_tokens/verify, /internal/teams)
   - {http: 400, code: INVALID_PERIOD}
   - {http: 401, code: INVALID_INTERNAL_TOKEN}
