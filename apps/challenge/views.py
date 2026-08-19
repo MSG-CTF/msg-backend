@@ -14,7 +14,14 @@ from apps.challenge.models import (
 from apps.challenge.services import hash_flag, is_correct_flag
 from apps.common.response import fail, ok
 from apps.instances.models import Instance
-from apps.instances.services import ACTIVE_INSTANCE_STATUSES, isoformat_z, serialize_instance
+from apps.instances.services import (
+    ACTIVE_INSTANCE_STATUSES,
+    SchedulerError,
+    isoformat_z,
+    scheduler_auth_header,
+    serialize_instance,
+    sync_instance_from_scheduler,
+)
 from apps.common.permissions import IsAuthenticated
 
 def number_value(value):
@@ -46,6 +53,16 @@ class ChallengeDetailView(APIView):
             .order_by("-created_at")
             .first()
         )
+        if instance is not None:
+            try:
+                instance = sync_instance_from_scheduler(instance, scheduler_auth_header(request))
+            except SchedulerError as error:
+                if error.code == "INSTANCE_NOT_FOUND":
+                    instance = None
+                else:
+                    return fail(error.code, error.message, error.status_code)
+            if instance is not None and instance.status not in ACTIVE_INSTANCE_STATUSES:
+                instance = None
 
         return ok(
             message="문제 상세 조회 성공",

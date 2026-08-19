@@ -6,18 +6,20 @@ from apps.challenge.models import Challenge
 from apps.common.response import fail, ok
 from apps.instances.models import DeleteReason, Instance, InstanceStatus
 from apps.instances.services import (
-    ACTIVE_INSTANCE_STATUSES,
     DELETABLE_INSTANCE_STATUSES,
     EXTENDABLE_INSTANCE_STATUSES,
     RESETTABLE_INSTANCE_STATUSES,
-    build_create_payload,
-    build_delete_payload,
-    build_extend_payload,
-    build_reset_payload,
-    enqueue_instance_job,
-    get_active_instance,
+    SchedulerError,
+    call_scheduler_active,
+    call_scheduler_create,
+    call_scheduler_delete,
+    call_scheduler_extend,
+    call_scheduler_reset,
+    create_instance_from_scheduler,
     get_challenge_runtime_config,
+    scheduler_auth_header,
     serialize_instance,
+    update_instance_from_scheduler,
 )
 
 MAX_EXTEND_COUNT = 3
@@ -25,8 +27,9 @@ MAX_EXTEND_COUNT = 3
 
 class InstanceCreateView(APIView):
     permission_classes = [IsAuthenticated]
+
     def post(self, request):
-        # 새 인스턴스 생성 요청을 저장하고 Scheduler용 CREATE 작업을 Redis queue에 적재한다
+        # 새 인스턴스 생성을 Scheduler에 요청하고 응답값으로 DB row를 만든다
         user = request.user
         team = getattr(user, "team", None)
         if team is None:
@@ -44,36 +47,34 @@ class InstanceCreateView(APIView):
         if runtime_config is None:
             return fail("RUNTIME_CONFIG_NOT_FOUND", "문제 실행 설정이 없습니다.", 404)
 
-        with transaction.atomic():
-            active_instance = (
-                Instance.objects
-                .select_for_update()
-                .filter(user=user, status__in=ACTIVE_INSTANCE_STATUSES)
-                .order_by("-created_at")
-                .first()
+        try:
+            scheduler_data = call_scheduler_create(
+                user,
+                team,
+                challenge,
+                runtime_config,
+                scheduler_auth_header(request),
             )
-            replaced_instance = None
+        except SchedulerError as error:
+            return fail(error.code, error.message, error.status_code)
 
-            if active_instance is not None:
-                replaced_instance = active_instance
-                replaced_instance.status = InstanceStatus.STOPPING
-                replaced_instance.delete_reason = DeleteReason.REPLACED_BY_NEW_INSTANCE
-                replaced_instance.save(update_fields=["status", "delete_reason", "updated_at"])
-                enqueue_instance_job(
-                    build_delete_payload(
-                        replaced_instance,
-                        DeleteReason.REPLACED_BY_NEW_INSTANCE,
-                    )
+        with transaction.atomic():
+            replaced_instance = None
+            replaced_instance_id = scheduler_data.get("replaced_instance_id")
+            if replaced_instance_id:
+                replaced_instance = (
+                    Instance.objects
+                    .filter(instance_id=replaced_instance_id, user=user)
+                    .first()
                 )
 
-            instance = Instance.objects.create(
+            instance = create_instance_from_scheduler(
+                scheduler_data,
                 user=user,
                 team=team,
                 challenge=challenge,
-                status=InstanceStatus.REQUESTED,
                 replaced_instance=replaced_instance,
             )
-            enqueue_instance_job(build_create_payload(instance, runtime_config))
 
         message = "인스턴스 생성 요청이 접수되었습니다."
         if replaced_instance is not None:
@@ -88,8 +89,9 @@ class InstanceCreateView(APIView):
 
 class InstanceDeleteView(APIView):
     permission_classes = [IsAuthenticated]
+
     def delete(self, request, instance_id):
-        # 본인 소유 인스턴스 종료 요청을 Redis queue에 적재한다
+        # 본인 소유 인스턴스 종료를 Scheduler에 요청한다
         instance = Instance.objects.filter(instance_id=instance_id).first()
         if instance is None:
             return fail("INSTANCE_NOT_FOUND", "존재하지 않는 인스턴스 ID입니다.", 404)
@@ -100,10 +102,14 @@ class InstanceDeleteView(APIView):
         if instance.status not in DELETABLE_INSTANCE_STATUSES:
             return fail("INVALID_STATE_TRANSITION", "현재 상태에서는 요청을 처리할 수 없습니다.", 400)
 
+        try:
+            call_scheduler_delete(instance, scheduler_auth_header(request))
+        except SchedulerError as error:
+            return fail(error.code, error.message, error.status_code)
+
         instance.status = InstanceStatus.STOPPING
         instance.delete_reason = DeleteReason.USER_REQUESTED
         instance.save(update_fields=["status", "delete_reason", "updated_at"])
-        enqueue_instance_job(build_delete_payload(instance, DeleteReason.USER_REQUESTED))
 
         return ok(
             {
@@ -120,8 +126,9 @@ class InstanceDeleteView(APIView):
 
 class InstanceResetView(APIView):
     permission_classes = [IsAuthenticated]
+
     def post(self, request, instance_id):
-        # 본인 소유 인스턴스 초기화 요청을 Redis queue에 적재한다
+        # 본인 소유 인스턴스를 Scheduler reset 응답의 새 instance_id로 교체한다
         instance = Instance.objects.filter(instance_id=instance_id).select_related("challenge").first()
         if instance is None:
             return fail("INSTANCE_NOT_FOUND", "존재하지 않는 인스턴스 ID입니다.", 404)
@@ -132,25 +139,22 @@ class InstanceResetView(APIView):
         if instance.status not in RESETTABLE_INSTANCE_STATUSES:
             return fail("INVALID_STATE_TRANSITION", "현재 상태에서는 요청을 처리할 수 없습니다.", 400)
 
-        instance.status = InstanceStatus.RESETTING
-        instance.host = None
-        instance.ports = []
-        instance.expires_at = None
-        instance.hard_expires_at = None
-        instance.save(
-            update_fields=[
-                "status",
-                "host",
-                "ports",
-                "expires_at",
-                "hard_expires_at",
-                "updated_at",
-            ]
-        )
-        enqueue_instance_job(build_reset_payload(instance))
+        try:
+            scheduler_data = call_scheduler_reset(instance, scheduler_auth_header(request))
+        except SchedulerError as error:
+            return fail(error.code, error.message, error.status_code)
+
+        with transaction.atomic():
+            new_instance = create_instance_from_scheduler(
+                scheduler_data,
+                user=instance.user,
+                team=instance.team,
+                challenge=instance.challenge,
+                replaced_instance=instance,
+            )
 
         return ok(
-            serialize_instance(instance),
+            serialize_instance(new_instance, include_replaced=True),
             message="인스턴스 초기화 요청이 접수되었습니다.",
             status=202,
         )
@@ -158,8 +162,9 @@ class InstanceResetView(APIView):
 
 class InstanceExtendView(APIView):
     permission_classes = [IsAuthenticated]
+
     def post(self, request, instance_id):
-        # 본인 소유 인스턴스 TTL 연장 요청을 Redis queue에 적재한다
+        # Scheduler 연장 성공 후 백엔드 연장 횟수와 만료 시각을 갱신한다
         instance = Instance.objects.filter(instance_id=instance_id).select_related("challenge").first()
         if instance is None:
             return fail("INSTANCE_NOT_FOUND", "존재하지 않는 인스턴스 ID입니다.", 404)
@@ -173,9 +178,14 @@ class InstanceExtendView(APIView):
         if instance.extend_count >= MAX_EXTEND_COUNT:
             return fail("HARD_TIMEOUT_EXCEEDED", "더 이상 인스턴스 시간을 연장할 수 없습니다.", 400)
 
+        try:
+            scheduler_data = call_scheduler_extend(instance, scheduler_auth_header(request))
+        except SchedulerError as error:
+            return fail(error.code, error.message, error.status_code)
+
+        update_instance_from_scheduler(instance, scheduler_data)
         instance.extend_count += 1
         instance.save(update_fields=["extend_count", "updated_at"])
-        enqueue_instance_job(build_extend_payload(instance))
 
         return ok(
             serialize_instance(instance),
@@ -186,11 +196,39 @@ class InstanceExtendView(APIView):
 
 class MyInstanceView(APIView):
     permission_classes = [IsAuthenticated]
+
     def get(self, request):
-        # 현재 access token의 user_id 기준 활성 인스턴스 한 개를 조회한다
-        instance = get_active_instance(request.user)
+        # 현재 access token의 user_id 기준 활성 인스턴스 한 개를 Scheduler와 동기화해 조회한다
+        try:
+            scheduler_data = call_scheduler_active(request.user, scheduler_auth_header(request))
+        except SchedulerError as error:
+            if error.code == "INSTANCE_NOT_FOUND":
+                return ok(None, message="현재 실행 중인 인스턴스가 없습니다.")
+
+            return fail(error.code, error.message, error.status_code)
+
+        instance = Instance.objects.filter(
+            instance_id=scheduler_data.get("instance_id"),
+            user=request.user,
+        ).select_related("challenge").first()
         if instance is None:
-            return ok(None, message="현재 실행 중인 인스턴스가 없습니다.")
+            team = getattr(request.user, "team", None)
+            challenge = Challenge.objects.filter(
+                challenge_id=scheduler_data.get("challenge_id")
+            ).first()
+            if team is None:
+                return fail("USER_HAS_NO_TEAM", "소속된 팀이 없습니다", 404)
+            if challenge is None:
+                return fail("CHALLENGE_NOT_FOUND", "존재하지 않는 문제 ID입니다.", 404)
+
+            instance = create_instance_from_scheduler(
+                scheduler_data,
+                user=request.user,
+                team=team,
+                challenge=challenge,
+            )
+        else:
+            update_instance_from_scheduler(instance, scheduler_data)
 
         return ok(
             serialize_instance(instance, include_title=True),
