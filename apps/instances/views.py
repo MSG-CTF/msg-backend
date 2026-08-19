@@ -1,6 +1,7 @@
 from django.db import transaction
 from rest_framework.views import APIView
 
+from apps.common.permissions import IsAuthenticated
 from apps.challenge.models import Challenge
 from apps.common.response import fail, ok
 from apps.instances.models import DeleteReason, Instance, InstanceStatus
@@ -23,6 +24,7 @@ MAX_EXTEND_COUNT = 3
 
 
 class InstanceCreateView(APIView):
+    permission_classes = [IsAuthenticated]
     def post(self, request):
         # 새 인스턴스 생성 요청을 저장하고 Scheduler용 CREATE 작업을 Redis queue에 적재한다
         user = request.user
@@ -85,6 +87,7 @@ class InstanceCreateView(APIView):
 
 
 class InstanceDeleteView(APIView):
+    permission_classes = [IsAuthenticated]
     def delete(self, request, instance_id):
         # 본인 소유 인스턴스 종료 요청을 Redis queue에 적재한다
         instance = Instance.objects.filter(instance_id=instance_id).first()
@@ -116,6 +119,7 @@ class InstanceDeleteView(APIView):
 
 
 class InstanceResetView(APIView):
+    permission_classes = [IsAuthenticated]
     def post(self, request, instance_id):
         # 본인 소유 인스턴스 초기화 요청을 Redis queue에 적재한다
         instance = Instance.objects.filter(instance_id=instance_id).select_related("challenge").first()
@@ -153,6 +157,7 @@ class InstanceResetView(APIView):
 
 
 class InstanceExtendView(APIView):
+    permission_classes = [IsAuthenticated]
     def post(self, request, instance_id):
         # 본인 소유 인스턴스 TTL 연장 요청을 Redis queue에 적재한다
         instance = Instance.objects.filter(instance_id=instance_id).select_related("challenge").first()
@@ -180,6 +185,7 @@ class InstanceExtendView(APIView):
 
 
 class MyInstanceView(APIView):
+    permission_classes = [IsAuthenticated]
     def get(self, request):
         # 현재 access token의 user_id 기준 활성 인스턴스 한 개를 조회한다
         instance = get_active_instance(request.user)

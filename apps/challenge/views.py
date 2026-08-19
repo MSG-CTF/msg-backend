@@ -15,7 +15,7 @@ from apps.challenge.services import hash_flag, is_correct_flag
 from apps.common.response import fail, ok
 from apps.instances.models import Instance
 from apps.instances.services import ACTIVE_INSTANCE_STATUSES, isoformat_z, serialize_instance
-
+from apps.common.permissions import IsAuthenticated
 
 def number_value(value):
     # Decimal 점수를 API 응답용 숫자로 바꾼다
@@ -26,6 +26,7 @@ def number_value(value):
 
 
 class ChallengeDetailView(APIView):
+    permission_classes = [IsAuthenticated]
     def get(self, request, challenge_id):
         team = request.user.team
         if team is None:
@@ -64,6 +65,7 @@ class ChallengeDetailView(APIView):
 
 
 class ChallengeSubmitView(APIView):
+    permission_classes = [IsAuthenticated]
     def post(self, request, challenge_id):
         team = request.user.team
         if team is None:
