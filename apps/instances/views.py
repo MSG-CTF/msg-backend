@@ -112,13 +112,7 @@ class InstanceDeleteView(APIView):
         instance.save(update_fields=["status", "delete_reason", "updated_at"])
 
         return ok(
-            {
-                "instance_id": str(instance.instance_id),
-                "challenge_id": str(instance.challenge_id),
-                "host": instance.host,
-                "ports": instance.ports,
-                "status": instance.status,
-            },
+            serialize_instance(instance),
             message="인스턴스 종료 요청이 접수되었습니다.",
             status=202,
         )
