@@ -100,9 +100,6 @@ class ChallengeSubmitView(APIView):
         if opened_challenge is None:
             return fail("CHALLENGE_LOCKED", "아직 개방되지 않은 문제입니다.", 403)
 
-        if Solve.objects.filter(team=team, challenge=challenge).exists():
-            return fail("ALREADY_SOLVED", "이미 정답을 맞춘 문제입니다.", 409)
-
         now = timezone.now()
         submitted_flag_hash = hash_flag(flag)
 
@@ -111,6 +108,9 @@ class ChallengeSubmitView(APIView):
                 team=team,
                 challenge=challenge,
             )
+
+            if Solve.objects.filter(team=team, challenge=challenge).exists():
+                return fail("ALREADY_SOLVED", "이미 정답을 맞춘 문제입니다.", 409)
 
             if flag_lock.locked_until and flag_lock.locked_until > now:
                 retry_after_seconds = int((flag_lock.locked_until - now).total_seconds())
