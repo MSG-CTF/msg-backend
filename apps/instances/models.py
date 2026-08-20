@@ -93,6 +93,23 @@ class Instance(models.Model):
         return f"{self.instance_id} {self.status}"
 
 
+class InstanceLock(models.Model):
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        db_column="user_id",
+        primary_key=True,
+        related_name="instance_lock",
+    )
+    locked_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "instance_locks"
+
+    def __str__(self):
+        return str(self.user_id)
+
+
 class ChallengeRuntimeConfig(models.Model):
     challenge = models.OneToOneField(
         "challenge.Challenge",
