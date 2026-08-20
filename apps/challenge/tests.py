@@ -6,7 +6,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.accounts.models import Team, User
-from apps.challenge.models import Challenge, FlagSubmissionLock, OpenedChallenge
+from apps.challenge.models import Challenge, FlagSubmissionLock, OpenedChallenge, Solve
 from apps.challenge.services import hash_flag
 
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
@@ -84,3 +84,17 @@ class ChallengeSubmitTests(TestCase):
 
         self.assertEqual(res.status_code, 429)
         self.assertEqual(res.data["code"], "TOO_MANY_ATTEMPTS")
+
+    def test_repeated_correct_flag_does_not_create_duplicate_solve(self):
+        # 같은 팀이 정답을 다시 제출해도 풀이 기록은 한 번만 생성된다
+        first = self.submit("MSG{correct_flag}")
+        second = self.submit("MSG{correct_flag}")
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.data["code"], "SUCCESS")
+        self.assertEqual(second.status_code, 409)
+        self.assertEqual(second.data["code"], "ALREADY_SOLVED")
+        self.assertEqual(
+            Solve.objects.filter(team=self.team, challenge=self.challenge).count(),
+            1,
+        )
