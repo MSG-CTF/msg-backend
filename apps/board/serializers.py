@@ -32,12 +32,13 @@ class ChallengeSerializer(serializers.ModelSerializer):
 
 
 class TeamChallengeAccessSerializer(serializers.ModelSerializer):
+    access_id = serializers.UUIDField(source="id", read_only=True)
     challenge = ChallengeSerializer(read_only=True)
     source_cell_index = serializers.IntegerField(source="source_cell_id", read_only=True)
 
     class Meta:
         model = TeamChallengeAccess
-        fields = ["id", "challenge", "source_cell_index", "status", "opened_at", "cleared_at"]
+        fields = ["access_id", "challenge", "source_cell_index", "status", "opened_at", "cleared_at"]
 
 
 class TeamBoardStateSerializer(serializers.ModelSerializer):
@@ -62,10 +63,12 @@ class TeamBoardStateSerializer(serializers.ModelSerializer):
 
 
 class DiceRollSerializer(serializers.ModelSerializer):
+    dice_roll_id = serializers.UUIDField(source="id", read_only=True)
+
     class Meta:
         model = DiceRoll
         fields = [
-            "id",
+            "dice_roll_id",
             "dice_a",
             "dice_b",
             "rolled_number",

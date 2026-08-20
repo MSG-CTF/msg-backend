@@ -126,10 +126,7 @@ class TeamChanceCard(models.Model):
 
 
 class PendingDiceRoll(models.Model):
-    """ERD: pending_dice_rolls — POST_ROLL 찬스카드를 보유한 채 굴린 주사위의 미확정 결과.
-
-    dice/confirm 또는 chance/use(POST_ROLL 카드)가 처리될 때까지 팀당 최대 1건만 존재한다.
-    """
+    """ERD: pending_dice_rolls — 주사위 결과를 확정하기 전 팀별 임시 이동 결과."""
 
     team = models.OneToOneField(
         "accounts.Team",

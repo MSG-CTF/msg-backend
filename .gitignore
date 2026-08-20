@@ -16,6 +16,7 @@ _external_MSG_CTF_WEB/
 # 로컬 실행 로그
 runserver.out.log
 runserver.err.log
+output/
 
 # 하네스 산출물, 로컬 설정
 tools/api-harness/harness/models.py

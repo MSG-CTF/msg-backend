@@ -60,7 +60,7 @@ LAST_CELL_INDEX = FIRST_CELL_INDEX + BOARD_SIZE - 1
 START_CELL_INDEX = 1
 CHALLENGE_CANDIDATE_COUNT = 3
 SOLVE_LIMIT_SECONDS = 900
-START_PASS_MILEAGE_REWARD = 50
+START_PASS_MILEAGE_REWARD = 100
 START_ROLL_BONUS = 1
 CHANCE_DRAW_ROLL_BONUS = 1
 MOVE_OFFSET_MIN = -3
@@ -236,11 +236,12 @@ def roulette_reason(cell):
 
 
 def consume_cell(team, cell):
-    TeamCellConsumption.objects.get_or_create(team=team, cell=cell)
+    _, created = TeamCellConsumption.objects.get_or_create(team=team, cell=cell)
+    return created
 
 
-def enter_quarantine_if_landed(state, cell):
-    if cell.type != Cell.CellType.QUARANTINE:
+def enter_quarantine_if_landed(state, cell, is_first_visit):
+    if cell.type != Cell.CellType.QUARANTINE or not is_first_visit:
         return
     state.is_quarantined = True
     state.quarantine_released_at = timezone.now() + QUARANTINE_LOCK_INTERVAL
@@ -258,8 +259,8 @@ def finalize_landing(team, state, cell, passed_start, landed_on_start):
     state.position = cell
     if passed_start:
         state.has_passed_start = True
-    consume_cell(team, cell)
-    enter_quarantine_if_landed(state, cell)
+    is_first_visit = consume_cell(team, cell)
+    enter_quarantine_if_landed(state, cell, is_first_visit)
 
     reward = compute_start_reward(passed_start, landed_on_start)
     update_fields = ["position", "is_quarantined", "quarantine_released_at", "updated_at"]
@@ -436,6 +437,13 @@ def confirm_dice_roll(team):
         pending = PendingDiceRoll.objects.filter(team=team).first()
         if pending is None:
             raise NoPendingRoll()
+        if TeamChanceCard.objects.filter(
+            team=team,
+            used_at__isnull=True,
+            discarded_at__isnull=True,
+            pending_first_number__isnull=False,
+        ).exists():
+            raise ChanceConfirmNotFound()
 
         destination_cell = Cell.objects.get(cell_index=pending.candidate_position)
         landed_on_start = pending.candidate_position == START_CELL_INDEX
@@ -540,6 +548,8 @@ def spin_roulette(team):
 
 def get_current_cell_candidates(team):
     state = get_or_create_board_state(team)
+    if PendingDiceRoll.objects.filter(team=team).exists():
+        raise PendingRollUnresolved()
 
     cell = state.position
     if cell.type != Cell.CellType.CHALLENGE or not cell.difficulty:
@@ -599,6 +609,8 @@ def open_current_cell_challenge(team, challenge_id):
 
     with transaction.atomic():
         state = TeamBoardState.objects.select_for_update().get(team=team)
+        if PendingDiceRoll.objects.filter(team=team).exists():
+            raise PendingRollUnresolved()
         cell = state.position
         if cell.type != Cell.CellType.CHALLENGE:
             raise NotChallengeCell()
@@ -802,8 +814,11 @@ def build_chance_cards_view(team, state):
 
 
 def draw_chance_card(team):
+    get_or_create_board_state(team)
     with transaction.atomic():
         state = TeamBoardState.objects.select_for_update().get(team=team)
+        if PendingDiceRoll.objects.filter(team=team).exists():
+            raise PendingRollUnresolved()
         cell = state.position
         if cell.type != Cell.CellType.CHANCE:
             raise NotChanceCell()
@@ -882,6 +897,9 @@ def _effect_reroll(team, state, draw, payload):
     return {
         "card_id": draw.card_id,
         "effect": draw.card.effect,
+        "dice_a": dice_a,
+        "dice_b": dice_b,
+        "rolled_number": rolled_number,
         "from_index": previous_position,
         "to_index": destination,
         "movement_path": movement_path,
@@ -891,27 +909,65 @@ def _effect_reroll(team, state, draw, payload):
 
 
 def _effect_roll_twice_choose(team, state, draw, payload):
-    pending = PendingDiceRoll.objects.filter(team=team).first()
-    if pending is None:
-        raise ChanceCardWrongTiming()
+    _assert_can_roll(team, state)
 
+    first_a = random.randint(1, 6)
+    first_b = random.randint(1, 6)
+    first_number = first_a + first_b
     second_a = random.randint(1, 6)
     second_b = random.randint(1, 6)
     second_number = second_a + second_b
+    previous_position = state.position_id
+    consumed = get_consumed_indexes(team)
+    destination, movement_path, skipped_cells, passed_start = compute_movement(
+        consumed, previous_position, first_number
+    )
+    second_destination, _, _, _ = compute_movement(consumed, previous_position, second_number)
+    destination_cell = Cell.objects.get(cell_index=destination)
+
+    state.dice_rolls_left -= 1
+    state.next_dice_reset_at = (
+        timezone.now() + DICE_RECHARGE_INTERVAL if state.dice_rolls_left <= 0 else None
+    )
+    state.save(update_fields=["dice_rolls_left", "next_dice_reset_at", "updated_at"])
 
     DiceRoll.objects.create(
-        team=team, dice_a=second_a, dice_b=second_b, rolled_number=second_number,
-        previous_position=pending.previous_position, current_position=pending.previous_position,
+        team=team,
+        dice_a=first_a,
+        dice_b=first_b,
+        rolled_number=first_number,
+        previous_position=previous_position,
+        current_position=destination,
+    )
+    DiceRoll.objects.create(
+        team=team,
+        dice_a=second_a,
+        dice_b=second_b,
+        rolled_number=second_number,
+        previous_position=previous_position,
+        current_position=second_destination,
+    )
+    PendingDiceRoll.objects.create(
+        team=team,
+        dice_a=first_a,
+        dice_b=first_b,
+        rolled_number=first_number,
+        previous_position=previous_position,
+        candidate_position=destination,
+        movement_path=movement_path,
+        skipped_cells=skipped_cells,
+        passed_start=passed_start,
+        board_event_code=get_event_for_cell(destination_cell),
     )
 
-    draw.pending_first_number = pending.rolled_number
+    draw.pending_first_number = first_number
     draw.pending_second_number = second_number
     draw.save(update_fields=["pending_first_number", "pending_second_number"])
 
     return {
         "card_id": draw.card_id,
         "effect": draw.card.effect,
-        "first_number": pending.rolled_number,
+        "first_number": first_number,
         "second_number": second_number,
         "awaiting_confirm": True,
         "used": False,
@@ -1009,7 +1065,14 @@ def _effect_grant_extra_roll(team, state, draw, payload):
 def _effect_quarantine_escape_free(team, state, draw, payload):
     state.is_quarantined = False
     state.quarantine_released_at = None
-    state.save(update_fields=["is_quarantined", "quarantine_released_at", "updated_at"])
+    grant_dice_roll(state, 1)
+    state.save(update_fields=[
+        "is_quarantined",
+        "quarantine_released_at",
+        "dice_rolls_left",
+        "next_dice_reset_at",
+        "updated_at",
+    ])
 
     draw.used_at = timezone.now()
     draw.save(update_fields=["used_at"])
@@ -1018,6 +1081,7 @@ def _effect_quarantine_escape_free(team, state, draw, payload):
         "card_id": draw.card_id,
         "effect": draw.card.effect,
         "is_quarantined": False,
+        "dice_rolls_left": state.dice_rolls_left,
         "used": True,
     }
 
@@ -1057,14 +1121,27 @@ def use_chance_card(team, card_id, payload):
     if not card_id:
         raise CardIdRequired()
 
+    existing_draw = TeamChanceCard.objects.filter(team=team, card_id=card_id).first()
+    if existing_draw is None:
+        raise ChanceCardNotFound()
+    if existing_draw.used_at is not None:
+        raise ChanceCardAlreadyUsed()
+    if existing_draw.discarded_at is not None:
+        raise ChanceCardNotFound()
+    get_or_create_board_state(team)
+
     with transaction.atomic():
         state = TeamBoardState.objects.select_for_update().get(team=team)
         draw = (
             TeamChanceCard.objects.select_related("card")
-            .filter(team=team, card_id=card_id, used_at__isnull=True, discarded_at__isnull=True)
+            .filter(team=team, card_id=card_id)
             .first()
         )
         if draw is None:
+            raise ChanceCardNotFound()
+        if draw.used_at is not None:
+            raise ChanceCardAlreadyUsed()
+        if draw.discarded_at is not None:
             raise ChanceCardNotFound()
 
         card = draw.card
@@ -1081,6 +1158,7 @@ def confirm_chance_choice(team, choice):
     if choice not in ("FIRST", "SECOND"):
         raise ChanceConfirmNotFound()
 
+    get_or_create_board_state(team)
     with transaction.atomic():
         state = TeamBoardState.objects.select_for_update().get(team=team)
         draw = (

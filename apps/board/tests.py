@@ -15,6 +15,7 @@ from apps.board.models import (
     PendingDiceRoll,
     QuarantineEscapeCode,
     TeamBoardState,
+    TeamCellCandidate,
     TeamCellConsumption,
     TeamChallengeAccess,
     TeamChanceCard,
@@ -78,6 +79,49 @@ class BoardApiTestCase(TestCase):
             team=self.team,
             source_cell_id=source_cell_index,
             card=ChanceCard.objects.get(card_id=card_id),
+        )
+
+    def reset_card_scenario(self):
+        PendingDiceRoll.objects.filter(team=self.team).delete()
+        TeamChanceCard.objects.filter(team=self.team).delete()
+        TeamCellConsumption.objects.filter(team=self.team).delete()
+        TeamCellCandidate.objects.filter(team=self.team).delete()
+        TeamChallengeAccess.objects.filter(team=self.team).delete()
+        self.state.refresh_from_db()
+        self.state.position_id = 1
+        self.state.dice_rolls_left = 1
+        self.state.active_challenge_access = None
+        self.state.is_quarantined = False
+        self.state.next_dice_reset_at = None
+        self.state.quarantine_released_at = None
+        self.state.airport_move_used = False
+        self.state.has_passed_start = False
+        self.state.save(
+            update_fields=[
+                "position",
+                "dice_rolls_left",
+                "active_challenge_access",
+                "is_quarantined",
+                "next_dice_reset_at",
+                "quarantine_released_at",
+                "airport_move_used",
+                "has_passed_start",
+                "updated_at",
+            ]
+        )
+
+    def mark_challenge_solved(self, cell):
+        if cell.type != Cell.CellType.CHALLENGE:
+            return
+        challenge = Challenge.objects.filter(difficulty=cell.difficulty).first()
+        TeamChallengeAccess.objects.update_or_create(
+            team=self.team,
+            source_cell=cell,
+            defaults={
+                "challenge": challenge,
+                "status": TeamChallengeAccess.Status.CLEARED,
+                "cleared_at": timezone.now(),
+            },
         )
 
     # ---------------------------------------------------------------- GET /board
@@ -305,12 +349,12 @@ class BoardApiTestCase(TestCase):
         data = response.json()["data"]
         self.assertEqual(data["current_position"], 1)
         self.assertTrue(data["passed_start"])
-        self.assertEqual(data["start_reward"], {"mileage_gained": 50, "roll_gained": 1})
+        self.assertEqual(data["start_reward"], {"mileage_gained": 100, "roll_gained": 1})
         self.team.refresh_from_db()
-        self.assertEqual(self.team.mileage, 50)
+        self.assertEqual(self.team.mileage, 100)
         self.assertEqual(
             list(MileageHistory.objects.filter(team=self.team).values_list("type", "amount")),
-            [("START_BONUS", 50)],
+            [("START_BONUS", 100)],
         )
 
     def test_dice_roll_blocked_when_no_roll_left(self):
@@ -461,6 +505,29 @@ class BoardApiTestCase(TestCase):
         response = self.client.get("/api/v1/board/cell/current")
         self.assertEqual(response.json()["data"]["challenge_candidates"], [])
 
+    def test_cell_current_blocked_while_pending_roll(self):
+        self.draw_card("card_reroll")
+        with patch("apps.board.services.random.randint", side_effect=[1, 1]):
+            self.post_idem("/api/v1/board/dice/roll")
+
+        response = self.client.get("/api/v1/board/cell/current")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["code"], "PENDING_CONFIRM")
+
+    def test_cell_open_blocked_while_pending_roll(self):
+        self.draw_card("card_reroll")
+        with patch("apps.board.services.random.randint", side_effect=[1, 1]):
+            self.post_idem("/api/v1/board/dice/roll")
+        challenge = Challenge.objects.first()
+
+        response = self.post_idem(
+            "/api/v1/board/cell/open", {"challenge_id": str(challenge.id)}, key="open-pending"
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["code"], "PENDING_CONFIRM")
+
     def test_cell_open_requires_challenge_id(self):
         self.set_position(2, consumed=True)
         response = self.post_idem("/api/v1/board/cell/open", {})
@@ -525,16 +592,27 @@ class BoardApiTestCase(TestCase):
         self.client.credentials()
         response = self.client.get("/api/v1/board/chance/catalog")
 
+        self.assertEqual(set(response.json()), {"code", "message", "data"})
         data = response.json()["data"]
         self.assertEqual(data["total_count"], 7)
-        card_ids = {card["card_id"] for card in data["cards"]}
+        cards = {
+            card["card_id"]: (card["name"], card["effect"], card["usage_timing"])
+            for card in data["cards"]
+        }
         self.assertEqual(
-            card_ids,
+            cards,
             {
-                "card_reroll", "card_roll_twice_choose", "card_move_offset", "card_free_travel",
-                "card_extra_roll", "card_quarantine_defense", "card_move_to_quarantine",
+                "card_reroll": ("주사위 다시 굴리기", "RE_ROLL", "POST_ROLL"),
+                "card_roll_twice_choose": ("주사위 2회 굴림 후 선택", "ROLL_TWICE_CHOOSE", "PRE_ROLL"),
+                "card_move_offset": ("주변 칸 이동", "MOVE_OFFSET", "POST_ROLL"),
+                "card_free_travel": ("세계여행", "FREE_MOVE", "PRE_ROLL"),
+                "card_extra_roll": ("주사위 보너스", "GRANT_EXTRA_ROLL", "PRE_ROLL"),
+                "card_quarantine_defense": ("무인도 방어", "QUARANTINE_ESCAPE_FREE", "QUARANTINE_STATE"),
+                "card_move_to_quarantine": ("무인도 이동", "FORCE_MOVE_TO_QUARANTINE", "PRE_ROLL"),
             },
         )
+        roll_twice = next(card for card in data["cards"] if card["card_id"] == "card_roll_twice_choose")
+        self.assertEqual(roll_twice["usage_timing"], "PRE_ROLL")
 
     # ---------------------------------------------------------------- chance/now
 
@@ -664,15 +742,43 @@ class BoardApiTestCase(TestCase):
 
         self.assertEqual(response.status_code, 200)
         data = response.json()["data"]
+        self.assertEqual(data["dice_a"], 3)
+        self.assertEqual(data["dice_b"], 3)
+        self.assertEqual(data["rolled_number"], 6)
         self.assertEqual(data["to_index"], 7)  # 1 + 6
         self.state.refresh_from_db()
         self.assertEqual(self.state.position_id, 7)
         self.assertFalse(PendingDiceRoll.objects.filter(team=self.team).exists())
 
+    def test_dice_roll_with_roll_twice_choose_card_finalizes_normally(self):
+        self.draw_card("card_roll_twice_choose")
+
+        with patch("apps.board.services.random.randint", side_effect=[1, 1]):
+            response = self.post_idem("/api/v1/board/dice/roll")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["data"]["pending_confirm"])
+        self.state.refresh_from_db()
+        self.assertEqual(self.state.position_id, 3)
+
     def test_chance_use_move_offset_extends_pending_landing(self):
         self.draw_card("card_move_offset")
         with patch("apps.board.services.random.randint", side_effect=[1, 1]):
-            self.post_idem("/api/v1/board/dice/roll", key="roll-1")  # candidate = 3
+            roll_response = self.post_idem("/api/v1/board/dice/roll", key="roll-1")  # candidate = 3
+
+        roll_data = roll_response.json()["data"]
+        self.assertEqual(roll_data["current_position"], 3)
+        self.assertEqual(roll_data["skipped_cells"], [])
+        self.state.refresh_from_db()
+        self.assertEqual(self.state.position_id, 1)
+        self.assertFalse(TeamCellConsumption.objects.filter(team=self.team, cell_id=3).exists())
+
+        challenge = Challenge.objects.filter(difficulty=Cell.objects.get(cell_index=3).difficulty).first()
+        open_response = self.post_idem(
+            "/api/v1/board/cell/open", {"challenge_id": str(challenge.id)}, key="open-pending-offset"
+        )
+        self.assertEqual(open_response.status_code, 409)
+        self.assertEqual(open_response.json()["code"], "PENDING_CONFIRM")
 
         response = self.post_idem(
             "/api/v1/board/chance/use", {"card_id": "card_move_offset", "offset": 2}, key="use-1"
@@ -684,7 +790,174 @@ class BoardApiTestCase(TestCase):
         self.assertEqual(data["to_index"], 5)
         self.state.refresh_from_db()
         self.assertEqual(self.state.position_id, 5)
+        self.assertFalse(TeamCellConsumption.objects.filter(team=self.team, cell_id=3).exists())
+        self.assertTrue(TeamCellConsumption.objects.filter(team=self.team, cell_id=5).exists())
         self.assertFalse(PendingDiceRoll.objects.filter(team=self.team).exists())
+
+    def test_pending_confirm_allows_reroll_but_blocks_pre_roll_card(self):
+        self.draw_card("card_reroll")
+        with patch("apps.board.services.random.randint", side_effect=[1, 1]):
+            roll_response = self.post_idem("/api/v1/board/dice/roll", key="reroll-roll")
+        self.assertEqual(roll_response.json()["code"], "SUCCESS")
+
+        with patch("apps.board.services.random.randint", side_effect=[2, 2]):
+            reroll_response = self.post_idem(
+                "/api/v1/board/chance/use", {"card_id": "card_reroll"}, key="reroll-use"
+            )
+        self.assertEqual(reroll_response.json()["code"], "SUCCESS")
+        self.assertFalse(PendingDiceRoll.objects.filter(team=self.team).exists())
+
+        self.reset_card_scenario()
+        self.draw_card("card_extra_roll")
+        PendingDiceRoll.objects.create(
+            team=self.team,
+            dice_a=1,
+            dice_b=1,
+            rolled_number=2,
+            previous_position=1,
+            candidate_position=3,
+            movement_path=[2, 3],
+            board_event_code="CHALLENGE",
+        )
+        response = self.post_idem(
+            "/api/v1/board/chance/use", {"card_id": "card_extra_roll"}, key="extra-pending"
+        )
+        self.assertEqual(set(response.json()), {"code", "message", "data"})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["code"], "CHANCE_CARD_WRONG_TIMING")
+        self.assertIsNone(TeamChanceCard.objects.get(team=self.team).used_at)
+
+    def test_confirm_unlocks_problem_selection_after_pending_roll(self):
+        self.draw_card("card_reroll")
+        with patch("apps.board.services.random.randint", side_effect=[1, 1]):
+            roll_response = self.post_idem("/api/v1/board/dice/roll", key="pending-roll")
+        self.assertTrue(roll_response.json()["data"]["pending_confirm"])
+
+        challenge = Challenge.objects.filter(
+            difficulty=Cell.objects.get(cell_index=3).difficulty
+        ).first()
+        blocked = self.post_idem(
+            "/api/v1/board/cell/open", {"challenge_id": str(challenge.id)}, key="blocked-open"
+        )
+        self.assertEqual(blocked.status_code, 409)
+        self.assertEqual(blocked.json()["code"], "PENDING_CONFIRM")
+
+        confirm = self.post_idem("/api/v1/board/dice/confirm", key="pending-confirm")
+        self.assertEqual(confirm.json()["code"], "SUCCESS")
+        current = self.client.get("/api/v1/board/cell/current")
+        self.assertEqual(current.json()["code"], "SUCCESS")
+        self.assertEqual(current.json()["data"]["cell_index"], 3)
+        challenge_id = current.json()["data"]["challenge_candidates"][0]["challenge_id"]
+        opened = self.post_idem(
+            "/api/v1/board/cell/open", {"challenge_id": challenge_id}, key="unblocked-open"
+        )
+        self.assertEqual(opened.json()["code"], "SUCCESS")
+        self.assertTrue(
+            TeamChallengeAccess.objects.filter(team=self.team, challenge_id=challenge_id).exists()
+        )
+
+    def test_all_seven_cards_complete_their_api_flow_once(self):
+        for card_id in (
+            "card_reroll",
+            "card_roll_twice_choose",
+            "card_move_offset",
+            "card_free_travel",
+            "card_extra_roll",
+            "card_quarantine_defense",
+            "card_move_to_quarantine",
+        ):
+            with self.subTest(card_id=card_id):
+                self.reset_card_scenario()
+                draw = self.draw_card(card_id)
+
+                if card_id == "card_reroll":
+                    with patch("apps.board.services.random.randint", side_effect=[1, 1]):
+                        self.post_idem("/api/v1/board/dice/roll", key=f"{card_id}-roll")
+                    with patch("apps.board.services.random.randint", side_effect=[2, 2]):
+                        response = self.post_idem(
+                            "/api/v1/board/chance/use", {"card_id": card_id}, key=f"{card_id}-use"
+                        )
+                elif card_id == "card_roll_twice_choose":
+                    with patch("apps.board.services.random.randint", side_effect=[1, 1, 2, 2]):
+                        response = self.post_idem(
+                            "/api/v1/board/chance/use", {"card_id": card_id}, key=f"{card_id}-use"
+                        )
+                    self.assertEqual(response.json()["data"]["awaiting_confirm"], True)
+                    response = self.post_idem(
+                        "/api/v1/board/chance/confirm", {"choice": "FIRST"}, key=f"{card_id}-confirm"
+                    )
+                elif card_id == "card_move_offset":
+                    with patch("apps.board.services.random.randint", side_effect=[1, 1]):
+                        self.post_idem("/api/v1/board/dice/roll", key=f"{card_id}-roll")
+                    response = self.post_idem(
+                        "/api/v1/board/chance/use", {"card_id": card_id, "offset": 1}, key=f"{card_id}-use"
+                    )
+                elif card_id == "card_free_travel":
+                    response = self.post_idem(
+                        "/api/v1/board/chance/use",
+                        {"card_id": card_id, "destination_index": 10},
+                        key=f"{card_id}-use",
+                    )
+                elif card_id == "card_extra_roll":
+                    self.state.dice_rolls_left = 0
+                    self.state.save(update_fields=["dice_rolls_left"])
+                    response = self.post_idem(
+                        "/api/v1/board/chance/use", {"card_id": card_id}, key=f"{card_id}-use"
+                    )
+                elif card_id == "card_quarantine_defense":
+                    self.state.is_quarantined = True
+                    self.state.save(update_fields=["is_quarantined"])
+                    response = self.post_idem(
+                        "/api/v1/board/chance/use", {"card_id": card_id}, key=f"{card_id}-use"
+                    )
+                else:
+                    response = self.post_idem(
+                        "/api/v1/board/chance/use", {"card_id": card_id}, key=f"{card_id}-use"
+                    )
+
+                self.assertEqual(set(response.json()), {"code", "message", "data"})
+                self.assertEqual(response.json()["code"], "SUCCESS")
+                draw.refresh_from_db()
+                self.assertIsNotNone(draw.used_at)
+                second = self.post_idem(
+                    "/api/v1/board/chance/use", {"card_id": card_id}, key=f"{card_id}-reuse"
+                )
+                self.assertEqual(second.status_code, 409)
+                self.assertEqual(second.json()["code"], "CHANCE_CARD_ALREADY_USED")
+
+    def test_chance_card_is_limited_to_owner_and_team_leader(self):
+        draw = self.draw_card("card_extra_roll")
+        self.as_other_leader()
+        other_response = self.post_idem(
+            "/api/v1/board/chance/use", {"card_id": "card_extra_roll"}, key="other-team-card"
+        )
+        self.assertEqual(other_response.status_code, 404)
+        self.assertEqual(other_response.json()["code"], "CHANCE_CARD_NOT_FOUND")
+
+        self.as_member()
+        member_response = self.post_idem(
+            "/api/v1/board/chance/use", {"card_id": "card_extra_roll"}, key="member-card"
+        )
+        self.assertEqual(member_response.status_code, 403)
+        self.assertEqual(member_response.json()["code"], "NOT_TEAM_LEADER")
+
+        self.as_leader()
+        draw.refresh_from_db()
+        self.assertIsNone(draw.used_at)
+
+    def test_chance_card_duplicate_request_does_not_double_apply(self):
+        draw = self.draw_card("card_extra_roll")
+        first = self.post_idem(
+            "/api/v1/board/chance/use", {"card_id": "card_extra_roll"}, key="same-card-request"
+        )
+        second = self.post_idem(
+            "/api/v1/board/chance/use", {"card_id": "card_extra_roll"}, key="same-card-request"
+        )
+        self.assertEqual(first.json(), second.json())
+        self.state.refresh_from_db()
+        self.assertEqual(self.state.dice_rolls_left, 2)
+        draw.refresh_from_db()
+        self.assertIsNotNone(draw.used_at)
 
     def test_chance_use_quarantine_defense_escapes_immediately(self):
         self.state.is_quarantined = True
@@ -697,8 +970,53 @@ class BoardApiTestCase(TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertFalse(response.json()["data"]["is_quarantined"])
+        data = response.json()["data"]
+        self.assertFalse(data["is_quarantined"])
+        self.assertEqual(data["dice_rolls_left"], 2)
         self.state.refresh_from_db()
+        self.assertFalse(self.state.is_quarantined)
+        self.assertEqual(self.state.dice_rolls_left, 2)
+
+    def test_chance_use_quarantine_defense_keeps_quarantine_consumed_for_next_skip(self):
+        start_cell = self.set_position(14)
+        self.mark_challenge_solved(start_cell)
+        with patch("apps.board.services.random.randint", side_effect=[1, 1]):
+            enter_response = self.post_idem("/api/v1/board/dice/roll", key="enter-quarantine")
+        self.assertEqual(enter_response.status_code, 200)
+        self.state.refresh_from_db()
+        self.assertTrue(self.state.is_quarantined)
+        self.assertTrue(TeamCellConsumption.objects.filter(team=self.team, cell_id=16).exists())
+
+        self.draw_card("card_quarantine_defense")
+        escape_response = self.post_idem(
+            "/api/v1/board/chance/use", {"card_id": "card_quarantine_defense"}, key="escape-card"
+        )
+        self.assertEqual(escape_response.status_code, 200)
+
+        self.state.position_id = 14
+        self.state.dice_rolls_left = 1
+        self.state.save(update_fields=["position", "dice_rolls_left"])
+        with patch("apps.board.services.random.randint", side_effect=[1, 1]):
+            response = self.post_idem("/api/v1/board/dice/roll", key="roll-after-card-escape")
+
+        data = response.json()["data"]
+        self.assertEqual(data["current_position"], 17)
+        self.assertEqual(data["skipped_cells"], [16])
+        self.state.refresh_from_db()
+        self.assertFalse(self.state.is_quarantined)
+
+    def test_chance_use_move_to_consumed_quarantine_does_not_lock_again(self):
+        quarantine_cell = Cell.objects.get(type=Cell.CellType.QUARANTINE)
+        TeamCellConsumption.objects.create(team=self.team, cell=quarantine_cell)
+        self.draw_card("card_move_to_quarantine")
+
+        response = self.post_idem(
+            "/api/v1/board/chance/use", {"card_id": "card_move_to_quarantine"}
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.state.refresh_from_db()
+        self.assertEqual(self.state.position_id, quarantine_cell.cell_index)
         self.assertFalse(self.state.is_quarantined)
 
     def test_chance_use_unknown_card_not_found(self):
@@ -715,10 +1033,8 @@ class BoardApiTestCase(TestCase):
 
     def test_chance_confirm_roll_twice_choose(self):
         self.draw_card("card_roll_twice_choose")
-        with patch("apps.board.services.random.randint", side_effect=[1, 1]):
-            self.post_idem("/api/v1/board/dice/roll", key="roll-1")  # first_number = 2, candidate 3
 
-        with patch("apps.board.services.random.randint", side_effect=[3, 3]):
+        with patch("apps.board.services.random.randint", side_effect=[1, 1, 3, 3]):
             use_response = self.post_idem(
                 "/api/v1/board/chance/use", {"card_id": "card_roll_twice_choose"}, key="use-1"
             )
@@ -727,6 +1043,13 @@ class BoardApiTestCase(TestCase):
         self.assertTrue(use_data["awaiting_confirm"])
         self.assertEqual(use_data["first_number"], 2)
         self.assertEqual(use_data["second_number"], 6)
+        draw = TeamChanceCard.objects.get(team=self.team, card_id="card_roll_twice_choose")
+        self.assertEqual(draw.pending_first_number, 2)
+        self.assertEqual(draw.pending_second_number, 6)
+        self.assertTrue(PendingDiceRoll.objects.filter(team=self.team, rolled_number=2).exists())
+        self.state.refresh_from_db()
+        self.assertEqual(self.state.position_id, 1)
+        self.assertEqual(self.state.dice_rolls_left, 0)
 
         response = self.post_idem(
             "/api/v1/board/chance/confirm", {"choice": "SECOND"}, key="confirm-1"
@@ -739,6 +1062,18 @@ class BoardApiTestCase(TestCase):
         self.state.refresh_from_db()
         self.assertEqual(self.state.position_id, 7)
         self.assertFalse(PendingDiceRoll.objects.filter(team=self.team).exists())
+
+    def test_dice_confirm_blocked_while_roll_twice_choose_awaits_choice(self):
+        self.draw_card("card_roll_twice_choose")
+        with patch("apps.board.services.random.randint", side_effect=[1, 1, 3, 3]):
+            self.post_idem(
+                "/api/v1/board/chance/use", {"card_id": "card_roll_twice_choose"}, key="use-1"
+            )
+
+        response = self.post_idem("/api/v1/board/dice/confirm", key="dice-confirm")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["code"], "CHANCE_CONFIRM_NOT_FOUND")
 
     def test_chance_confirm_without_pending_choice_fails(self):
         response = self.post_idem("/api/v1/board/chance/confirm", {"choice": "FIRST"})
@@ -896,6 +1231,34 @@ class BoardApiTestCase(TestCase):
         escape_code = QuarantineEscapeCode.objects.get(code="AAAAAAAA")
         self.assertEqual(escape_code.used_by_team, self.team)
         self.assertIsNotNone(escape_code.used_at)
+
+    def test_quarantine_escape_code_keeps_quarantine_consumed_for_next_skip(self):
+        start_cell = self.set_position(14)
+        self.mark_challenge_solved(start_cell)
+        with patch("apps.board.services.random.randint", side_effect=[1, 1]):
+            enter_response = self.post_idem("/api/v1/board/dice/roll", key="enter-quarantine")
+        self.assertEqual(enter_response.status_code, 200)
+        self.state.refresh_from_db()
+        self.assertTrue(self.state.is_quarantined)
+        self.assertTrue(TeamCellConsumption.objects.filter(team=self.team, cell_id=16).exists())
+
+        QuarantineEscapeCode.objects.create(code="BBBBBBBB")
+        escape_response = self.post_idem(
+            "/api/v1/board/quarantine/escape", {"code": "BBBBBBBB"}, key="escape-code"
+        )
+        self.assertEqual(escape_response.status_code, 200)
+
+        self.state.position_id = 14
+        self.state.dice_rolls_left = 1
+        self.state.save(update_fields=["position", "dice_rolls_left"])
+        with patch("apps.board.services.random.randint", side_effect=[1, 1]):
+            response = self.post_idem("/api/v1/board/dice/roll", key="roll-after-code-escape")
+
+        data = response.json()["data"]
+        self.assertEqual(data["current_position"], 17)
+        self.assertEqual(data["skipped_cells"], [16])
+        self.state.refresh_from_db()
+        self.assertFalse(self.state.is_quarantined)
 
     def test_quarantine_escape_code_cannot_be_reused_by_another_team(self):
         self.enter_quarantine()

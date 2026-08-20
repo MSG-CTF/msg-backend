@@ -117,9 +117,9 @@ CHANCE_CARDS = [
     {
         "card_id": "card_roll_twice_choose",
         "name": "주사위 2회 굴림 후 선택",
-        "description": "한 번 더 굴려 두 값 중 하나를 골라 이동합니다.",
+        "description": "주사위를 굴리기 전에 두 번 굴린 뒤 한 값을 골라 이동합니다.",
         "effect": "ROLL_TWICE_CHOOSE",
-        "usage_timing": ChanceCard.UsageTiming.POST_ROLL,
+        "usage_timing": ChanceCard.UsageTiming.PRE_ROLL,
     },
     {
         "card_id": "card_move_offset",
