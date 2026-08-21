@@ -1,12 +1,30 @@
 .venv/
+venv/
 __pycache__/
 *.py[cod]
 db.sqlite3
 .env
 .env.*
 !.env.example
-venv/
-*.pyc
+
+# 참고용 외부 저장소 사본
+_external_2026_MSG_CTF/
+_external_MSG_CTF_WEB/
+
+# 에이전트/작업용 임시
+.codex_tmp_*/
+.worktrees/
+.claude/
+
+# 로컬 실행 로그
+runserver.out.log
+runserver.err.log
+output/
+
+# 하네스 산출물, 로컬 설정
+tools/api-harness/harness/models.py
+tools/api-harness/reports/
+tools/api-harness/config.yaml
 
 seed.py
 accounts_generated.csv

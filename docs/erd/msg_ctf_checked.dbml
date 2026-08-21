@@ -1,0 +1,776 @@
+// =====================================================================
+// MSG CTF 플랫폼 ERD
+// 기준: 기능명세서(39f0f19c) + API 명세서(3aa0f19c) + 공통 규약
+// 규약 반영: UUID 식별자, Enum 사전, 마일리지 불변식,
+//            인스턴스 상태(scheduler 정의), 시간은 전부 UTC
+//
+// 이번 개정: KOTH 섹션 전면 수정 (정본 "KOTH 점수 합산과 인증 방식 핵심 정리" 반영)
+//   - 점수 수집은 pull. 플랫폼이 15분마다 문제 서버를 GET 조회한다
+//   - koth_scores  → koth_score_logs (채점 원본 로그로 성격 변경)
+//   - koth_solves       신규. 팀 × KOTH문제당 1행, 점수 누적 + 최초 획득 시각 고정
+//   - koth_score_periods 신규. 같은 period_id 두 번 반영 방지
+//   - koth_team_tokens   신규
+//   - idempotency_scope 에서 KOTH_SCORE 제거 (pull 이라 외부 쓰기 요청이 없음)
+//   - category_type: PWN → SYSTEM (공통 규약 contract.yaml과 일치시킴)
+//   - koth_team_tokens 관련 API 경로 표기: team-token(하이픈) → team_token(언더스코어)
+// =====================================================================
+
+// 질문 사항
+// 문제 상세 명세 설명에는 파일 다운로드 링크가 언급
+// 문제 파일 다운로드는?
+
+// ---------- Enums (공통 규약 「Enum 사전」) ----------
+
+Enum role_type {
+  PARTICIPANT
+  ADMIN
+}
+
+Enum difficulty_type {
+  EASY
+  MEDIUM
+  HARD
+}
+
+Enum category_type {
+  WEB
+  SYSTEM
+  REV
+  CRYPTO
+  FORENSIC
+  MISC
+}
+
+Enum cell_type {
+  START
+  CHALLENGE
+  CHANCE
+  AIRPORT
+  QUARANTINE
+  ROULETTE
+}
+
+Enum instance_status {
+  REQUESTED
+  SCHEDULING
+  PROVISIONING
+  RUNNING
+  RESTARTING
+  RESETTING
+  STOPPING
+  STOPPED
+  FAILED
+  EXPIRED
+  CLEANUP_PENDING
+  CLEANED
+}
+
+Enum mileage_type {
+  CHALLENGE_SOLVE
+  START_BONUS
+  ROULETTE
+  KOTH_REWARD
+  ADMIN_GRANT
+  REFUND
+  PURCHASE
+  ADMIN_DEDUCT
+}
+
+Enum chance_card_timing {
+  PRE_ROLL
+  POST_ROLL
+  QUARANTINE_STATE
+}
+
+Enum contest_status {
+  BEFORE
+  RUNNING
+  ENDED
+}
+
+Enum event_severity {
+  INFO
+  WARNING
+  ERROR
+}
+
+Enum resource_status {
+  HEALTHY
+  DEGRADED
+  UNAVAILABLE
+}
+
+Enum idempotency_scope {
+  DICE_ROLL
+  CELL_OPEN
+  CHANCE_DRAW
+  CHANCE_USE
+  AIRPORT_MOVE
+  QUARANTINE_ESCAPE
+  ROULETTE_SPIN
+  INSTANCE_CREATE
+  INSTANCE_RESET
+  INSTANCE_EXTEND
+  INSTANCE_DELETE
+  PAYMENT_CHECKOUT
+  PAYMENT_REFUND
+}
+
+Enum payment_token_status {
+  ACTIVE
+  USED
+  INVALIDATED
+}
+
+Enum submission_result {
+  CORRECT
+  INCORRECT
+  ALREADY_SOLVED
+  TOO_MANY_ATTEMPTS
+}
+
+Enum team_cell_status {
+  unvisited
+  opened
+  cleared
+}
+
+Enum koth_status {
+  SCHEDULED
+  ACTIVE
+  CLOSED
+}
+
+Enum koth_period_status {
+  PENDING
+  APPLIED
+  SKIPPED
+}
+
+// =====================================================================
+// 1. 계정 / 팀
+// =====================================================================
+
+Table teams {
+  team_id       uuid         [pk]
+  team_name     varchar(100) [not null, unique]
+  team_score    numeric      [not null, default: 0, note: '제오파디 문제 풀이 누적 점수. KOTH 점수는 포함하지 않으며 조회 시 koth_solves 합계를 더한다']
+  mileage       int          [not null, default: 0, note: '불변식: mileage_history.amount 총합과 일치']
+  is_banned     boolean      [not null, default: false, note: 'claim에 넣지 않음. 쓰기 요청마다 DB 조회']
+  ban_reason    varchar(500)
+  banned_at     timestamp
+  banned_by     varchar(50)
+  created_at    timestamp    [not null]
+
+  Note: '밴 즉시 반영을 위해 is_banned는 토큰 claim이 아닌 DB에서 읽는다'
+}
+
+Table users {
+  user_id       uuid         [pk]
+  login_id      varchar(50)  [not null, unique, note: '사용자가 로그인할 때 입력하는 ID']
+  team_id       uuid         [not null, ref: > teams.team_id]
+  password_hash varchar(255) [not null, note: '평문 금지. Argon2id 또는 bcrypt 해시만 저장']
+  nickname      varchar(50)  [not null]
+  role          role_type    [not null, default: 'PARTICIPANT']
+  is_leader     boolean      [not null, default: false, note: '팀 생성 시 확정, 대회 중 변경 없음 → access_token claim']
+  created_at    timestamp    [not null]
+
+  indexes {
+    team_id
+    (team_id, is_leader)
+  }
+
+  Note: '''
+  user_id는 내부 식별자(PK/FK/JWT subject)로 사용하는 UUID다.
+  login_id는 사람이 로그인할 때 입력하는 고유 문자열 ID다.
+
+  팀당 팀장은 최대 1명.
+  dbdiagram이 partial unique index를 직접 표현하기 어려우므로 실제 migration에서 직접 건다:
+    CREATE UNIQUE INDEX uq_users_one_leader_per_team
+      ON users (team_id) WHERE is_leader;
+
+  role=ADMIN 계정은 is_leader가 항상 false라 이 인덱스에 걸리지 않는다.
+  '''
+}
+
+Table refresh_tokens {
+  token_id    uuid         [pk]
+  user_id     uuid         [not null, ref: > users.user_id]
+  token_hash  varchar(255) [not null, unique, note: '평문 refresh token 금지. 서버가 검증 가능한 해시만 저장']
+  expires_at  timestamp    [not null, note: '발급 후 12시간']
+  created_at  timestamp    [not null]
+
+  Note: '로그아웃 시 행 삭제 → 해당 refresh_token 재발급 불가'
+}
+
+// =====================================================================
+// 2. 보드 (36칸: CHALLENGE 30 + CHANCE 2 + START/AIRPORT/QUARANTINE/ROULETTE)
+// =====================================================================
+
+Table cells {
+  cell_index  int             [pk, note: '1 ~ 36']
+  type        cell_type       [not null]
+  difficulty  difficulty_type [note: 'CHALLENGE 칸의 난이도. 비문제 칸은 null']
+  name        varchar(50)     [not null]
+
+  Note: '고정 보드 배치. 팀별 진행 상태와 무관 (GET /api/v1/board)'
+}
+
+Table team_board_states {
+  team_id                  uuid      [pk, ref: - teams.team_id]
+  position                 int       [not null, default: 1, ref: > cells.cell_index]
+  is_quarantined           boolean   [not null, default: false]
+  dice_rolls_left          int       [not null, default: 0]
+  next_dice_reset_at       timestamp [note: 'FR-TIME-03: 주사위 다음 리셋 시각']
+  quarantine_attempts_left int       [not null, default: 0]
+  airport_move_used        boolean   [not null, default: false]
+  has_passed_start         boolean   [not null, default: false, note: '세계여행을 포함해 출발 지점을 통과했는지. false→true 전환 시 START_BONUS 마일리지 지급']
+  updated_at               timestamp [not null]
+
+  Note: '팀당 1행. position은 서버 값만 신뢰하며 모든 이동·세계여행의 경로와 목적지를 team_cell_states로 검증한다. status=cleared인 칸은 다시 진입할 수 없다. CHANCE 도착 처리는 같은 트랜잭션에서 dice_rolls_left를 즉시 증가시킨다.'
+}
+
+Table chance_cards {
+  card_id      varchar(50)         [pk, note: '규약상 String enum. 예: card_reroll']
+  name         varchar(100)        [not null]
+  description  varchar(500)
+  effect       varchar(50)         [not null, note: 'RE_ROLL, ROLL_TWICE_CHOOSE, MOVE_OFFSET, FREE_MOVE, GRANT_EXTRA_ROLL, QUARANTINE_ESCAPE_FREE, FORCE_MOVE_TO_QUARANTINE (초안, 팀 합의 후 확정)']
+  usage_timing chance_card_timing  [not null, note: 'PRE_ROLL=굴리기 전, POST_ROLL=굴린 후, QUARANTINE_STATE=무인도 상태일 때(주사위 타이밍 무관)']
+  weight       int                 [note: '등장 확률 가중치 (서버 정책)']
+
+  Note: '''
+  7종 카드 (기능명세 8절 "Chance 칸 기능" 기준, 문서 자체 상태는 아직 후보):
+    card_reroll              RE_ROLL                  POST_ROLL        주사위 다시 굴리기
+    card_roll_twice_choose   ROLL_TWICE_CHOOSE        POST_ROLL        주사위 2회 굴림 후 선택 (POST /board/chance/confirm 로 2단계 확정)
+    card_move_offset         MOVE_OFFSET              POST_ROLL        주변 칸 이동 (앞/뒤 1~3칸)
+    card_free_travel         FREE_MOVE                PRE_ROLL         세계여행
+    card_extra_roll          GRANT_EXTRA_ROLL         PRE_ROLL         주사위 보너스
+    card_quarantine_defense  QUARANTINE_ESCAPE_FREE   QUARANTINE_STATE 무인도 방어
+    card_move_to_quarantine  FORCE_MOVE_TO_QUARANTINE PRE_ROLL         무인도 이동
+
+  확인 필요 (기능명세 8절 미확정 항목과 직결):
+  카드를 보관 가능한(인벤토리) 모델로 할지, 뽑는 즉시 사용만 가능하게 할지 아직 결정 안 됨.
+  지금 이 테이블 + team_chance_cards 는 "보관 가능" 전제로 설계돼 있다(뽑아서 쌓아두고 나중에 used=false 인 것 중 골라 사용).
+  즉시 사용만 허용하는 쪽으로 정해지면 team_chance_cards 는 보유 목록이 아니라 단순 사용 로그로 성격이 바뀌어야 한다.
+  팀당 보유 가능 카드 개수 제한도 미정 — 정해지면 team_chance_cards 에 팀별 카운트 체크(또는 상한 트리거)가 필요하다.
+  '''
+}
+
+Table team_chance_cards {
+  id         uuid        [pk]
+  team_id    uuid        [not null, ref: > teams.team_id]
+  card_id    varchar(50) [not null, ref: > chance_cards.card_id]
+  used       boolean     [not null, default: false]
+  drawn_at   timestamp   [not null]
+  used_at    timestamp
+
+  indexes {
+    (team_id, used)
+  }
+
+  Note: '찬스칸 도착 시 1장 뽑아 보유. 주사위 전에만 사용'
+}
+
+Table dice_rolls {
+  roll_id           uuid        [pk]
+  team_id           uuid        [not null, ref: > teams.team_id]
+  rolled_by_user_id uuid        [not null, ref: > users.user_id, note: '팀장만']
+  rolled_number     int         [not null]
+  previous_position int         [not null]
+  current_position  int         [not null]
+  board_event_code  varchar(50) [note: '주사위 이동 후 발생한 보드 이벤트 코드. cell_type과 다르므로 cell_type enum으로 제한하지 않는다']
+  created_at        timestamp   [not null]
+
+  indexes {
+    (team_id, created_at)
+  }
+}
+
+Table idempotency_keys {
+  id              uuid              [pk]
+  team_id         uuid              [ref: > teams.team_id]
+  scope           idempotency_scope [not null]
+  idempotency_key varchar(100)      [not null]
+  response_body   json
+  created_at      timestamp         [not null]
+
+  indexes {
+    (team_id, scope, idempotency_key) [unique]
+  }
+}
+
+// =====================================================================
+// 3. 문제 / 인스턴스
+// =====================================================================
+
+Table challenges {
+  challenge_id  uuid            [pk]
+  title         varchar(200)    [not null, note: '리소스 자체 제목은 title (참조는 challenge_title)']
+  category      category_type   [not null]
+  difficulty    difficulty_type [not null]
+  score         numeric         [not null, note: '정밀한 수치 계산을 위해 numeric 사용']
+  description   text
+  flag_hash     varchar(255)    [not null, note: '평문 저장 금지']
+  is_published  boolean         [not null, default: false, note: 'FR-ADMIN-13 공개 상태 관리']
+  created_at    timestamp       [not null]
+}
+
+Table team_cell_candidates {
+  id           uuid      [pk]
+  team_id      uuid      [not null, ref: > teams.team_id]
+  cell_index   int       [not null, ref: > cells.cell_index]
+  challenge_id uuid      [not null, ref: > challenges.challenge_id]
+  created_at   timestamp [not null]
+
+  indexes {
+    (team_id, cell_index)
+  }
+
+  Note: '칸 도착 시 팀별로 배정되는 후보 문제 3개 (GET /board/cell/current)'
+}
+
+Table opened_challenges {
+  id                uuid      [pk]
+  team_id           uuid      [not null, ref: > teams.team_id]
+  challenge_id      uuid      [not null, ref: > challenges.challenge_id]
+  cell_index        int       [not null, ref: > cells.cell_index]
+  opened_at         timestamp [not null]
+  solve_deadline_at timestamp [not null, note: 'FR-BOARD-06: baseline 기준 15분']
+
+  indexes {
+    (team_id, challenge_id) [unique]
+    (team_id, cell_index) [unique, note: '한 팀의 한 칸에는 하나의 문제만 오픈 가능']
+  }
+
+  Note: '팀이 오픈한 문제. solved 상태는 team_cell_states.status=cleared로 관리하고 이 테이블에 중복 저장하지 않는다.'
+}
+
+Table team_cell_states {
+  team_id             uuid             [not null, ref: > teams.team_id]
+  cell_index          int              [not null, ref: > cells.cell_index]
+  status              team_cell_status [not null, default: 'unvisited']
+  opened_challenge_id uuid             [ref: > opened_challenges.id]
+  cleared_at          timestamp
+  created_at          timestamp        [not null]
+  updated_at          timestamp        [not null]
+
+  indexes {
+    (team_id, cell_index) [pk]
+    opened_challenge_id
+  }
+
+  Note: '팀별 칸 상태의 단일 진실 공급원. 상태 전이는 unvisited→opened→cleared 순서만 허용한다. opened/cleared는 opened_challenge_id를 가져야 하며 cleared는 cleared_at을 기록한다. cleared 상태의 칸은 일반 이동과 세계여행의 목적지로 재선택할 수 없다.'
+}
+
+Table solves {
+  solve_id              uuid      [pk]
+  team_id               uuid      [not null, ref: > teams.team_id]
+  challenge_id          uuid      [not null, ref: > challenges.challenge_id]
+  solved_by_user_id     uuid      [not null, ref: > users.user_id, note: 'FR-RANK-03 개인 랭킹 집계 기준']
+  earned_score          numeric   [not null]
+  earned_mileage        int       [not null]
+  is_extra_dice_granted boolean   [not null, default: false]
+  solved_at             timestamp [not null]
+
+  indexes {
+    (team_id, challenge_id) [unique, note: '한 팀이 같은 문제를 두 번 풀 수 없음 → 409 ALREADY_SOLVED']
+    solved_by_user_id
+  }
+
+  Note: '제오파디 SOLVE. KOTH SOLVE는 koth_solves 가 담당한다. GET /api/v1/leaderboard 의 source_type 은 JEOPARDY 로 내려간다.'
+}
+
+Table instances {
+  instance_id           uuid            [pk, note: 'scheduler 발급 UUID']
+  team_id               uuid            [not null, ref: > teams.team_id]
+  challenge_id          uuid            [not null, ref: > challenges.challenge_id]
+  status                instance_status [not null, default: 'REQUESTED', note: 'scheduler 정의값을 그대로 전달']
+  host                  varchar(255)    [note: 'RUNNING 일 때만 유효, 그 외 null']
+  port                  json            [note: 'RUNNING 일 때만 유효, 그 외 null']
+  expires_at            timestamp       [note: 'RUNNING 일 때만 유효, 그 외 null']
+  extend_count          int             [not null, default: 0, note: 'TTL 연장 횟수 제한용']
+  replaced_instance_id  uuid            [ref: - instances.instance_id, note: '새 인스턴스 시작 전에 kill 명령을 받은 기존 인스턴스']
+  created_at            timestamp       [not null]
+  updated_at            timestamp       [not null]
+
+  indexes {
+    (team_id, status, created_at)
+    challenge_id
+  }
+
+  Note: '팀당 활성 인스턴스는 최대 2개. 활성 = REQUESTED/SCHEDULING/PROVISIONING/RUNNING/RESTARTING/RESETTING/STOPPING. 세 번째 인스턴스 요청 시 created_at 기준 가장 최근 기존 활성 인스턴스에 kill/STOPPING 명령을 먼저 내리고, 해당 인스턴스를 replaced_instance_id로 기록한 뒤 최신 인스턴스를 시작한다.'
+}
+
+Table flag_submissions {
+  submission_id       uuid              [pk]
+  team_id             uuid              [not null, ref: > teams.team_id]
+  user_id             uuid              [not null, ref: > users.user_id, note: '제출자 — 개인 랭킹·어뷰징 추적']
+  challenge_id        uuid              [not null, ref: > challenges.challenge_id]
+  submitted_flag_hash varchar(255)      [not null, note: '평문 저장 금지. 해시라도 동등 비교는 가능']
+  result              submission_result [not null, note: 'TOO_MANY_ATTEMPTS = 기존 락 상태라 채점하지 않은 제출. 락을 유발한 3번째 오답은 INCORRECT로 기록하되 API 응답은 429 TOO_MANY_ATTEMPTS']
+  created_at          timestamp         [not null]
+
+  indexes {
+    (team_id, challenge_id, created_at)
+    (challenge_id, result)
+    (user_id, created_at)
+  }
+
+  Note: '모든 제출 시도 로그'
+}
+
+Table flag_submission_locks {
+  team_id        uuid      [not null, ref: > teams.team_id]
+  challenge_id   uuid      [not null, ref: > challenges.challenge_id]
+  failed_count   int       [not null, default: 0]
+  locked_until   timestamp [note: 'null 이면 락 없음. retry_after_seconds 는 locked_until - now() 로 계산']
+  last_failed_at timestamp
+  updated_at     timestamp [not null]
+
+  indexes {
+    (team_id, challenge_id) [pk]
+    locked_until
+  }
+
+  Note: '3회 연속 오답 시 locked_until = 서버시각 + 30초. 정답 또는 락 만료 시 failed_count=0, locked_until=null. 증가는 원자적으로'
+}
+
+// =====================================================================
+// 4. 마일리지 / 결제
+// =====================================================================
+
+Table mileage_history {
+  history_id      uuid         [pk]
+  team_id         uuid         [not null, ref: > teams.team_id]
+  type            mileage_type [not null, note: '부호는 amount가 가짐. direction/EARN/SPEND 필드 금지']
+  amount          int          [not null, note: '획득 +, 사용 −']
+  reason          varchar(500)
+  item_name       varchar(100) [note: 'PURCHASE 인 경우 구매 품목']
+  is_refunded     boolean      [not null, default: false]
+  ref_history_id  uuid         [ref: - mileage_history.history_id, note: 'REFUND 행이 가리키는 원본 PURCHASE 행']
+  processed_by    varchar(50)  [note: 'admin 또는 system']
+  created_at      timestamp    [not null]
+
+  indexes {
+    (team_id, created_at)
+    type
+  }
+
+  Note: '불변식: 팀별 amount 총합 == teams.mileage. 기존 행 수정·삭제 금지, 반대 방향 행 추가로 되돌림'
+}
+
+Table payment_tokens {
+  token_id                uuid                 [pk]
+  token_hash              varchar(255)         [not null, unique, note: '평문 payment token 금지. 서버가 검증 가능한 해시만 저장']
+  team_id                 uuid                 [not null, ref: > teams.team_id]
+  status                  payment_token_status [not null, default: 'ACTIVE']
+  expires_at              timestamp            [not null, note: '발급 후 5분']
+  used_at                 timestamp            [note: 'status=USED 일 때만']
+  invalidated_at          timestamp            [note: 'status=INVALIDATED 일 때만']
+  invalidated_by_token_id uuid                 [ref: - payment_tokens.token_id, note: '교체한 새 토큰']
+  history_id              uuid                 [ref: - mileage_history.history_id, note: '결제 완료 시 생성된 행']
+  created_at              timestamp            [not null]
+
+  indexes {
+    (team_id, status)
+  }
+
+  Note: '만료는 status가 아니라 (status=ACTIVE AND now() > expires_at) 으로 판정한다. 새 토큰 발급 시 기존 ACTIVE 토큰은 INVALIDATED 로 전환'
+}
+
+// =====================================================================
+// 5. KOTH (6개 슬롯, 라운드당 2문제 ACTIVE)
+// 정본: KOTH 점수 합산과 인증 방식 핵심 정리
+// 점수 수집은 pull. 플랫폼 백엔드가 15분마다 문제 서버를 GET 조회한다.
+// =====================================================================
+
+Table koth_clubs {
+  club_id        uuid         [pk]
+  name           varchar(100) [not null, note: 'KOTH 슬롯 이름 (GET /api/v1/koth/clubs/{club_id} 의 name)']
+  display_order  int          [not null, default: 0, note: '화면 노출 순서']
+  created_at     timestamp    [not null]
+
+  Note: '''
+  6개 고정 슬롯.
+  active(boolean) 제거 — 공개 상태는 koth_challenges.status 가 단독으로 관리한다.
+  current_owner_team_id / current_score 제거 — koth_solves 에서 계산되는 파생값이다.
+  GET /api/v1/koth/clubs 의 current_owner_*, current_score 는
+  해당 문제의 koth_solves 중 earned_score 최대 행에서 조회한다.
+  '''
+}
+
+Table koth_challenges {
+  koth_challenge_id   uuid          [pk]
+  club_id             uuid          [not null, ref: > koth_clubs.club_id]
+  title               varchar(200)  [not null]
+  category            category_type [not null]
+  status              koth_status   [not null, default: 'SCHEDULED']
+  open_group          int           [note: '같은 시간대에 함께 여는 묶음. 라운드당 2문제 (GET /api/v1/koth/clubs 의 open_group)']
+  opened_at           timestamp     [note: 'status=ACTIVE 전환 시각']
+  closed_at           timestamp     [note: 'status=CLOSED 전환 시각']
+  scoring_base_url    varchar(255)  [note: 'GET /internal/koth/scores 를 호출할 문제 서버 주소']
+  outbound_token_enc  varchar(255)  [note: '플랫폼 → 문제 서버 호출 시 보낼 X-KOTH-Internal-Token. 우리가 다시 꺼내 써야 하므로 해시가 아니라 암호화 저장']
+  inbound_token_hash  varchar(255)  [unique, note: '문제 서버 → 플랫폼 호출 시 검증할 X-Internal-Token 해시. 검증만 하므로 해시로 충분']
+  created_at          timestamp     [not null]
+  updated_at          timestamp     [not null]
+
+  indexes {
+    (status, open_group)
+    club_id
+  }
+
+  Note: '''
+  is_open(boolean) → status(SCHEDULED/ACTIVE/CLOSED) 로 교체.
+  score_unit 제거 — 점수는 문제 서버가 awarded_score 로 내려주므로 플랫폼이 단가를 들고 있지 않는다.
+  next_open_at 제거 — API에 없는 필드다. 다음 개방 시각이 필요하면 open_group 스케줄로 따로 관리한다.
+  새 점수 반영은 status=ACTIVE 인 문제에 대해서만 수행한다.
+  인증값 두 개는 방향이 반대이며 KOTH 문제마다 따로 발급한다. 같은 값을 공유하지 않는다.
+  '''
+}
+
+Table koth_team_tokens {
+  token_id    uuid         [pk]
+  team_id     uuid         [not null, unique, ref: > teams.team_id, note: '팀당 1개']
+  token_hash  varchar(255) [not null, unique, note: '검증용 해시']
+  token_enc   varchar(255) [not null, note: '참가자가 언제든 다시 조회할 수 있어야 하므로(GET /api/v1/koth/team_token) 평문 대신 암호화본을 보관한다']
+  issued_at   timestamp    [not null]
+  created_at  timestamp    [not null]
+
+  Note: '''
+  GET /api/v1/koth/team_token — 같은 팀의 팀원에게는 항상 같은 토큰을 반환한다.
+  POST /internal/koth/team_tokens/verify — token_hash 비교로 검증하고 team_id, team_name 을 반환한다.
+  teams.is_banned = true 인 팀은 valid:false 로 응답한다.
+  원본 토큰은 로그에 남기지 않는다. 출제자에게 전체 목록을 전달하지 않는다.
+
+  확인 필요: 명세는 "DB에는 원본 대신 해시를 저장한다" 이지만
+  같은 값을 반복 조회해야 하는 요구와 충돌한다.
+  가역 암호화(token_enc)로 두거나 최초 1회만 노출하는 정책으로 바꾸거나 둘 중 하나를 정해야 한다.
+  '''
+}
+
+Table koth_solves {
+  koth_solve_id      uuid      [pk]
+  team_id            uuid      [not null, ref: > teams.team_id]
+  koth_challenge_id  uuid      [not null, ref: > koth_challenges.koth_challenge_id]
+  earned_score       numeric   [not null, default: 0, note: '누적 점수. 15분 채점마다 awarded_score 를 더한다']
+  solved_at          timestamp [not null, note: '처음 양수 점수를 받은 시각. 이후 절대 갱신하지 않는다']
+  updated_at         timestamp [not null, note: 'earned_score 가산 시각. 랭킹 LAST SOLVED AT 계산에는 사용하지 않는다']
+
+  indexes {
+    (team_id, koth_challenge_id) [unique]
+    (koth_challenge_id, earned_score)
+    (team_id, solved_at)
+  }
+
+  Note: '''
+  KOTH 점수의 단일 진실 공급원.
+  처음 양수 점수를 받은 팀만 행을 만들고, 이후 15분 점수는 같은 행의 earned_score 에 더한다.
+  행을 새로 만들지 않으므로 리더보드 그래프에 15분마다 새 점이 생기지 않는다.
+  풀이 여부는 별도 컬럼 없이 이 행의 존재로 판정한다. 제오파디 solves 와 같은 방식이다.
+
+  GET /api/v1/koth/me         — koth_challenges 전체와 LEFT JOIN. 행이 없으면 earned_score 0, rank null, solved_at null
+  GET /api/v1/koth/leaderboard — earned_score DESC, solved_at ASC, team_id ASC
+  GET /api/v1/ranking         — SUM(earned_score) 를 제오파디 점수에 더하고, MAX(solved_at) 을 LAST SOLVED AT 에 반영
+  GET /api/v1/leaderboard     — 이 행 하나가 그래프 점 하나. points 는 조회 시점의 earned_score, source_type 은 KOTH
+  '''
+}
+
+Table koth_score_periods {
+  id                 uuid               [pk]
+  koth_challenge_id  uuid               [not null, ref: > koth_challenges.koth_challenge_id]
+  period_id          timestamp          [not null, note: '15분 채점 구간 시작 시각(UTC). 분은 00/15/30/45 만 허용']
+  status             koth_period_status [not null, default: 'PENDING']
+  attempt_count      int                [not null, default: 0, note: '최대 3회. 간격 1분/2분/4분 (제안값, 확정 필요)']
+  applied_at         timestamp          [note: 'status=APPLIED 전환 시각']
+  last_error         varchar(500)
+  created_at         timestamp          [not null]
+  updated_at         timestamp          [not null]
+
+  indexes {
+    (koth_challenge_id, period_id) [unique]
+    (status, created_at)
+  }
+
+  Note: '''
+  중복 반영 방지의 근거. "이미 처리한 period_id 는 다시 점수에 반영하지 않는다" 를 여기서 보장한다.
+  같은 period_id 를 재조회하더라도 status=APPLIED 이면 koth_solves 를 건드리지 않고 종료한다.
+  조회 성공 후 koth_score_logs 적재와 koth_solves 가산과 status=APPLIED 전환은 한 트랜잭션이어야 한다.
+  3회 실패하면 SKIPPED 로 두고 다음 구간을 진행한다. 건너뛴 구간의 사후 복구 여부는 미정.
+  (koth_challenge_id, period_id) 유니크 제약이 동시 실행 시의 이중 반영도 막는다.
+  '''
+}
+
+Table koth_score_logs {
+  id                 uuid      [pk]
+  koth_challenge_id  uuid      [not null, ref: > koth_challenges.koth_challenge_id]
+  period_id          timestamp [not null]
+  team_id            uuid      [not null, ref: > teams.team_id]
+  rank               int       [not null, note: '해당 구간의 등수']
+  metric_score       numeric   [note: '등수 계산에 사용한 성능 측정값. 감사용']
+  awarded_score      numeric   [not null, note: '해당 구간에 지급한 점수']
+  created_at         timestamp [not null]
+
+  indexes {
+    (koth_challenge_id, period_id, team_id) [unique]
+    (team_id, created_at)
+  }
+
+  Note: '''
+  기존 koth_scores 를 대체한다. GET /internal/koth/scores 응답 원본을 그대로 보관하는 감사 로그다.
+  이름은 API 명세(GET /api/v1/ranking)가 이미 쓰고 있는 koth_score_logs 를 따랐다.
+  한 번 저장하면 수정하지 않는다. 이후 등수가 바뀌어도 과거 구간 값은 그대로 둔다.
+  이 테이블의 시각은 랭킹 계산에 사용하지 않는다. 점수와 순위는 koth_solves 에서만 읽는다.
+  "지난 구간 결과를 다시 조회할 수 있게 저장한다" 는 문제 서버 쪽 책임이고,
+  이 테이블은 우리가 받아온 값을 보관하는 용도다.
+  '''
+}
+
+// =====================================================================
+// 6. 대회 타이머 / 랭킹 스냅샷
+// =====================================================================
+
+Table contests {
+  contest_id  uuid           [pk]
+  name        varchar(100)   [not null]
+  status      contest_status [not null]
+  start_time  timestamp      [not null]
+  end_time    timestamp      [not null]
+  is_active   boolean        [not null, default: false]
+
+  Note: 'is_active 인 대회 1건을 조회 (GET /api/v1/timer). 없으면 200 + data:null'
+}
+
+Table score_snapshots {
+  id           uuid      [pk]
+  team_id      uuid      [not null, ref: > teams.team_id]
+  team_score   numeric   [not null, note: '팀 점수는 numeric으로 관리']
+  recorded_at  timestamp [not null]
+
+  indexes {
+    (team_id, recorded_at)
+    recorded_at
+  }
+
+  Note: '현재 GET /api/v1/leaderboard 는 이 테이블을 쓰지 않는다. 그래프를 solves/koth_solves 로 그리므로 유지할지 삭제할지 결정 필요'
+}
+
+// =====================================================================
+// 7. 관리자 운영 (P1)
+// =====================================================================
+
+Table admin_events {
+  event_id      uuid           [pk]
+  type          varchar(50)    [not null, note: 'INSTANCE_FAILED, TEAM_BANNED, INSTANCE_REPLACED ...']
+  severity      event_severity [not null, default: 'INFO']
+  message       varchar(500)   [not null]
+  team_id       uuid           [ref: > teams.team_id]
+  challenge_id  uuid           [ref: > challenges.challenge_id]
+  instance_id   uuid           [ref: > instances.instance_id]
+  actor         varchar(50)    [not null, note: 'admin 또는 system']
+  created_at    timestamp      [not null]
+
+  indexes {
+    created_at
+    (type, created_at)
+    team_id
+  }
+
+  Note: 'FR-ADMIN-12 감사 로그 + FR-CHAL-09 인스턴스 교체 이벤트'
+}
+
+Table team_snapshots {
+  snapshot_id  uuid         [pk]
+  team_id      uuid         [not null, ref: > teams.team_id]
+  payload      json         [not null, note: '위치·점수·마일리지·보유카드·오픈문제 등 복원 대상 상태']
+  reason       varchar(200) [not null, note: 'BEFORE_BAN, BEFORE_MANUAL_FIX, BEFORE_FORCE ...']
+  created_by   varchar(50)  [not null]
+  created_at   timestamp    [not null]
+  restored_at  timestamp    [note: '명시적 롤백 실행 시각. 밴/해제의 자동 부수효과가 아님']
+
+  indexes {
+    (team_id, created_at)
+  }
+
+  Note: 'FR-ADMIN-17/18 스냅샷 저장 및 명시적 롤백'
+}
+
+Table resource_accounts {
+  account_id         uuid            [pk]
+  account_name       varchar(100)    [not null]
+  status             resource_status [not null, default: 'HEALTHY']
+  instance_quota     int             [not null]
+  running_instances  int             [not null, default: 0]
+  collected_at       timestamp       [not null]
+
+  Note: 'FR-ADMIN-11 — scheduler 제공 여부 확인 필요'
+}
+
+Table resource_nodes {
+  node_id               uuid            [pk]
+  account_id            uuid            [not null, ref: > resource_accounts.account_id]
+  node_name             varchar(100)    [not null]
+  status                resource_status [not null, default: 'HEALTHY']
+  running_instances     int             [not null, default: 0]
+  cpu_usage_percent     int
+  memory_usage_percent  int
+  collected_at          timestamp       [not null]
+}
+
+// =====================================================================
+// 테이블 그룹
+// =====================================================================
+
+TableGroup 계정_팀 {
+  teams
+  users
+  refresh_tokens
+}
+
+TableGroup 보드 {
+  cells
+  team_board_states
+  team_cell_states
+  chance_cards
+  team_chance_cards
+  dice_rolls
+}
+
+TableGroup 문제_인스턴스 {
+  challenges
+  team_cell_candidates
+  opened_challenges
+  solves
+  flag_submissions
+  flag_submission_locks
+  instances
+}
+
+TableGroup 공통 {
+  idempotency_keys
+}
+
+TableGroup 마일리지_결제 {
+  mileage_history
+  payment_tokens
+}
+
+TableGroup KOTH {
+  koth_clubs
+  koth_challenges
+  koth_team_tokens
+  koth_solves
+  koth_score_periods
+  koth_score_logs
+}
+
+TableGroup 대회_랭킹 {
+  contests
+  score_snapshots
+}
+
+TableGroup 관리자운영 {
+  admin_events
+  team_snapshots
+  resource_accounts
+  resource_nodes
+}

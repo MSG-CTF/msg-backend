@@ -40,9 +40,10 @@ INSTALLED_APPS = [
     "apps.timer",
     "apps.accounts",
     "apps.adminpanel",
+    "apps.board",
     "apps.common",
+    "apps.koth",
     "apps.teams",
-
 ]
 
 MIDDLEWARE = [
@@ -92,15 +93,22 @@ DATABASES = {
 # Cache
 # https://docs.djangoproject.com/en/5.2/topics/cache/
 
-CACHES = {
-    "default": {
-        "BACKEND": "django_redis.cache.RedisCache",
-        "LOCATION": os.getenv("REDIS_URL", "redis://127.0.0.1:6379/1"),
-        "OPTIONS": {
-            "CLIENT_CLASS": "django_redis.client.DefaultClient",
+if os.getenv("USE_LOCMEM_CACHE") == "1":
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
         },
     }
-}
+else:
+    CACHES = {
+        "default": {
+            "BACKEND": "django_redis.cache.RedisCache",
+            "LOCATION": os.getenv("REDIS_URL", "redis://127.0.0.1:6379/1"),
+            "OPTIONS": {
+                "CLIENT_CLASS": "django_redis.client.DefaultClient",
+            },
+        }
+    }
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
 
@@ -165,6 +173,9 @@ if not JWT_SECRET:
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_HOURS = 1
 REFRESH_TOKEN_HOURS = 12
+
+# KOTH 문제 서버 -> 플랫폼 내부 API(X-Internal-Token) 공유 시크릿.
+KOTH_INTERNAL_TOKEN = os.getenv("KOTH_INTERNAL_TOKEN", "")
 
 
 REST_FRAMEWORK = {
