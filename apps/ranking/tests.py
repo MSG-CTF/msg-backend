@@ -6,12 +6,13 @@ from apps.ranking.ranking import build_team_ranking, resolve_last_solved_at
 BASE_TIME = datetime(2026, 8, 16, 0, 0, 0, tzinfo=timezone.utc) 
 
 
-def make_team(name, jeopardy=0, koth=0, jeopardy_at=None, koth_at=None):
+def make_team(name, jeopardy=0, koth=0, mileage=0, jeopardy_at=None, koth_at=None):
     return {
         "team_id": name,          
         "team_name": name,
         "jeopardy_score": jeopardy,
         "koth_score": koth,
+        "mileage": mileage,
         "jeopardy_solved_at": jeopardy_at,
         "koth_solved_at": koth_at,
     }
@@ -96,3 +97,11 @@ class BuildTeamRankingTest(SimpleTestCase):
             team_data.append(make_team(f"team{i}", jeopardy=i, jeopardy_at=BASE_TIME))
         result = build_team_ranking(team_data)
         self.assertEqual(len(result), 12)
+
+    def test_tie_breaks_by_team_id(self):
+        team_data = [
+            make_team("bbb", jeopardy=100, jeopardy_at=BASE_TIME),
+            make_team("aaa", jeopardy=100, jeopardy_at=BASE_TIME),
+        ]
+        result = build_team_ranking(team_data)
+        self.assertEqual(result[0]["team_name"], "aaa")

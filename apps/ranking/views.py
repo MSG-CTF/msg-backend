@@ -17,11 +17,13 @@ def collect_team_data():
             "team_id": str(team.team_id),
             "team_name": team.team_name,
             "jeopardy_score": team.team_score,
+            "mileage": team.mileage,
             "koth_score": Decimal("0"), #koth앱 생기면 SUM(koth점수)로 수정
             "jeopardy_solved_at": None, #solves앱 생기면 MAX(solves.solved_at)로 수정
             "koth_solved_at": None,
         })
     return team_data
+
 
 @api_view(["GET"])
 def team_ranking(request):
@@ -45,6 +47,7 @@ def team_ranking(request):
         "size": size,
     })
 
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def my_team_ranking(request):
@@ -59,4 +62,6 @@ def my_team_ranking(request):
         if row["team_id"] == my_team_id:
             row["team_score"] = num(row["team_score"])
             return ok(row)
+
+    return ok(None)
         

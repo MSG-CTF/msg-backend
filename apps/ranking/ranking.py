@@ -24,6 +24,7 @@ def build_team_ranking(team_data, limit=None):
             "team_id": row["team_id"],
             "team_name": row["team_name"],
             "team_score": total,
+            "mileage": row["mileage"],
             "last_solved_at": last_solved_at,
         })
 
@@ -52,5 +53,5 @@ def sort_key(row):
         no_solve = False
         solved_at = last_solved_at.timestamp()
 
-    return (score, no_solve, solved_at)
+    return (score, no_solve, solved_at, row["team_id"])
 
