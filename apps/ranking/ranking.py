@@ -1,5 +1,3 @@
-TOP_TEAM_COUNT = 8
-
 def resolve_last_solved_at(jeopardy_solved_at, koth_solved_at):
     if jeopardy_solved_at is None:
         return koth_solved_at
@@ -11,7 +9,7 @@ def resolve_last_solved_at(jeopardy_solved_at, koth_solved_at):
     else:
         return koth_solved_at
 
-def build_team_ranking(team_data, limit=TOP_TEAM_COUNT):
+def build_team_ranking(team_data, limit=None):
     result = []
 
     for row in team_data:
@@ -31,11 +29,15 @@ def build_team_ranking(team_data, limit=TOP_TEAM_COUNT):
 
     result.sort(key=sort_key)
 
-    top = result[:limit]
+    if limit is None: #/ranking/me           
+        top = result
+    else:
+        top = result[:limit] #/ranking
+
     rank = 1
     for row in top:
         row["rank"] = rank
-        rank += 1
+        rank = rank + 1
 
     return top
 

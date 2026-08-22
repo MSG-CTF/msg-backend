@@ -72,12 +72,7 @@ class BuildTeamRankingTest(SimpleTestCase):
         self.assertEqual(result[0]["team_name"], "solved")
         self.assertEqual(result[1]["team_name"], "nothing")
 
-    def test_returns_only_top_eight(self):
-        team_data = []
-        for i in range(12):
-            team_data.append(make_team(f"team{i}", jeopardy=i, jeopardy_at=BASE_TIME))
-        result = build_team_ranking(team_data)
-        self.assertEqual(len(result), 8)
+   
 
     def test_rank_starts_from_one(self):
         team_data = [
@@ -87,3 +82,17 @@ class BuildTeamRankingTest(SimpleTestCase):
         result = build_team_ranking(team_data)
         self.assertEqual(result[0]["rank"], 1)
         self.assertEqual(result[1]["rank"], 2)
+
+    def test_limit_cuts_result(self):
+        team_data = []
+        for i in range(12):
+            team_data.append(make_team(f"team{i}", jeopardy=i, jeopardy_at=BASE_TIME))
+        result = build_team_ranking(team_data, limit=8)
+        self.assertEqual(len(result), 8)
+
+    def test_no_limit_returns_all(self):
+        team_data = []
+        for i in range(12):
+            team_data.append(make_team(f"team{i}", jeopardy=i, jeopardy_at=BASE_TIME))
+        result = build_team_ranking(team_data)
+        self.assertEqual(len(result), 12)
