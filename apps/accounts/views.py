@@ -61,6 +61,8 @@ def login(request):
             "team_id": str(user.team_id) if user.team_id else None,
             "team_name": user.team.team_name if user.team_id else None,
             "user_id": str(user.user_id),
+            "is_banned": user.team.is_banned if user.team_id else False,
+            "ban_reason": user.team.ban_reason if user.team_id else None,
         },
         message="로그인 성공",
     )
