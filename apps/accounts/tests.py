@@ -147,3 +147,13 @@ class AuthTests(TestCase):
         self.assertEqual(res.status_code, 200)
         self.assertTrue(res.data["data"]["is_banned"])
         self.assertEqual(res.data["data"]["ban_reason"], "어뷰징")
+
+    def test_login_response_has_exact_fields(self):
+
+        res = self.login()
+        expected = {
+            "access_token", "refresh_token", "role", "is_leader",
+            "nickname", "team_id", "team_name", "user_id",
+            "is_banned", "ban_reason",
+        }
+        self.assertEqual(set(res.data["data"]), expected)
