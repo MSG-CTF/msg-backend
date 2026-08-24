@@ -42,6 +42,8 @@ INSTALLED_APPS = [
     "apps.adminpanel",
     "apps.common",
     "apps.teams",
+    "apps.challenge",
+    "apps.instances",
 
 ]
 
@@ -181,3 +183,8 @@ REST_FRAMEWORK = {
         "login": "10/min",
     }
 }
+
+
+SCHEDULER_BASE_URL = os.getenv("SCHEDULER_BASE_URL", "http://127.0.0.1:8001")
+SCHEDULER_TIMEOUT_SECONDS = int(os.getenv("SCHEDULER_TIMEOUT_SECONDS", "5"))
+INSTANCE_EXTEND_MINUTES = int(os.getenv("INSTANCE_EXTEND_MINUTES", "30"))
