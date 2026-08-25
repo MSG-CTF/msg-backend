@@ -2,6 +2,7 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db.models import Prefetch
 from django.utils import timezone
+
 from rest_framework.decorators import api_view, permission_classes
 
 from apps.accounts.models import Team, User
@@ -10,7 +11,9 @@ from apps.common.permissions import IsAdmin
 from apps.common.response import ok
 from apps.common.utils import num
 
-from .exceptions import AlreadyBanned, NotBanned, TeamNotFound
+from apps.teams.models import MileageHistory, MileageType
+
+from .exceptions import AlreadyBanned, InsufficientMileage, InvalidAmount, NotBanned, TeamNotFound
 
 SORT_FIELDS = {
     "score": "-team_score",
@@ -169,4 +172,65 @@ def _unban(request, team_id):
             "unbanned_by": request.user.login_id,
         },
         message="팀 활동 정지가 해제되었습니다",
+    )
+@api_view(["POST"])
+@permission_classes([IsAdmin])
+def team_mileage(request, team_id):
+    amount = request.data.get("amount")
+    if amount is None:
+        raise InvalidRequest("필수 항목이 누락되었습니다: amount")
+    if not isinstance(amount, int) or isinstance(amount, bool):
+        raise InvalidRequest("amount 는 정수여야 합니다")
+    if amount == 0:
+        raise InvalidAmount()
+
+    reason = request.data.get("reason")
+    if reason is None:
+        raise InvalidRequest("필수 항목이 누락되었습니다: reason")
+    if not isinstance(reason, str):
+        raise InvalidRequest("reason 은 문자열이어야 합니다")
+    reason = reason.strip()
+    if not reason:
+        raise InvalidRequest("reason 은 1자 이상 입력해야 합니다")
+    if len(reason) > 500:
+        raise InvalidRequest("reason 은 500자 이하여야 합니다")
+
+    with transaction.atomic():
+        team = _get_team_for_update(team_id)
+        previous = team.mileage
+
+        if amount < 0 and previous + amount < 0:
+            raise InsufficientMileage(
+                data={
+                    "current_mileage": previous,
+                    "requested_amount": -amount
+                }
+            )
+
+        mtype = MileageType.ADMIN_GRANT if amount > 0 else MileageType.ADMIN_DEDUCT
+        now = timezone.now().replace(microsecond=0)
+
+        # 불변식: 아래 두 줄이 한 트랜잭션 안에서 함께 일어나야 한다.
+        # mileage_history 총합 == team.mileage
+        MileageHistory.objects.create(
+            team=team,
+            type=mtype,
+            amount=amount,
+            reason=reason,
+            processed_by=request.user.login_id,
+        )
+        team.mileage = previous + amount
+        team.save(update_fields=["mileage", "updated_at"])
+
+    return ok(
+        {
+            "team_id": str(team.team_id),
+            "previous_mileage": previous,
+            "amount": amount,
+            "current_mileage": team.mileage,
+            "reason": reason,
+            "adjusted_at": now,
+            "adjusted_by": request.user.login_id,
+        },
+        message="마일리지가 조정되었습니다",
     )

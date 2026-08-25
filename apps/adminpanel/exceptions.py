@@ -19,3 +19,14 @@ class NotBanned(APIError):
     status_code = status.HTTP_409_CONFLICT
     code = "NOT_BANNED"
     message = "활동 정지 상태가 아닌 팀입니다"
+
+class InvalidAmount(APIError):
+    status_code = status.HTTP_400_BAD_REQUEST
+    code = "INVALID_AMOUNT"
+    message = "조정액은 0이 될 수 없습니다"
+
+
+class InsufficientMileage(APIError):
+    status_code = status.HTTP_400_BAD_REQUEST
+    code = "INSUFFICIENT_MILEAGE"
+    message = "회수할 마일리지가 부족합니다"
