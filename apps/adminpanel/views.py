@@ -350,12 +350,6 @@ def payment_history(request):
     offset = (page - 1) * size
     rows = list(queryset.order_by("-created_at")[offset : offset + size])
 
-    purchase_ids = [r.history_id for r in rows if r.type == MileageType.PURCHASE]
-    refunded_ids = set(
-        MileageHistory.objects.filter(
-            type=MileageType.REFUND, ref_history_id__in=purchase_ids
-        ).values_list("ref_history_id", flat=True)
-    )
 
     history = [
         {
@@ -365,7 +359,7 @@ def payment_history(request):
             "type": r.type,
             "amount": r.amount,
             "reason": r.reason,
-            "is_refunded": r.history_id in refunded_ids,
+            "is_refunded": r.is_refunded,
             "processed_by": r.processed_by,
             "created_at": r.created_at,
         }
@@ -417,6 +411,9 @@ def payment_refund(request, history_id):
         )
         team.mileage += refunded_amount
         team.save(update_fields=["mileage", "updated_at"])
+
+        purchase.is_refunded = True
+        purchase.save(update_fields=["is_refunded"])
 
     return ok(
         {

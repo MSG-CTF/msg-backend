@@ -347,6 +347,7 @@ class PaymentTests(TestCase):
         self.assertTrue(
             MileageHistory.objects.filter(pk=hid, type=MileageType.PURCHASE).exists()
         )
+        self.assertTrue(MileageHistory.objects.get(pk=hid).is_refunded)
         # history 에서 is_refunded 표시
         res = self.client.get("/api/v1/admin/payment/history")
         purchase_row = next(
@@ -381,3 +382,13 @@ class PaymentTests(TestCase):
         self.auth("player")
         res = self.client.delete(f"/api/v1/admin/payment/{hid}/refund")
         self.assertEqual(res.status_code, 403)
+        
+    def test_refund_reflected_in_participant_history(self):
+        hid = self._purchase(amount=30)
+        self.client.delete(f"/api/v1/admin/payment/{hid}/refund")
+        self.auth("player")
+        res = self.client.get("/api/v1/teams/me/mileage_history")
+        purchase = next(
+            r for r in res.data["data"]["history"] if r["history_id"] == hid
+        )
+        self.assertTrue(purchase["is_refunded"])
