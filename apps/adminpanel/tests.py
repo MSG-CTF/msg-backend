@@ -1,8 +1,14 @@
+import uuid
+
 from django.core.cache import cache
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
+from unittest.mock import patch
+
 from apps.accounts.models import Role, Team, User
+from apps.challenge.models import Challenge
+from apps.instances.models import DeleteReason, Instance, InstanceStatus
 
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 
@@ -170,3 +176,94 @@ class AdminTests(TestCase):
             {"amount": 50, "reason": "x"}, format="json",
         )
         self.assertEqual(res.data["code"], "TEAM_NOT_FOUND")
+
+@override_settings(CACHES=LOCMEM)
+class AdminInstanceTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.team = Team.objects.create(team_name="인스턴스팀", team_score=0)
+        self.admin = User.objects.create_user(
+            login_id="root", password="pw1234", nickname="운영자",
+            team=None, role=Role.ADMIN,
+        )
+        self.player = User.objects.create_user(
+            login_id="player", password="pw1234", nickname="참가자", team=self.team
+        )
+        self.challenge = Challenge.objects.create(
+            title="웹 문제", category="WEB", difficulty="EASY",
+            score=500, flag_hash="x", is_published=True,
+        )
+        self.auth("root")
+
+    def auth(self, login_id):
+        res = self.client.post("/api/v1/auth/login",
+                               {"login_id": login_id, "password": "pw1234"}, format="json")
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {res.data['data']['access_token']}"
+        )
+
+    def _instance(self, status=InstanceStatus.RUNNING, user=None):
+        return Instance.objects.create(
+            user=user or self.player, team=self.team, challenge=self.challenge,
+            status=status,
+        )
+
+    def test_list_returns_instances_and_summary(self):
+        self._instance(status=InstanceStatus.RUNNING)
+        self._instance(status=InstanceStatus.STOPPED)
+        res = self.client.get("/api/v1/admin/instances")
+        self.assertEqual(res.data["code"], "SUCCESS")
+        self.assertEqual(res.data["data"]["total_count"], 2)
+        summary = res.data["data"]["summary"]
+        self.assertEqual(summary["by_status"]["RUNNING"], 1)
+        self.assertEqual(summary["by_status"]["STOPPED"], 1)
+        self.assertEqual(summary["by_team"][0]["running_count"], 1)
+        self.assertEqual(summary["by_challenge"][0]["running_count"], 1)
+
+    def test_list_status_filter(self):
+        self._instance(status=InstanceStatus.RUNNING)
+        self._instance(status=InstanceStatus.STOPPED)
+        res = self.client.get("/api/v1/admin/instances?status=RUNNING")
+        self.assertEqual(res.data["data"]["total_count"], 1)
+        self.assertEqual(res.data["data"]["instances"][0]["status"], "RUNNING")
+
+    def test_list_invalid_status(self):
+        res = self.client.get("/api/v1/admin/instances?status=NOPE")
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data["code"], "INVALID_REQUEST")
+
+    def test_list_participant_blocked(self):
+        self.auth("player")
+        res = self.client.get("/api/v1/admin/instances")
+        self.assertEqual(res.status_code, 403)
+        self.assertEqual(res.data["code"], "FORBIDDEN")
+
+    @patch("apps.adminpanel.views.call_scheduler_delete")
+    def test_force_delete_success(self, mock_delete):
+        mock_delete.return_value = None
+        inst = self._instance(status=InstanceStatus.RUNNING)
+        res = self.client.delete(f"/api/v1/admin/instances/{inst.instance_id}")
+        self.assertEqual(res.status_code, 202)
+        self.assertEqual(res.data["data"]["status"], "STOPPING")
+        self.assertEqual(res.data["data"]["forced_by"], "root")
+        inst.refresh_from_db()
+        self.assertEqual(inst.status, InstanceStatus.STOPPING)
+        self.assertEqual(inst.delete_reason, DeleteReason.ADMIN_FORCED)
+
+    def test_force_delete_not_found(self):
+        res = self.client.delete(f"/api/v1/admin/instances/{uuid.uuid4()}")
+        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.data["code"], "INSTANCE_NOT_FOUND")
+
+    def test_force_delete_already_terminated(self):
+        inst = self._instance(status=InstanceStatus.STOPPED)
+        res = self.client.delete(f"/api/v1/admin/instances/{inst.instance_id}")
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.data["code"], "INSTANCE_ALREADY_TERMINATED")
+
+    def test_force_delete_participant_blocked(self):
+        inst = self._instance()
+        self.auth("player")
+        res = self.client.delete(f"/api/v1/admin/instances/{inst.instance_id}")
+        self.assertEqual(res.status_code, 403)
