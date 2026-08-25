@@ -267,3 +267,34 @@ class AdminInstanceTests(TestCase):
         self.auth("player")
         res = self.client.delete(f"/api/v1/admin/instances/{inst.instance_id}")
         self.assertEqual(res.status_code, 403)
+
+    @patch("apps.adminpanel.views.call_scheduler_reset")
+    def test_force_reset_replaces_instance(self, mock_reset):
+        old = self._instance(status=InstanceStatus.RUNNING)
+        new_id = uuid.uuid4()
+        mock_reset.return_value = {"instance_id": str(new_id), "status": "RESETTING"}
+        res = self.client.post(f"/api/v1/admin/instances/{old.instance_id}/reset")
+        self.assertEqual(res.status_code, 202)
+        self.assertEqual(res.data["data"]["instance_id"], str(new_id))
+        self.assertNotEqual(res.data["data"]["instance_id"], str(old.instance_id))
+        self.assertEqual(res.data["data"]["status"], "RESETTING")
+        self.assertEqual(res.data["data"]["forced_by"], "root")
+        new_inst = Instance.objects.get(pk=new_id)
+        self.assertEqual(new_inst.replaced_instance_id, old.instance_id)
+
+    def test_force_reset_not_restartable(self):
+        inst = self._instance(status=InstanceStatus.STOPPED)
+        res = self.client.post(f"/api/v1/admin/instances/{inst.instance_id}/reset")
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.data["code"], "INSTANCE_NOT_RESTARTABLE")
+
+    def test_force_reset_not_found(self):
+        res = self.client.post(f"/api/v1/admin/instances/{uuid.uuid4()}/reset")
+        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.data["code"], "INSTANCE_NOT_FOUND")
+
+    def test_force_reset_participant_blocked(self):
+        inst = self._instance()
+        self.auth("player")
+        res = self.client.post(f"/api/v1/admin/instances/{inst.instance_id}/reset")
+        self.assertEqual(res.status_code, 403)

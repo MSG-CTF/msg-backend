@@ -25,10 +25,14 @@ from apps.instances.models import (
     InstanceLock,
     InstanceStatus,
 )
+
 from apps.instances.services import (
     DELETABLE_INSTANCE_STATUSES,
+    RESETTABLE_INSTANCE_STATUSES,
     SchedulerError,
     call_scheduler_delete,
+    call_scheduler_reset,
+    create_instance_from_scheduler,
     isoformat_z,
     scheduler_auth_header,
 )
@@ -393,5 +397,68 @@ def instance_force_delete(request, instance_id):
             "forced_at": isoformat_z(now),
         },
         message="인스턴스 종료 요청이 접수되었습니다.",
+        status=202,
+    )
+
+@api_view(["POST"])
+@permission_classes([IsAdmin])
+def instance_force_reset(request, instance_id):
+    now = timezone.now().replace(microsecond=0)
+
+    owner = (
+        Instance.objects.select_related("user")
+        .filter(instance_id=instance_id)
+        .first()
+    )
+    if owner is None:
+        return fail("INSTANCE_NOT_FOUND", "존재하지 않는 인스턴스 ID입니다", 404)
+
+    with transaction.atomic():
+        _lock_instance_owner(owner.user)
+
+        instance = (
+            Instance.objects.select_for_update()
+            .select_related("team", "challenge")
+            .filter(instance_id=instance_id)
+            .first()
+        )
+        if instance is None:
+            return fail("INSTANCE_NOT_FOUND", "존재하지 않는 인스턴스 ID입니다", 404)
+
+        if instance.status not in RESETTABLE_INSTANCE_STATUSES:
+            return fail(
+                "INSTANCE_NOT_RESTARTABLE",
+                "재시작할 수 없는 상태입니다.",
+                409,
+                data={"instance_id": str(instance.instance_id), "status": instance.status},
+            )
+
+        try:
+            scheduler_data = call_scheduler_reset(instance, scheduler_auth_header(request))
+        except SchedulerError as error:
+            return fail(error.code, error.message, error.status_code)
+
+        new_instance = create_instance_from_scheduler(
+            scheduler_data,
+            user=instance.user,
+            team=instance.team,
+            challenge=instance.challenge,
+            replaced_instance=instance,
+        )
+
+    return ok(
+        {
+            "instance_id": str(new_instance.instance_id),
+            "team_id": str(new_instance.team_id),
+            "team_name": instance.team.team_name,
+            "challenge_id": str(new_instance.challenge_id),
+            "status": new_instance.status,
+            "host": new_instance.host if new_instance.status == InstanceStatus.RUNNING else None,
+            "port": None,
+            "expires_at": isoformat_z(new_instance.expires_at),
+            "forced_by": request.user.login_id,
+            "forced_at": isoformat_z(now),
+        },
+        message="인스턴스 재시작 요청이 접수되었습니다.",
         status=202,
     )

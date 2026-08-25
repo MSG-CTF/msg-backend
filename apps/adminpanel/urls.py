@@ -8,4 +8,5 @@ urlpatterns = [
     path("admin/teams/<str:team_id>/mileage", views.team_mileage),
     path("admin/instances", views.instance_list),
     path("admin/instances/<uuid:instance_id>", views.instance_force_delete),
+    path("admin/instances/<uuid:instance_id>/reset", views.instance_force_reset),
 ]
