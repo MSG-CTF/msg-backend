@@ -125,3 +125,8 @@ common_error_codes:
   # 관리자 인스턴스 강제 조작 (adminpanel, PR #22)
   - {http: 409, code: INSTANCE_ALREADY_TERMINATED}
   - {http: 409, code: INSTANCE_NOT_RESTARTABLE}
+  # 인스턴스 생성 - 스케줄러가 4xx 로 반환해 프론트로 전달되는 코드 (instances 앱, PR #8)
+  - {http: 400, code: INVALID_TTL_RANGE}
+  - {http: 400, code: HARD_TIMEOUT_LIMIT_EXCEEDED}
+  - {http: 409, code: ACTIVE_INSTANCE_EXISTS}
+  - {http: 409, code: TEAM_INSTANCE_LIMIT_EXCEEDED}
