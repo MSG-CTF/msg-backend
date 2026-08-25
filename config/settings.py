@@ -62,6 +62,7 @@ INSTALLED_APPS = [
     "apps.ranking",
     "apps.challenge",
     "apps.instances",
+    "apps.koth",
 
 ]
 
@@ -186,6 +187,11 @@ JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_HOURS = 1
 REFRESH_TOKEN_HOURS = 12
 
+# KOTH 팀 토큰은 원문을 DB에 보관하지 않고 이 별도 비밀값으로 결정적으로
+# 생성한다. 기존 개발 환경은 JWT_SECRET을 fallback으로 사용하되 운영에서는
+# 반드시 별도 값을 설정한다.
+KOTH_TEAM_TOKEN_SECRET = os.getenv("KOTH_TEAM_TOKEN_SECRET", JWT_SECRET)
+
 
 REST_FRAMEWORK = {
     "DATETIME_FORMAT": "%Y-%m-%dT%H:%M:%SZ",
@@ -201,8 +207,6 @@ REST_FRAMEWORK = {
         "login": "10/min",
     }
 }
-
-
 SCHEDULER_BASE_URL = os.getenv(
     "SCHEDULER_BASE_URL", "http://127.0.0.1:8001"
 ).rstrip("/")
