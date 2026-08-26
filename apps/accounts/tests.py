@@ -1,4 +1,5 @@
 import datetime
+import secrets
 
 import jwt as pyjwt
 from django.conf import settings
@@ -7,9 +8,6 @@ from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
 from apps.accounts.models import RefreshToken, Team, User
-
-# 리뷰에서 지적된, 저장소에 커밋되어 있던 공개 키
-OLD_PUBLIC_KEY = "django-insecure-*%5a3*nw#g2)2%z8&36xna3lpt22!9_esyox_x9##%@+2q9o10"
 
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 
@@ -87,14 +85,16 @@ class AuthTests(TestCase):
         res = self.client.get("/api/v1/teams/me", HTTP_AUTHORIZATION=f"Bearer {expired}")
         self.assertEqual(res.data["code"], "TOKEN_EXPIRED")
 
-    def test_token_signed_with_old_public_key_rejected(self):
-        """저장소에 커밋되어 있던 공개 키로 만든 토큰은 거절돼야 한다."""
+    def test_token_signed_with_unknown_key_rejected(self):
+        """현재 JWT 키와 다른 임시 키로 만든 토큰은 거절돼야 한다."""
         payload = {
             "typ": "access", "sub": str(self.user.user_id),
             "team_id": str(self.team.team_id), "role": "ADMIN", "is_leader": True,
             "exp": datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1),
         }
-        forged = pyjwt.encode(payload, OLD_PUBLIC_KEY, algorithm="HS256")
+        unknown_key = secrets.token_urlsafe(48)
+        self.assertNotEqual(unknown_key, settings.JWT_SECRET)
+        forged = pyjwt.encode(payload, unknown_key, algorithm="HS256")
         res = self.client.get("/api/v1/auth/me", HTTP_AUTHORIZATION=f"Bearer {forged}")
         self.assertEqual(res.data["code"], "TOKEN_INVALID")
 

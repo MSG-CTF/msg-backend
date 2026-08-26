@@ -1,0 +1,22 @@
+name: Backend CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+concurrency:
+  group: backend-ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    uses: MSG-CTF/jm_devsecops/.github/workflows/reusable-ci.yml@v3.3.0
+    with:
+      smoke_test_path: /admin/login/
