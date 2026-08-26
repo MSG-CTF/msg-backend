@@ -17,6 +17,6 @@ concurrency:
 
 jobs:
   ci:
-    uses: MSG-CTF/jm_devsecops/.github/workflows/reusable-ci.yml@v3.3.0
+    uses: MSG-CTF/jm_devsecops/.github/workflows/reusable-ci.yml@v3.3.1
     with:
       smoke_test_path: /admin/login/
