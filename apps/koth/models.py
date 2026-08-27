@@ -51,7 +51,7 @@ class KothChallenge(models.Model):
         db_table = "koth_challenges"
         ordering = ["open_group", "title"]
         constraints = [
-            models.UniqueConstraint(fields=["club", "title"], name="uq_koth_challenge_club_title"),
+            models.UniqueConstraint(fields=["club"], name="uq_koth_challenge_club"),
         ]
         indexes = [models.Index(fields=["status", "open_group"])]
 

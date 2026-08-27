@@ -4,6 +4,7 @@ from decimal import Decimal
 from unittest.mock import patch
 
 from django.core.cache import cache
+from django.db import IntegrityError, transaction
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
@@ -68,6 +69,14 @@ class KothApiTests(TestCase):
         self.assertEqual(detail.data["data"]["challenge_count"], 1)
         self.assertEqual(self.client.get("/api/v1/koth/clubs/not-a-uuid").data["code"], "INVALID_CLUB_ID")
         self.assertEqual(self.client.get(f"/api/v1/koth/clubs/{KothClub().club_id}").data["code"], "CLUB_NOT_FOUND")
+
+    def test_each_club_accepts_only_one_challenge(self):
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                KothChallenge.objects.create(
+                    club=self.club, title="Duplicate", status=KothChallengeStatus.SCHEDULED,
+                    open_group=7, inbound_internal_token_hash=hash_token("duplicate-secret"),
+                )
 
     def test_me_reports_all_challenges_and_team_token_is_shared(self):
         KothSolve.objects.create(team=self.team, challenge=self.challenge, earned_score=Decimal("40"))
