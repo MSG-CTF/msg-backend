@@ -113,3 +113,20 @@ common_error_codes:
   # 플래그 제출 전용. team_tokens/verify는 인증 전 단계라 플랫폼이 차단하지 않으므로
   # 429를 반환하지 않는다 (admin.md "검증 제한 정책" 참고).
   - {http: 429, code: TOO_MANY_ATTEMPTS}
+  # 문제 상세 / 플래그 제출 (challenge 앱, PR #8)
+  - {http: 403, code: CHALLENGE_LOCKED}
+  - {http: 404, code: CHALLENGE_NOT_FOUND}
+  - {http: 409, code: ALREADY_SOLVED}
+  # 인스턴스 (instances 앱, PR #8)
+  - {http: 404, code: INSTANCE_NOT_FOUND}
+  - {http: 400, code: INVALID_STATE_TRANSITION}
+  - {http: 404, code: RUNTIME_CONFIG_NOT_FOUND}
+  - {http: 400, code: HARD_TIMEOUT_EXCEEDED}
+  # 관리자 인스턴스 강제 조작 (adminpanel, PR #22)
+  - {http: 409, code: INSTANCE_ALREADY_TERMINATED}
+  - {http: 409, code: INSTANCE_NOT_RESTARTABLE}
+  # 인스턴스 생성 - 스케줄러가 4xx 로 반환해 프론트로 전달되는 코드 (instances 앱, PR #8)
+  - {http: 400, code: INVALID_TTL_RANGE}
+  - {http: 400, code: HARD_TIMEOUT_LIMIT_EXCEEDED}
+  - {http: 409, code: ACTIVE_INSTANCE_EXISTS}
+  - {http: 409, code: TEAM_INSTANCE_LIMIT_EXCEEDED}
