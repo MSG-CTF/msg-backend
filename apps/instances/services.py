@@ -135,7 +135,10 @@ def scheduler_request(method, path, body=None, auth_header=None, query=None):
     request = Request(url, data=payload, headers=headers, method=method)
 
     try:
-        with urlopen(request, timeout=settings.SCHEDULER_TIMEOUT_SECONDS) as response:
+        # settings에서 URL scheme과 authority를 검증한 배포 설정만 사용한다.
+        with urlopen(  # nosec B310
+            request, timeout=settings.SCHEDULER_TIMEOUT_SECONDS
+        ) as response:
             response_body = response.read().decode("utf-8")
     except HTTPError as error:
         raise scheduler_error_from_response(error) from error
