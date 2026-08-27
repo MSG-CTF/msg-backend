@@ -1,6 +1,7 @@
 from datetime import timedelta
 
 from django.db import IntegrityError, transaction
+from django.db.models import F
 from django.utils import timezone
 from rest_framework.views import APIView
 
@@ -23,6 +24,16 @@ from apps.instances.services import (
     sync_instance_from_scheduler,
 )
 from apps.common.permissions import IsAuthenticated
+from apps.accounts.models import Team
+from apps.board.services import complete_challenge_from_submission
+from apps.teams.models import MileageHistory, MileageType
+
+
+CHALLENGE_MILEAGE_REWARDS = {
+    Challenge.DifficultyType.HARD: 120,
+    Challenge.DifficultyType.MEDIUM: 60,
+    Challenge.DifficultyType.EASY: 30,
+}
 
 def number_value(value):
     # Decimal 점수를 API 응답용 숫자로 바꾼다
@@ -162,7 +173,7 @@ class ChallengeSubmitView(APIView):
 
             is_extra_dice_granted = opened_challenge.solve_deadline_at >= now
             earned_score = challenge.score
-            earned_mileage = 0
+            earned_mileage = CHALLENGE_MILEAGE_REWARDS[challenge.difficulty]
 
             try:
                 solve = Solve.objects.create(
@@ -176,6 +187,14 @@ class ChallengeSubmitView(APIView):
             except IntegrityError:
                 return fail("ALREADY_SOLVED", "이미 정답을 맞춘 문제입니다.", 409)
 
+            Team.objects.filter(pk=team.pk).update(mileage=F("mileage") + earned_mileage)
+            MileageHistory.objects.create(
+                team=team,
+                type=MileageType.CHALLENGE_SOLVE,
+                amount=earned_mileage,
+                reason=f"문제 풀이: {challenge.title}",
+            )
+
             flag_lock.failed_count = 0
             flag_lock.locked_until = None
             flag_lock.last_failed_at = None
@@ -188,6 +207,8 @@ class ChallengeSubmitView(APIView):
                 submitted_flag_hash=submitted_flag_hash,
                 result=FlagSubmission.SubmissionResult.CORRECT,
             )
+
+            complete_challenge_from_submission(team, challenge, is_extra_dice_granted)
 
         return ok(
             message="정답입니다!",

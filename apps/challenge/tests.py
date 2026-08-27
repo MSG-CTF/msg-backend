@@ -8,6 +8,7 @@ from rest_framework.test import APIClient
 from apps.accounts.models import Team, User
 from apps.challenge.models import Challenge, FlagSubmissionLock, OpenedChallenge, Solve
 from apps.challenge.services import hash_flag
+from apps.teams.models import MileageHistory, MileageType
 
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 
@@ -97,4 +98,49 @@ class ChallengeSubmitTests(TestCase):
         self.assertEqual(
             Solve.objects.filter(team=self.team, challenge=self.challenge).count(),
             1,
+        )
+
+    def test_successful_solve_awards_mileage_by_difficulty(self):
+        extra_challenges = []
+        for difficulty, reward in (
+            (Challenge.DifficultyType.MEDIUM, 60),
+            (Challenge.DifficultyType.HARD, 120),
+        ):
+            challenge = Challenge.objects.create(
+                title=f"{difficulty} 문제",
+                category=Challenge.CategoryType.WEB,
+                difficulty=difficulty,
+                score=500,
+                description="난이도별 보상 테스트 문제",
+                flag_hash=hash_flag(f"MSG{{{difficulty.lower()}_flag}}"),
+                is_published=True,
+            )
+            OpenedChallenge.objects.create(
+                team=self.team,
+                challenge=challenge,
+                cell_index=len(extra_challenges) + 2,
+                solve_deadline_at=timezone.now() + datetime.timedelta(minutes=15),
+            )
+            extra_challenges.append((challenge, reward, f"MSG{{{difficulty.lower()}_flag}}"))
+
+        cases = [(self.challenge, 30, "MSG{correct_flag}"), *extra_challenges]
+        for challenge, reward, flag in cases:
+            with self.subTest(difficulty=challenge.difficulty):
+                response = self.client.post(
+                    f"/api/v1/challenges/{challenge.challenge_id}/submit",
+                    {"flag": flag},
+                    format="json",
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.data["data"]["earned_mileage"], reward)
+
+        self.team.refresh_from_db()
+        self.assertEqual(self.team.mileage, 210)
+        self.assertEqual(
+            list(
+                MileageHistory.objects.filter(team=self.team, type=MileageType.CHALLENGE_SOLVE)
+                .order_by("created_at")
+                .values_list("amount", flat=True)
+            ),
+            [30, 60, 120],
         )

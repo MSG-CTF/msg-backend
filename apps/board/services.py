@@ -40,7 +40,7 @@ from .exceptions import (
     RouletteAlreadySpun,
     TimerRunning,
 )
-from apps.challenge.models import Challenge
+from apps.challenge.models import Challenge, OpenedChallenge
 
 from .models import (
     Cell,
@@ -632,6 +632,14 @@ def open_current_cell_challenge(team, challenge_id):
         )
 
         now = timezone.now()
+        OpenedChallenge.objects.get_or_create(
+            team=team,
+            challenge=candidate.challenge,
+            defaults={
+                "cell_index": cell.cell_index,
+                "solve_deadline_at": now + timedelta(seconds=SOLVE_LIMIT_SECONDS),
+            },
+        )
         candidate.status = TeamCellCandidate.Status.SELECTED
         candidate.selected_at = now
         candidate.save(update_fields=["status", "selected_at"])
@@ -640,6 +648,37 @@ def open_current_cell_challenge(team, challenge_id):
         state.save(update_fields=["active_challenge_access", "updated_at"])
 
     return access, now + timedelta(seconds=SOLVE_LIMIT_SECONDS)
+
+
+def complete_challenge_from_submission(team, challenge, is_extra_dice_granted):
+    """Challenge API 정답 제출을 보드의 활성 문제 완료 상태와 동기화한다."""
+    with transaction.atomic():
+        access = (
+            TeamChallengeAccess.objects.select_for_update()
+            .filter(team=team, challenge=challenge)
+            .first()
+        )
+        if access is None:
+            return
+
+        state = TeamBoardState.objects.select_for_update().filter(team=team).first()
+        was_cleared = access.status == TeamChallengeAccess.Status.CLEARED
+        if not was_cleared:
+            access.status = TeamChallengeAccess.Status.CLEARED
+            access.cleared_at = timezone.now()
+            access.save(update_fields=["status", "cleared_at"])
+
+        if state is None:
+            return
+
+        update_fields = ["updated_at"]
+        if state.active_challenge_access_id == access.id:
+            state.active_challenge_access = None
+            update_fields.append("active_challenge_access")
+        if not was_cleared and is_extra_dice_granted:
+            grant_dice_roll(state, 1)
+            update_fields.extend(["dice_rolls_left", "next_dice_reset_at"])
+        state.save(update_fields=update_fields)
 
 
 def solve_active_challenge(team):

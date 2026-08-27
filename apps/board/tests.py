@@ -1,4 +1,7 @@
 from datetime import timedelta
+import time
+from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.core.cache import cache
@@ -6,6 +9,7 @@ from django.core.management import call_command
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
+from rest_framework.response import Response
 
 from apps.accounts.models import Team, User
 from apps.board.models import (
@@ -20,10 +24,46 @@ from apps.board.models import (
     TeamChanceCard,
 )
 from apps.board.services import SOLVE_LIMIT_SECONDS, get_or_create_board_state
-from apps.challenge.models import Challenge
+from apps.board.idempotency import idempotent
+from apps.challenge.models import Challenge, OpenedChallenge
 from apps.teams.models import MileageHistory
 
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
+
+
+@override_settings(CACHES=LOCMEM)
+class IdempotencyConcurrencyTestCase(SimpleTestCase):
+    def test_same_key_concurrent_requests_execute_view_once_and_replay_response(self):
+        calls = []
+
+        class ProbeView:
+            @idempotent
+            def post(self, request):
+                calls.append(request.body)
+                time.sleep(0.2)
+                return Response({"value": len(calls)}, status=200)
+
+        from rest_framework.test import APIRequestFactory
+
+        factory = APIRequestFactory()
+        requests = [
+            factory.post(
+                "/api/v1/board/dice/roll",
+                {"roll": True},
+                format="json",
+                HTTP_IDEMPOTENCY_KEY="parallel-key",
+            )
+            for _ in range(2)
+        ]
+        for request in requests:
+            request.user = SimpleNamespace(user_id=1)
+
+        cache.clear()
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            responses = list(executor.map(ProbeView().post, requests))
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(responses[0].data, responses[1].data)
 
 
 @override_settings(DEBUG=False)
@@ -574,6 +614,37 @@ class BoardApiTestCase(TestCase):
         )
         self.assertEqual(second.status_code, 409)
         self.assertEqual(second.json()["code"], "CELL_ALREADY_OPENED")
+
+    def test_board_open_challenge_submit_and_board_completion_are_one_flow(self):
+        cell = self.set_position(2, consumed=True)
+        current = self.client.get("/api/v1/board/cell/current").json()["data"]
+        challenge_id = current["challenge_candidates"][0]["challenge_id"]
+        challenge = Challenge.objects.get(challenge_id=challenge_id)
+
+        opened = self.post_idem(
+            "/api/v1/board/cell/open", {"challenge_id": challenge_id}, key="integrated-open"
+        )
+        self.assertEqual(opened.status_code, 200)
+        self.assertTrue(
+            OpenedChallenge.objects.filter(team=self.team, challenge=challenge).exists()
+        )
+
+        detail = self.client.get(f"/api/v1/challenges/{challenge_id}")
+        self.assertEqual(detail.status_code, 200)
+
+        challenge_number = challenge.board_meta.challenge_number
+        submit = self.client.post(
+            f"/api/v1/challenges/{challenge_id}/submit",
+            {"flag": f"MSG{{challenge_{challenge_number:02d}}}"},
+            format="json",
+        )
+        self.assertEqual(submit.status_code, 200)
+        self.assertEqual(submit.json()["data"]["earned_mileage"], 120)
+
+        access = TeamChallengeAccess.objects.get(team=self.team, challenge=challenge)
+        self.assertEqual(access.status, TeamChallengeAccess.Status.CLEARED)
+        self.state.refresh_from_db()
+        self.assertIsNone(self.state.active_challenge_access_id)
 
     def test_cell_open_requires_challenge_cell(self):
         response = self.post_idem("/api/v1/board/cell/open", {"challenge_id": "not-a-uuid"})
