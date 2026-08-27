@@ -28,15 +28,14 @@ class ResolveLastSolvedAtTest(SimpleTestCase):
         result = resolve_last_solved_at(BASE_TIME, None)
         self.assertEqual(result, BASE_TIME)
 
-    def test_only_koth_returns_koth(self):
+    def test_only_koth_returns_none(self):
         result = resolve_last_solved_at(None, BASE_TIME)
-        self.assertEqual(result, BASE_TIME)
+        self.assertIsNone(result)
 
-    def test_returns_later_one(self):
+    def test_ignores_koth_even_if_later(self):
         later = BASE_TIME + timedelta(hours=1)
         result = resolve_last_solved_at(BASE_TIME, later)
-        self.assertEqual(result, later)
-
+        self.assertEqual(result, BASE_TIME)
 
 class BuildTeamRankingTest(SimpleTestCase):
 
