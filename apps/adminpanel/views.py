@@ -2,7 +2,7 @@ import uuid
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
-from django.db.models import Prefetch
+from django.db.models import Count, Prefetch
 from django.db.models import Sum
 from django.utils import timezone
 
@@ -11,7 +11,7 @@ from rest_framework.decorators import api_view, permission_classes
 from apps.accounts.models import Team, User
 from apps.common.exceptions import InvalidRequest, TeamBanned
 from apps.common.permissions import IsAdmin
-from apps.common.response import ok
+from apps.common.response import fail, ok
 from apps.common.utils import num
 from apps.common.jwt import hash_token
 
@@ -33,6 +33,23 @@ from .exceptions import (
     PaymentTokenExpired,
     PaymentTokenInvalid,
     TeamNotFound,
+)
+
+from apps.instances.models import (
+    DeleteReason,
+    Instance,
+    InstanceLock,
+    InstanceStatus,
+)
+from apps.instances.services import (
+    DELETABLE_INSTANCE_STATUSES,
+    RESETTABLE_INSTANCE_STATUSES,
+    SchedulerError,
+    call_scheduler_delete,
+    call_scheduler_reset,
+    create_instance_from_scheduler,
+    isoformat_z,
+    scheduler_auth_header,
 )
 
 SORT_FIELDS = {
@@ -426,4 +443,214 @@ def payment_refund(request, history_id):
             "refunded_by": request.user.login_id,
         },
         message="환불이 완료되었습니다",
+    )
+
+INSTANCE_STATUS_VALUES = set(InstanceStatus.values)
+
+
+def _lock_instance_owner(user):
+    InstanceLock.objects.select_for_update().get_or_create(user=user)
+
+
+def _instance_summary():
+    by_status = {s: 0 for s in InstanceStatus.values}
+    for row in Instance.objects.values("status").annotate(c=Count("instance_id")):
+        by_status[row["status"]] = row["c"]
+
+    running = Instance.objects.filter(status=InstanceStatus.RUNNING)
+    by_team = [
+        {
+            "team_id": str(r["team_id"]),
+            "team_name": r["team__team_name"],
+            "running_count": r["c"],
+        }
+        for r in running.values("team_id", "team__team_name")
+        .annotate(c=Count("instance_id"))
+        .order_by("-c", "team__team_name")
+    ]
+    by_challenge = [
+        {
+            "challenge_id": str(r["challenge_id"]),
+            "challenge_title": r["challenge__title"],
+            "running_count": r["c"],
+        }
+        for r in running.values("challenge_id", "challenge__title")
+        .annotate(c=Count("instance_id"))
+        .order_by("-c", "challenge__title")
+    ]
+    return {"by_status": by_status, "by_team": by_team, "by_challenge": by_challenge}
+
+
+@api_view(["GET"])
+@permission_classes([IsAdmin])
+def instance_list(request):
+    status_filter = request.query_params.get("status")
+    if status_filter and status_filter not in INSTANCE_STATUS_VALUES:
+        return fail("INVALID_REQUEST", "상태 값이 올바르지 않습니다", 400)
+
+    team_id = request.query_params.get("team_id")
+    challenge_id = request.query_params.get("challenge_id")
+    for raw in (team_id, challenge_id):
+        if raw:
+            try:
+                uuid.UUID(str(raw))
+            except (ValueError, TypeError):
+                return fail("INVALID_REQUEST", "요청 값이 올바르지 않습니다", 400)
+
+    page = _page_number(request.query_params.get("page"), 1, MAX_PAGE)
+    size = min(_page_number(request.query_params.get("size"), 50), MAX_PAGE_SIZE)
+
+    queryset = Instance.objects.select_related("team", "challenge")
+    if status_filter:
+        queryset = queryset.filter(status=status_filter)
+    if team_id:
+        queryset = queryset.filter(team_id=team_id)
+    if challenge_id:
+        queryset = queryset.filter(challenge_id=challenge_id)
+
+    # 대량 인스턴스에서 페이지네이션 시 3중 집계를 매번 돌지 않도록 opt-out 허용.
+    # 기본은 포함(true), ?summary=false 면 집계를 건너뛰고 summary=null.
+    include_summary = request.query_params.get("summary", "true").lower() != "false"
+
+    total_count = queryset.count()
+    offset = (page - 1) * size
+    rows = queryset.order_by("-created_at")[offset : offset + size]
+
+    instances = [
+        {
+            "instance_id": str(r.instance_id),
+            "team_id": str(r.team_id),
+            "team_name": r.team.team_name,
+            "challenge_id": str(r.challenge_id),
+            "challenge_title": r.challenge.title,
+            "status": r.status,
+            "created_at": isoformat_z(r.created_at),
+            "expires_at": isoformat_z(r.expires_at),
+        }
+        for r in rows
+    ]
+
+    return ok(
+        {
+            "instances": instances,
+            "summary": _instance_summary() if include_summary else None,
+            "total_count": total_count,
+            "page": page,
+            "size": size,
+        }
+    )
+
+
+@api_view(["DELETE"])
+@permission_classes([IsAdmin])
+def instance_force_delete(request, instance_id):
+    now = timezone.now().replace(microsecond=0)
+
+    owner = Instance.objects.select_related("user").filter(instance_id=instance_id).first()
+    if owner is None:
+        return fail("INSTANCE_NOT_FOUND", "존재하지 않는 인스턴스 ID입니다", 404)
+
+    with transaction.atomic():
+        _lock_instance_owner(owner.user)
+
+        instance = (
+            Instance.objects.select_for_update()
+            .select_related("team")
+            .filter(instance_id=instance_id)
+            .first()
+        )
+        if instance is None:
+            return fail("INSTANCE_NOT_FOUND", "존재하지 않는 인스턴스 ID입니다", 404)
+
+        if instance.status not in DELETABLE_INSTANCE_STATUSES:
+            return fail(
+                "INSTANCE_ALREADY_TERMINATED",
+                "이미 종료된 인스턴스입니다",
+                409,
+                data={"instance_id": str(instance.instance_id), "status": instance.status},
+            )
+
+        try:
+            call_scheduler_delete(instance, scheduler_auth_header(request))
+        except SchedulerError as error:
+            return fail(error.code, error.message, error.status_code)
+
+        instance.status = InstanceStatus.STOPPING
+        instance.delete_reason = DeleteReason.ADMIN_FORCED
+        instance.save(update_fields=["status", "delete_reason", "updated_at"])
+
+    return ok(
+        {
+            "instance_id": str(instance.instance_id),
+            "team_id": str(instance.team_id),
+            "team_name": instance.team.team_name,
+            "status": instance.status,
+            "forced_by": request.user.login_id,
+            "forced_at": isoformat_z(now),
+        },
+        message="인스턴스 종료 요청이 접수되었습니다.",
+        status=202,
+    )
+
+@api_view(["POST"])
+@permission_classes([IsAdmin])
+def instance_force_reset(request, instance_id):
+    now = timezone.now().replace(microsecond=0)
+
+    owner = (
+        Instance.objects.select_related("user")
+        .filter(instance_id=instance_id)
+        .first()
+    )
+    if owner is None:
+        return fail("INSTANCE_NOT_FOUND", "존재하지 않는 인스턴스 ID입니다", 404)
+
+    with transaction.atomic():
+        _lock_instance_owner(owner.user)
+
+        instance = (
+            Instance.objects.select_for_update()
+            .select_related("team", "challenge")
+            .filter(instance_id=instance_id)
+            .first()
+        )
+        if instance is None:
+            return fail("INSTANCE_NOT_FOUND", "존재하지 않는 인스턴스 ID입니다", 404)
+
+        if instance.status not in RESETTABLE_INSTANCE_STATUSES:
+            return fail(
+                "INSTANCE_NOT_RESTARTABLE",
+                "재시작할 수 없는 상태입니다.",
+                409,
+                data={"instance_id": str(instance.instance_id), "status": instance.status},
+            )
+
+        try:
+            scheduler_data = call_scheduler_reset(instance, scheduler_auth_header(request))
+        except SchedulerError as error:
+            return fail(error.code, error.message, error.status_code)
+
+        new_instance = create_instance_from_scheduler(
+            scheduler_data,
+            user=instance.user,
+            team=instance.team,
+            challenge=instance.challenge,
+            replaced_instance=instance,
+        )
+
+    return ok(
+        {
+            "instance_id": str(new_instance.instance_id),
+            "team_id": str(new_instance.team_id),
+            "team_name": instance.team.team_name,
+            "challenge_id": str(new_instance.challenge_id),
+            "status": new_instance.status,
+            "host": new_instance.host if new_instance.status == InstanceStatus.RUNNING else None,
+            "port": None,
+            "expires_at": isoformat_z(new_instance.expires_at),
+            "forced_by": request.user.login_id,
+            "forced_at": isoformat_z(now),
+        },
+        message="인스턴스 재시작 요청이 접수되었습니다.",
+        status=202,
     )
