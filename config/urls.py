@@ -20,6 +20,8 @@ urlpatterns = [
     path("api/v1/", include("apps.instances.urls")),
     path("api/v1/board", BoardView.as_view(), name="board"),
     path("api/v1/board/", include("apps.board.urls")),
+    path("api/v1/", include("apps.koth.urls")),
+    path("", include("apps.koth.internal_urls")),
 ]
 
 if settings.DEBUG:

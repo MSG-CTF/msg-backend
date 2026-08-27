@@ -235,7 +235,7 @@ Response:
 - `metric_score`: 해당 구간 순위 산정에 사용한 원점수(Double)
 - `total_count`: `results` 배열의 길이(Long). 전체 참가 팀 수가 아니라 이 구간에서 순위가 매겨진 팀 수입니다.
 
-지급 점수는 반환하지 않습니다. 12문제의 배점 스케일을 맞추기 위해 플랫폼이 배점표를 관리하며, 문제 서버는 등수까지만 계산합니다.
+지급 점수는 반환하지 않습니다. 6문제의 배점 스케일을 맞추기 위해 플랫폼이 배점표를 관리하며, 문제 서버는 등수까지만 계산합니다.
 
 필수 규칙:
 
@@ -316,12 +316,12 @@ Response:
 
 `info.yaml`은 일반 문제 양식에 `deployment.healthcheck`만 추가한 형태입니다. 그 외 값은 모두 플랫폼이 관리하고 출제자에게 전달합니다.
 
-동아리 하나가 문제를 여러 개 낼 수 있으므로 문제 정보는 동아리 아래 `challenges[]` 배열에 들어갑니다. 이번 대회는 동아리 6개에 동아리당 문제 2개, 총 12문제입니다.
+문제 정보는 동아리 아래 `challenges[]` 배열에 들어갑니다. 이번 대회는 동아리 6개에 동아리당 문제 1개, 총 6문제입니다.
 
 - `club_id`, 동아리 이름 -> `/api/v1/koth/clubs[].club_id`, `/api/v1/koth/clubs[].name`
 - `koth_challenge_id`, 문제 이름, 카테고리 -> `/api/v1/koth/clubs[].challenges[]`
 - `open_group`, `status` -> `/api/v1/koth/clubs[].challenges[]`
 
-`open_group`과 `status`는 대회 전체 스케줄이라 플랫폼이 배정합니다. 둘 다 동아리가 아니라 문제 단위로 관리됩니다. 한 동아리의 문제 두 개가 서로 다른 시간대에 열릴 수 있기 때문입니다.
+`open_group`과 `status`는 대회 전체 스케줄이라 플랫폼이 배정합니다. 둘 다 동아리가 아니라 문제 단위로 관리됩니다.
 
 전체 KOTH 등수는 백엔드가 KOTH SOLVE의 `earned_score`를 합산해 계산합니다.
