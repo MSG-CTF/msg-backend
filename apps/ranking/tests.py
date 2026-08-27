@@ -28,11 +28,11 @@ class ResolveLastSolvedAtTest(SimpleTestCase):
         result = resolve_last_solved_at(BASE_TIME, None)
         self.assertEqual(result, BASE_TIME)
 
-    def test_only_koth_returns_none(self):
+    def test_koth_only_uses_koth_time(self):
         result = resolve_last_solved_at(None, BASE_TIME)
-        self.assertIsNone(result)
+        self.assertEqual(result, BASE_TIME)
 
-    def test_ignores_koth_even_if_later(self):
+    def test_prefers_jeopardy_over_koth(self):
         later = BASE_TIME + timedelta(hours=1)
         result = resolve_last_solved_at(BASE_TIME, later)
         self.assertEqual(result, BASE_TIME)

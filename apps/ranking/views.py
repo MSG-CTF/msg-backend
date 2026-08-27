@@ -7,10 +7,14 @@ from apps.ranking.ranking import build_team_ranking
 from apps.common.exceptions import UserHasNoTeam
 from apps.common.permissions import IsAuthenticated
 from apps.ranking.pagination import parse_pagination
+from django.db.models import Max
 
 
 def collect_team_data():
-    teams = Team.objects.filter(is_banned=False)
+    teams = Team.objects.filter(is_banned=False).annotate(
+        last_jeopardy_at=Max("solves__solved_at"),
+    )
+
     team_data = []
     for team in teams:
         team_data.append({
@@ -18,9 +22,9 @@ def collect_team_data():
             "team_name": team.team_name,
             "jeopardy_score": team.team_score,
             "mileage": team.mileage,
-            "koth_score": Decimal("0"), #koth앱 생기면 SUM(koth점수)로 수정
-            "jeopardy_solved_at": None, #solves앱 생기면 MAX(solves.solved_at)로 수정
-            "koth_solved_at": None,
+            "koth_score": Decimal("0"),         
+            "jeopardy_solved_at": team.last_jeopardy_at,
+            "koth_solved_at": None,             
         })
     return team_data
 
