@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 from django.core.cache import cache
 from django.core.management import call_command
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -24,6 +24,17 @@ from apps.challenge.models import Challenge
 from apps.teams.models import MileageHistory
 
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
+
+
+@override_settings(DEBUG=False)
+class BoardDebugRouteTestCase(SimpleTestCase):
+    def test_debug_routes_and_dashboard_are_not_exposed_when_debug_is_disabled(self):
+        self.assertEqual(self.client.get("/").status_code, 404)
+
+        for path in ("/board/_debug/solve", "/board/_debug/release_quarantine"):
+            with self.subTest(path=path):
+                response = self.client.post(path, data={}, content_type="application/json")
+                self.assertEqual(response.status_code, 404)
 
 
 @override_settings(CACHES=LOCMEM)
