@@ -1,0 +1,708 @@
+{% load static %}
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MSG CTF Preview</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f7f8;
+      --panel: #ffffff;
+      --ink: #172026;
+      --muted: #64727c;
+      --line: #dbe3e7;
+      --start: #14a06f;
+      --challenge: #2d6cdf;
+      --chance: #c27a16;
+      --airport: #5b63c7;
+      --quarantine: #b84040;
+      --roulette: #16889a;
+      --good: #148f5a;
+      --bad: #b84040;
+      --warn: #b46b14;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Arial, "Malgun Gothic", sans-serif;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 18px 24px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 22px;
+      font-weight: 700;
+    }
+
+    button {
+      min-height: 36px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #172026;
+      color: #fff;
+      padding: 0 14px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    button.secondary {
+      background: #fff;
+      color: var(--ink);
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.55;
+    }
+
+    main {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 380px;
+      gap: 18px;
+      padding: 18px;
+    }
+
+    section {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+    }
+
+    .section-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    h2 {
+      margin: 0;
+      font-size: 16px;
+    }
+
+    .status {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .status.good {
+      color: var(--good);
+      font-weight: 700;
+    }
+
+    .status.bad {
+      color: var(--bad);
+      font-weight: 700;
+    }
+
+    .stack {
+      display: grid;
+      gap: 18px;
+    }
+
+    .form-grid {
+      display: grid;
+      gap: 10px;
+    }
+
+    label {
+      display: grid;
+      gap: 5px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    input {
+      width: 100%;
+      min-height: 38px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 0 10px;
+      color: var(--ink);
+      font: inherit;
+    }
+
+    .actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .user-box {
+      display: grid;
+      gap: 6px;
+      margin-top: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfd;
+      padding: 10px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .user-box strong {
+      color: var(--ink);
+      font-size: 14px;
+    }
+
+    .timer-display {
+      margin-top: 4px;
+      font-size: 34px;
+      line-height: 1.1;
+      font-weight: 800;
+      color: #173c4b;
+    }
+
+    .timer-meta {
+      display: grid;
+      gap: 5px;
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
+    .timer-state {
+      display: inline-flex;
+      align-items: center;
+      width: fit-content;
+      min-height: 24px;
+      margin-top: 10px;
+      border-radius: 999px;
+      background: #eef3f6;
+      color: #33434d;
+      padding: 0 8px;
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .board {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(72px, 1fr));
+      gap: 8px;
+    }
+
+    .cell {
+      min-height: 88px;
+      border: 1px solid var(--line);
+      border-left: 6px solid var(--challenge);
+      border-radius: 8px;
+      padding: 10px;
+      background: #fbfcfd;
+    }
+
+    .cell.START {
+      border-left-color: var(--start);
+    }
+
+    .cell.CHANCE {
+      border-left-color: var(--chance);
+    }
+
+    .cell.AIRPORT {
+      border-left-color: var(--airport);
+    }
+
+    .cell.QUARANTINE {
+      border-left-color: var(--quarantine);
+    }
+
+    .cell.ROULETTE {
+      border-left-color: var(--roulette);
+    }
+
+    .index {
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .name {
+      margin-top: 6px;
+      font-size: 14px;
+      font-weight: 700;
+      word-break: keep-all;
+    }
+
+    .meta {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .legend {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    .legend span {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .swatch {
+      width: 12px;
+      height: 12px;
+      flex: 0 0 auto;
+      border-radius: 3px;
+      background: var(--challenge);
+    }
+
+    .cards {
+      display: grid;
+      gap: 10px;
+      max-height: 320px;
+      overflow: auto;
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      background: #fbfcfd;
+    }
+
+    .card-title {
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .card-desc {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      margin-top: 8px;
+      border-radius: 999px;
+      background: #eef3f6;
+      color: #33434d;
+      padding: 0 8px;
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    pre {
+      max-height: 260px;
+      overflow: auto;
+      margin: 12px 0 0;
+      border-radius: 8px;
+      background: #111820;
+      color: #d9e5ec;
+      padding: 12px;
+      font-size: 12px;
+    }
+
+    @media (max-width: 980px) {
+      main {
+        grid-template-columns: 1fr;
+      }
+
+      .board {
+        grid-template-columns: repeat(4, minmax(72px, 1fr));
+      }
+    }
+
+    @media (max-width: 560px) {
+      header {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .board {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .legend {
+        grid-template-columns: repeat(2, 1fr);
+      }
+
+      .actions {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>MSG CTF Preview</h1>
+      <div class="status" id="serverStatus">로컬 API 확인 중</div>
+    </div>
+    <div>
+      <button type="button" class="secondary" id="refreshButton">전체 갱신</button>
+    </div>
+  </header>
+
+  <main>
+    <section>
+      <div class="section-head">
+        <h2>보드판</h2>
+        <div class="status" id="boardSummary">-</div>
+      </div>
+      <div class="board" id="board"></div>
+      <div class="legend">
+        <span><i class="swatch" style="background: var(--start)"></i>START</span>
+        <span><i class="swatch" style="background: var(--challenge)"></i>CHALLENGE</span>
+        <span><i class="swatch" style="background: var(--chance)"></i>CHANCE</span>
+        <span><i class="swatch" style="background: var(--airport)"></i>AIRPORT</span>
+        <span><i class="swatch" style="background: var(--quarantine)"></i>QUARANTINE</span>
+        <span><i class="swatch" style="background: var(--roulette)"></i>ROULETTE</span>
+      </div>
+    </section>
+
+    <aside class="stack">
+      <section>
+        <div class="section-head">
+          <h2>로그인</h2>
+          <div class="status" id="authStatus">토큰 없음</div>
+        </div>
+        <form class="form-grid" id="loginForm">
+          <label>
+            아이디
+            <input id="loginIdInput" name="login_id" autocomplete="username" required>
+          </label>
+          <label>
+            비밀번호
+            <input id="passwordInput" name="password" type="password" autocomplete="current-password" required>
+          </label>
+          <div class="actions">
+            <button type="submit">로그인</button>
+            <button type="button" class="secondary" id="logoutButton">로그아웃</button>
+          </div>
+        </form>
+        <div class="user-box" id="userBox">로그인하면 내 정보가 표시됩니다.</div>
+      </section>
+
+      <section>
+        <div class="section-head">
+          <h2>타이머</h2>
+          <button type="button" class="secondary" id="timerButton">갱신</button>
+        </div>
+        <div class="timer-display" id="timerDisplay">--:--:--</div>
+        <span class="timer-state" id="timerState">대기</span>
+        <div class="timer-meta" id="timerMeta"></div>
+      </section>
+
+      <section>
+        <div class="section-head">
+          <h2>찬스카드</h2>
+          <div class="status" id="cardSummary">-</div>
+        </div>
+        <div class="cards" id="cards"></div>
+      </section>
+
+      <section>
+        <div class="section-head">
+          <h2>응답</h2>
+          <div class="status">/api/v1</div>
+        </div>
+        <pre id="rawOutput">{}</pre>
+      </section>
+    </aside>
+  </main>
+
+  <script>
+    const boardEl = document.getElementById("board");
+    const cardsEl = document.getElementById("cards");
+    const rawOutputEl = document.getElementById("rawOutput");
+    const serverStatusEl = document.getElementById("serverStatus");
+    const boardSummaryEl = document.getElementById("boardSummary");
+    const cardSummaryEl = document.getElementById("cardSummary");
+    const refreshButton = document.getElementById("refreshButton");
+    const loginForm = document.getElementById("loginForm");
+    const loginIdInput = document.getElementById("loginIdInput");
+    const passwordInput = document.getElementById("passwordInput");
+    const logoutButton = document.getElementById("logoutButton");
+    const authStatusEl = document.getElementById("authStatus");
+    const userBoxEl = document.getElementById("userBox");
+    const timerButton = document.getElementById("timerButton");
+    const timerDisplayEl = document.getElementById("timerDisplay");
+    const timerStateEl = document.getElementById("timerState");
+    const timerMetaEl = document.getElementById("timerMeta");
+
+    const tokenStore = {
+      access: localStorage.getItem("msg_preview_access_token") || "",
+      refresh: localStorage.getItem("msg_preview_refresh_token") || "",
+    };
+
+    function setRaw(label, body) {
+      rawOutputEl.textContent = `${label}
+${JSON.stringify(body, null, 2)}`;
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    function setAuthStatus(text, tone) {
+      authStatusEl.textContent = text;
+      authStatusEl.className = `status ${tone || ""}`.trim();
+    }
+
+    function saveTokens(access, refresh) {
+      tokenStore.access = access || "";
+      tokenStore.refresh = refresh || "";
+      if (tokenStore.access) {
+        localStorage.setItem("msg_preview_access_token", tokenStore.access);
+      } else {
+        localStorage.removeItem("msg_preview_access_token");
+      }
+      if (tokenStore.refresh) {
+        localStorage.setItem("msg_preview_refresh_token", tokenStore.refresh);
+      } else {
+        localStorage.removeItem("msg_preview_refresh_token");
+      }
+    }
+
+    function renderSignedOut() {
+      setAuthStatus("토큰 없음", "");
+      userBoxEl.textContent = "로그인하면 내 정보가 표시됩니다.";
+      logoutButton.disabled = true;
+    }
+
+    function renderUser(user) {
+      setAuthStatus("로그인됨", "good");
+      logoutButton.disabled = false;
+      userBoxEl.innerHTML = `
+        <strong>${escapeHtml(user.nickname || user.login_id || "사용자")}</strong>
+        <span>role: ${escapeHtml(user.role || "-")}</span>
+        <span>team: ${escapeHtml(user.team_name || "-")}</span>
+        <span>leader: ${user.is_leader ? "true" : "false"}</span>
+      `;
+    }
+
+    function renderBoard(cells) {
+      boardEl.innerHTML = "";
+      cells.forEach((cell) => {
+        const item = document.createElement("article");
+        item.className = `cell ${cell.type}`;
+        item.innerHTML = `
+          <div class="index">#${escapeHtml(cell.cell_index)}</div>
+          <div class="name">${escapeHtml(cell.name)}</div>
+          <div class="meta">${escapeHtml(cell.type)}${cell.difficulty ? `  ${escapeHtml(cell.difficulty)}` : ""}</div>
+        `;
+        boardEl.appendChild(item);
+      });
+    }
+
+    function renderCards(cards) {
+      cardsEl.innerHTML = "";
+      cards.forEach((card) => {
+        const item = document.createElement("article");
+        item.className = "card";
+        item.innerHTML = `
+          <div class="card-title">${escapeHtml(card.name)}</div>
+          <div class="card-desc">${escapeHtml(card.description || "")}</div>
+          <span class="pill">${escapeHtml(card.effect)}  ${escapeHtml(card.usage_timing)}</span>
+        `;
+        cardsEl.appendChild(item);
+      });
+    }
+
+    function renderTimer(data) {
+      if (!data) {
+        timerDisplayEl.textContent = "--:--:--";
+        timerStateEl.textContent = "활성 대회 없음";
+        timerMetaEl.textContent = "";
+        return;
+      }
+      timerDisplayEl.textContent = data.remaining_display || "--:--:--";
+      timerStateEl.textContent = data.status || "UNKNOWN";
+      timerMetaEl.innerHTML = `
+        <span>${escapeHtml(data.name || "-")}</span>
+        <span>start: ${escapeHtml(data.start_time || "-")}</span>
+        <span>end: ${escapeHtml(data.end_time || "-")}</span>
+        <span>remaining_seconds: ${escapeHtml(data.remaining_seconds ?? "-")}</span>
+      `;
+    }
+
+    async function fetchJson(path, options = {}) {
+      const headers = {
+        Accept: "application/json",
+        ...(options.body ? { "Content-Type": "application/json" } : {}),
+        ...(options.auth && tokenStore.access ? { Authorization: `Bearer ${tokenStore.access}` } : {}),
+        ...(options.headers || {}),
+      };
+      const response = await fetch(path, { ...options, headers });
+      const body = await response.json();
+      if (!response.ok) {
+        throw body;
+      }
+      return body;
+    }
+
+    async function loadMe() {
+      if (!tokenStore.access) {
+        renderSignedOut();
+        return;
+      }
+      try {
+        const response = await fetchJson("/api/v1/auth/me", { auth: true });
+        renderUser(response.data || {});
+        setRaw("GET /api/v1/auth/me", response);
+      } catch (error) {
+        saveTokens("", "");
+        renderSignedOut();
+        setAuthStatus("토큰 만료", "bad");
+        setRaw("GET /api/v1/auth/me", error);
+      }
+    }
+
+    async function loadTimer() {
+      try {
+        const response = await fetchJson("/api/v1/timer");
+        renderTimer(response.data);
+        setRaw("GET /api/v1/timer", response);
+      } catch (error) {
+        timerDisplayEl.textContent = "--:--:--";
+        timerStateEl.textContent = "요청 실패";
+        timerMetaEl.textContent = "";
+        setRaw("GET /api/v1/timer", error);
+      }
+    }
+
+    async function loadPreview() {
+      serverStatusEl.textContent = "로컬 API 요청 중";
+      try {
+        const [boardResponse, cardsResponse] = await Promise.all([
+          fetchJson("/api/v1/board"),
+          fetchJson("/api/v1/board/chance/catalog"),
+        ]);
+
+        const cells = boardResponse.data?.cells || [];
+        const cards = cardsResponse.data?.cards || [];
+        renderBoard(cells);
+        renderCards(cards);
+        boardSummaryEl.textContent = `${cells.length}칸`;
+        cardSummaryEl.textContent = `${cards.length}장`;
+        serverStatusEl.textContent = "로컬 API 연결됨";
+        setRaw("GET /api/v1/board", boardResponse);
+      } catch (error) {
+        serverStatusEl.textContent = "로컬 API 연결 실패";
+        boardSummaryEl.textContent = "-";
+        cardSummaryEl.textContent = "-";
+        boardEl.innerHTML = "";
+        cardsEl.innerHTML = "";
+        setRaw("ERROR", { message: error.message || error.message });
+      }
+    }
+
+    loginForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      setAuthStatus("로그인 중", "");
+      try {
+        const response = await fetchJson("/api/v1/auth/login", {
+          method: "POST",
+          body: JSON.stringify({
+            login_id: loginIdInput.value,
+            password: passwordInput.value,
+          }),
+        });
+        saveTokens(response.data?.access_token, response.data?.refresh_token);
+        passwordInput.value = "";
+        renderUser(response.data || {});
+        setRaw("POST /api/v1/auth/login", response);
+      } catch (error) {
+        saveTokens("", "");
+        renderSignedOut();
+        setAuthStatus("로그인 실패", "bad");
+        setRaw("POST /api/v1/auth/login", error);
+      }
+    });
+
+    logoutButton.addEventListener("click", async () => {
+      if (!tokenStore.access || !tokenStore.refresh) {
+        saveTokens("", "");
+        renderSignedOut();
+        return;
+      }
+      try {
+        const response = await fetchJson("/api/v1/auth/logout", {
+          method: "POST",
+          auth: true,
+          body: JSON.stringify({ refresh_token: tokenStore.refresh }),
+        });
+        setRaw("POST /api/v1/auth/logout", response);
+      } catch (error) {
+        setRaw("POST /api/v1/auth/logout", error);
+      } finally {
+        saveTokens("", "");
+        renderSignedOut();
+      }
+    });
+
+    refreshButton.addEventListener("click", () => {
+      loadPreview();
+      loadTimer();
+      loadMe();
+    });
+    timerButton.addEventListener("click", loadTimer);
+    renderSignedOut();
+    loadPreview();
+    loadTimer();
+    loadMe();
+    window.setInterval(loadTimer, 1000);
+  </script>
+<style>
+.board-shell{display:grid;gap:18px}.board-state{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.metric{min-height:64px;border:1px solid var(--line);border-radius:6px;background:#fbfcfd;padding:9px}.metric span{display:block;color:var(--muted);font-size:11px}.metric strong{display:block;margin-top:6px;font-size:15px;overflow-wrap:anywhere}.player-marker{display:inline-flex;align-items:center;justify-content:center;min-width:26px;min-height:22px;margin-top:8px;border-radius:4px;background:#172026;color:#fff;font-size:11px;font-weight:700}.cell.current{outline:3px solid #172026;outline-offset:1px}.cell.consumed{opacity:.48}.controls{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.control-group{border:1px solid var(--line);border-radius:6px;padding:12px}.control-group h3{margin:0 0 10px;font-size:13px}.control-group p{margin:0 0 10px;color:var(--muted);font-size:12px;line-height:1.4}.button-row{display:flex;flex-wrap:wrap;gap:8px}.button-row button{flex:1 1 120px}.inline-form{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;margin-top:8px}.inline-form input,.inline-form select{min-width:0;min-height:36px;border:1px solid var(--line);border-radius:6px;padding:0 10px;font:inherit;color:var(--ink);background:#fff}.held-cards,.challenge-list,.opened-list{display:grid;gap:8px;margin-top:10px}.compact-item{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;border:1px solid var(--line);border-radius:6px;padding:10px;background:#fbfcfd}.compact-item strong,.compact-item span{display:block}.compact-item span{margin-top:4px;color:var(--muted);font-size:12px}.event-log{min-height:20px;margin-top:10px;color:var(--muted);font-size:12px;line-height:1.45}.event-log.good{color:var(--good)}.event-log.bad{color:var(--bad)}@media(max-width:980px){.controls{grid-template-columns:1fr}}@media(max-width:560px){.board-state{grid-template-columns:repeat(2,minmax(0,1fr)}}
+</style>
+<script>
+(()=>{const boardSection=document.querySelector("main > section"),shell=document.createElement("div");shell.className="board-shell";boardSection.before(shell);shell.append(boardSection);const controls=document.createElement("section");controls.id="boardControls";controls.innerHTML=`
+<div class="section-head"><h2>Board verification</h2><button type="button" class="secondary" id="boardStateRefresh">Refresh state</button></div><div class="board-state" id="boardState"></div><div class="controls">
+<div class="control-group"><h3>Dice</h3><p id="diceStatusText">Sign in to inspect the roll state.</p><div class="button-row"><button type="button" class="secondary" id="diceStatusButton">Roll status</button><button type="button" id="diceRollButton">Roll dice</button><button type="button" class="secondary" id="diceConfirmButton">Confirm move</button></div></div>
+<div class="control-group"><h3>Current cell</h3><p id="currentCellText">Challenge candidates appear for a challenge cell.</p><div class="button-row"><button type="button" class="secondary" id="currentCellButton">Get current cell</button><button type="button" id="drawChanceButton">Draw chance card</button></div><div class="challenge-list" id="challengeCandidates"></div></div>
+<div class="control-group"><h3>Held chance cards</h3><p>Only cards usable in the current state are enabled.</p><div class="inline-form"><input id="cardDestinationInput" type="number" min="1" max="36" value="2" aria-label="Card destination"><select id="cardOffsetInput" aria-label="Card offset"><option value="-3">-3 cells</option><option value="-2">-2 cells</option><option value="-1">-1 cell</option><option value="1" selected>+1 cell</option><option value="2">+2 cells</option><option value="3">+3 cells</option></select></div><div class="held-cards" id="heldCards"></div><div class="button-row" style="margin-top:8px"><button type="button" class="secondary" id="chanceFirstButton">Confirm first roll</button><button type="button" class="secondary" id="chanceSecondButton">Confirm second roll</button></div></div>
+<div class="control-group"><h3>Special cells</h3><p>These actions succeed only at their matching cell.</p><div class="inline-form"><input id="airportDestinationInput" type="number" min="1" max="36" value="2" aria-label="Airport destination"><button type="button" id="airportMoveButton">Airport move</button></div><div class="inline-form"><input id="quarantineCodeInput" placeholder="Escape code" aria-label="Quarantine escape code"><button type="button" id="quarantineEscapeButton">Escape</button></div><div class="button-row" style="margin-top:8px"><button type="button" id="rouletteButton">Spin roulette</button></div></div>
+<div class="control-group"><h3>Opened challenges</h3><p id="openedSummary">Check the opened challenge history.</p><div class="button-row"><button type="button" class="secondary" id="openedChallengesButton">Load challenges</button><button type="button" class="secondary" id="debugSolveButton">Local: solve active</button><button type="button" class="secondary" id="debugReleaseButton">Local: release quarantine</button></div><div class="opened-list" id="openedChallenges"></div></div>
+</div><div class="event-log" id="boardEventLog">Sign in to verify all board API calls from this page.</div><pre id="boardRaw">{}</pre>`;shell.append(controls);
+const boardRawEl=document.getElementById("boardRaw");const catalogById=new Map(),stateEl=document.getElementById("boardState"),diceEl=document.getElementById("diceStatusText"),currentEl=document.getElementById("currentCellText"),candidatesEl=document.getElementById("challengeCandidates"),heldEl=document.getElementById("heldCards"),openedEl=document.getElementById("openedChallenges"),openedSummaryEl=document.getElementById("openedSummary"),eventEl=document.getElementById("boardEventLog");
+const notice=(text,tone="")=>{eventEl.textContent=text;eventEl.className=`event-log ${tone}`.trim()};const key=()=>window.crypto?.randomUUID?.()||`${Date.now()}-${Math.random().toString(16).slice(2)}`;
+async function request(path,method="GET",payload){try{const response=await fetchJson(path,{method,auth:true,body:payload===undefined?undefined:JSON.stringify(payload),headers:method==="GET"?{}:{"Idempotency-Key":key()}});setRaw(`${method} ${path}`,response);boardRawEl.textContent=`${method} ${path}\n${JSON.stringify(response,null,2)}`;notice(`${method} ${path} succeeded`,"good");await loadState();return response.data}catch(error){setRaw(`${method} ${path}`,error);boardRawEl.textContent=`${method} ${path}\n${JSON.stringify(error,null,2)}`;notice(`${method} ${path} failed: ${error.message||error.code||"request error"}`,"bad");await loadState(false);return null}}
+function renderState(data){const values=[["Position",`#${data.position||"-"} ${data.type||""}`],["Dice left",data.dice_rolls_left??"-"],["Quarantine",data.is_quarantined?"locked":"clear"],["Board",data.board_completed?"complete":"in progress"],["Airport",data.airport_move_used?"used":"available"],["Held cards",(data.chance_cards||[]).filter(card=>!card.used&&!card.discarded).length],["Active challenge",data.active_challenge?"active":"none"],["Next recharge",data.next_dice_reset_at||"-"]];stateEl.innerHTML=values.map(([label,value])=>`<div class="metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");const consumed=new Set(data.consumed_cell_indexes||[]);document.querySelectorAll("#board .cell").forEach(cell=>{const index=Number((cell.querySelector(".index")?.textContent||"").replace("#",""));cell.classList.toggle("current",index===data.position);cell.classList.toggle("consumed",consumed.has(index));cell.querySelector(".player-marker")?.remove();if(index===data.position){const marker=document.createElement("span");marker.className="player-marker";marker.textContent="MY TEAM";cell.append(marker)}});renderCards(data.chance_cards||[])}
+function renderCards(cards){const held=cards.filter(card=>!card.used&&!card.discarded);if(!held.length){heldEl.innerHTML="<div class=\"status\">No held cards.</div>";return}heldEl.innerHTML="";held.forEach(card=>{const info=catalogById.get(card.card_id)||{},item=document.createElement("div"),detail=document.createElement("div"),button=document.createElement("button");item.className="compact-item";detail.innerHTML=`<strong>${escapeHtml(info.name||card.card_id)}</strong><span>${escapeHtml(info.effect||"-")} | ${card.usable_now?"usable now":"not usable now"}</span>`;button.type="button";button.textContent="Use card";button.disabled=!card.usable_now;button.addEventListener("click",()=>{const payload={card_id:card.card_id};if(info.effect==="FREE_MOVE")payload.destination_index=Number(document.getElementById("cardDestinationInput").value);if(info.effect==="MOVE_OFFSET")payload.offset=Number(document.getElementById("cardOffsetInput").value);request("/api/v1/board/chance/use","POST",payload)});item.append(detail,button);heldEl.append(item)});if(held.length>=2){const discard=document.createElement("div");discard.className="button-row";held.forEach(card=>{const button=document.createElement("button");button.type="button";button.className="secondary";button.textContent=`Discard ${catalogById.get(card.card_id)?.name||card.card_id}`;button.addEventListener("click",()=>request("/api/v1/board/chance/discard","POST",{card_id:card.card_id}));discard.append(button)});heldEl.append(discard)}}
+function renderCandidates(data){const candidates=data.challenge_candidates||[];currentEl.textContent=`#${data.cell_index} ${data.type} | ${candidates.length} candidate(s)`;candidatesEl.innerHTML="";candidates.forEach(candidate=>{const item=document.createElement("div"),button=document.createElement("button");item.className="compact-item";item.innerHTML=`<div><strong>${escapeHtml(candidate.title)}</strong><span>${escapeHtml(candidate.category)} | ${escapeHtml(candidate.club_name)} | ${escapeHtml(candidate.score)} points</span></div>`;button.type="button";button.textContent="Open challenge";button.addEventListener("click",()=>request("/api/v1/board/cell/open","POST",{challenge_id:candidate.challenge_id}));item.append(button);candidatesEl.append(item)})}
+function renderOpened(data){const challenges=data.opened_challenges||[];openedSummaryEl.textContent=`Total ${data.total_count||0} | Solved ${data.solved_count||0} | Score ${data.total_score||0}`;openedEl.innerHTML=challenges.map(challenge=>`<div class="compact-item"><div><strong>${escapeHtml(challenge.title)}</strong><span>#${escapeHtml(challenge.cell_index)} | ${escapeHtml(challenge.category)} | ${challenge.is_solved?"solved":"active"}</span></div></div>`).join("")||"<div class=\"status\">No opened challenges.</div>"}
+async function loadState(showError=true){if(!tokenStore.access){stateEl.innerHTML="<div class=\"status\">Sign in required.</div>";return}try{const[me,dice,opened]=await Promise.all([fetchJson("/api/v1/board/me",{auth:true}),fetchJson("/api/v1/board/dice/status",{auth:true}),fetchJson("/api/v1/board/opened_challenges",{auth:true})]);renderState(me.data||{});diceEl.textContent=`Roll ${dice.data?.can_roll?"available":"blocked"} | ${dice.data?.blocked_reason||"no block"} | ${dice.data?.dice_rolls_left??"-"} left`;renderOpened(opened.data||{});try{const current=await fetchJson("/api/v1/board/cell/current",{auth:true});renderCandidates(current.data||{})}catch(error){if(error.code!=="PENDING_CONFIRM"&&showError)notice(`Current cell failed: ${error.message||error.code||"request error"}`,"bad")}}catch(error){if(showError)notice(`Board state failed: ${error.message||error.code||"request error"}`,"bad")}}
+async function loadCatalog(){try{const response=await fetchJson("/api/v1/board/chance/catalog");(response.data?.cards||[]).forEach(card=>catalogById.set(card.card_id,card))}catch(_){notice("Chance catalog failed to load.","bad")}}
+[["boardStateRefresh",()=>loadState()],["diceStatusButton",()=>request("/api/v1/board/dice/status")],["diceRollButton",()=>request("/api/v1/board/dice/roll","POST",{})],["diceConfirmButton",()=>request("/api/v1/board/dice/confirm","POST",{})],["currentCellButton",()=>request("/api/v1/board/cell/current")],["drawChanceButton",()=>request("/api/v1/board/chance/now","POST",{})],["chanceFirstButton",()=>request("/api/v1/board/chance/confirm","POST",{choice:"FIRST"})],["chanceSecondButton",()=>request("/api/v1/board/chance/confirm","POST",{choice:"SECOND"})],["airportMoveButton",()=>request("/api/v1/board/airport/move","POST",{destination_index:Number(document.getElementById("airportDestinationInput").value)})],["quarantineEscapeButton",()=>request("/api/v1/board/quarantine/escape","POST",{code:document.getElementById("quarantineCodeInput").value})],["rouletteButton",()=>request("/api/v1/board/roulette/spin","POST",{})],["openedChallengesButton",()=>request("/api/v1/board/opened_challenges")],["debugSolveButton",()=>request("/board/_debug/solve","POST",{})],["debugReleaseButton",()=>request("/board/_debug/release_quarantine","POST",{})]].forEach(([id,handler])=>document.getElementById(id).addEventListener("click",handler));loginForm.addEventListener("submit",()=>window.setTimeout(loadState,250));logoutButton.addEventListener("click",()=>window.setTimeout(loadState,100));refreshButton.addEventListener("click",loadState);loadCatalog().then(loadState)})();
+</script>
+</body>
+</html>
