@@ -101,7 +101,25 @@ def _validated_results(challenge, period, payload):
     teams = Team.objects.in_bulk([team_id for team_id, _ in parsed], field_name="team_id")
     if len(teams) != len(parsed):
         raise ScoreFetchError("score response contains an unknown team")
-    return [(teams[team_id], rank) for team_id, rank in parsed if not teams[team_id].is_banned]
+    results = [(teams[team_id], rank) for team_id, rank in parsed if not teams[team_id].is_banned]
+    _validate_rank_sequence(results)
+    return results
+
+
+def _validate_rank_sequence(results):
+    """입력 순위가 표준 경쟁 순위(1, 1, 3)를 따르는지 검증한다."""
+    ranks = sorted(rank for _, rank in results)
+    expected_rank = 1
+    index = 0
+    while index < len(ranks):
+        rank = ranks[index]
+        if rank != expected_rank:
+            raise ScoreFetchError("score result ranks must use standard competition ranking")
+        end = index + 1
+        while end < len(ranks) and ranks[end] == rank:
+            end += 1
+        expected_rank += end - index
+        index = end
 
 
 def _awards(results):

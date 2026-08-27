@@ -165,3 +165,13 @@ class KothScorePollingTests(TestCase):
         self.assertTrue(poll_challenge_period(self.challenge, self.period))
         self.assertEqual(KothSolve.objects.count(), 0)
         self.assertEqual(KothScorePeriod.objects.get().status, KothScorePeriodStatus.APPLIED)
+
+    @patch("apps.koth.services._request_scores")
+    def test_invalid_tie_rank_sequence_marks_period_failed(self, request_scores):
+        payload = self.payload()
+        payload["data"]["results"][2]["period_rank"] = 2
+        request_scores.return_value = payload
+
+        with self.assertRaises(ScoreFetchError):
+            poll_challenge_period(self.challenge, self.period)
+        self.assertEqual(KothScorePeriod.objects.get().status, KothScorePeriodStatus.FAILED)

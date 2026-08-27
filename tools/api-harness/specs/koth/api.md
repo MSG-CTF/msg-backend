@@ -47,7 +47,7 @@ Status Code: 500
 
 ## GET /api/v1/koth/clubs/{club_id}
 
-인증 없음. `club_id`는 UUID 문자열이다.
+인증 없음. club_id는 UUID 문자열이다.
 
 ### Response
 
@@ -125,7 +125,7 @@ Status Code: 200, 401
 
 ## GET /api/v1/koth/team_token
 
-Authorization: Bearer JWT 필요. 같은 팀의 모든 구성원은 같은 `team_token`을 받는다.
+Authorization: Bearer JWT 필요. 같은 팀의 모든 구성원은 같은 team_token을 받는다.
 
 ### Response
 
@@ -146,7 +146,7 @@ Status Code: 200, 401, 404
 
 ## POST /internal/koth/team_tokens/verify
 
-문제 서버 전용 API. Header `X-Internal-Token` 필요.
+문제 서버 전용 API. Header X-Internal-Token 필요.
 
 ### Request
 
@@ -172,7 +172,7 @@ Status Code: 200, 401, 404
 }
 ```
 
-검증 실패 시 `valid`는 `false`이고 `team_id`, `team_name`은 `null`이다.
+검증 실패 시 valid는 false이고 team_id, team_name은 null이다.
 
 Status Code: 200
 
@@ -192,7 +192,7 @@ Status Code: 401
 
 ## GET /internal/teams
 
-문제 서버 전용 API. Header `X-Internal-Token`과 query `koth_challenge_id`가 필요하다. 차단된 팀은 제외한다.
+문제 서버 전용 API. Header X-Internal-Token과 query koth_challenge_id가 필요하다. 차단된 팀은 제외한다.
 
 ### Request
 
@@ -217,7 +217,7 @@ Status Code: 200, 401
 
 ## GET /internal/koth/scores
 
-이 endpoint는 Django 수신 route가 아니다. 플랫폼의 `poll_koth_scores` 관리 커맨드가 KOTH 문제 서버에 15분마다 호출하는 outbound contract다. Header `X-KOTH-Internal-Token`, query `period_id`, `scored_at`을 사용한다.
+이 endpoint는 Django 수신 route가 아니다. 플랫폼의 poll_koth_scores 관리 커맨드가 KOTH 문제 서버에 15분마다 호출하는 outbound contract다. Header X-KOTH-Internal-Token, query period_id, scored_at을 사용한다.
 
 ### Request
 
@@ -243,4 +243,4 @@ Status Code: 200, 401
 }
 ```
 
-빈 구간은 `data`가 `null`이다. Status Code: 200, 400, 401, 409, 500
+빈 구간은 data가 null이다. period_rank는 표준 경쟁 순위로 반환한다. 동점 2팀이 1위면 다음 순위는 3위(1, 1, 3)이며, 순위를 건너뛰지 않는 패턴(1, 1, 2)은 허용하지 않는다. Status Code: 200, 400, 401, 409, 500
