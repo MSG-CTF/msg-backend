@@ -9,7 +9,7 @@ from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
 
 from apps.accounts.models import Team, User
-from apps.common.exceptions import InvalidRequest
+from apps.common.exceptions import InvalidRequest, TeamBanned
 from apps.common.permissions import IsAdmin
 from apps.common.response import ok
 from apps.common.utils import num
@@ -259,7 +259,6 @@ def team_mileage(request, team_id):
 @api_view(["POST"])
 @permission_classes([IsAdmin])
 def payment_checkout(request):
-    """POST /api/v1/admin/payment/checkout — QR 스캔 결제 처리."""
     raw_token = request.data.get("payment_token")
     if not raw_token or not isinstance(raw_token, str):
         raise InvalidRequest("필수 항목이 누락되었습니다: payment_token")
@@ -291,6 +290,8 @@ def payment_checkout(request):
             raise PaymentTokenExpired()
 
         team = Team.objects.select_for_update().get(pk=token.team_id)
+        if team.is_banned:
+            raise TeamBanned()
         if team.mileage < amount:
             raise InsufficientMileage(
                 data={"current_mileage": team.mileage, "requested_amount": amount}
@@ -341,9 +342,8 @@ def payment_history(request):
         try:
             uuid.UUID(str(team_id))
         except (ValueError, TypeError):
-            queryset = queryset.none()
-        else:
-            queryset = queryset.filter(team_id=team_id)
+            raise InvalidRequest("team_id 형식이 올바르지 않습니다")
+        queryset = queryset.filter(team_id=team_id)
 
     total_count = queryset.count()
 

@@ -392,3 +392,21 @@ class PaymentTests(TestCase):
             r for r in res.data["data"]["history"] if r["history_id"] == hid
         )
         self.assertTrue(purchase["is_refunded"])
+
+    def test_checkout_banned_team_blocked(self):
+        Team.objects.filter(pk=self.team.pk).update(is_banned=True, ban_reason="어뷰징")
+        self.mint_token("tok-ban")
+        res = self.client.post(
+            "/api/v1/admin/payment/checkout",
+            {"payment_token": "tok-ban", "amount": 30, "item_name": "x"},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 403)
+        self.assertEqual(res.data["code"], "TEAM_BANNED")
+        token = PaymentToken.objects.get(token_hash=hash_token("tok-ban"))
+        self.assertEqual(token.status, PaymentTokenStatus.ACTIVE)
+
+    def test_history_invalid_team_id_400(self):
+        res = self.client.get("/api/v1/admin/payment/history?team_id=not-a-uuid")
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data["code"], "INVALID_REQUEST")
