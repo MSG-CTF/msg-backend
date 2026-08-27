@@ -8,7 +8,7 @@
 
 ### Response
 
-```json
+~~~json
 {
   "code": "SUCCESS",
   "message": "성공",
@@ -33,7 +33,7 @@
     "active_count": 2
   }
 }
-```
+~~~
 
 Status Code: 200
 
@@ -41,9 +41,9 @@ Status Code: 200
 
 Status Code: 500
 
-```json
+~~~json
 {"code":"KOTH_CHALLENGES_LOAD_FAILED","message":"KOTH 문제 목록을 불러오지 못했습니다.","data":null}
-```
+~~~
 
 ## GET /api/v1/koth/clubs/{club_id}
 
@@ -51,7 +51,7 @@ Status Code: 500
 
 ### Response
 
-```json
+~~~json
 {
   "code": "SUCCESS",
   "message": "성공",
@@ -72,7 +72,7 @@ Status Code: 500
     "challenge_count": 1
   }
 }
-```
+~~~
 
 Status Code: 200
 
@@ -80,15 +80,15 @@ Status Code: 200
 
 Status Code: 400
 
-```json
+~~~json
 {"code":"INVALID_CLUB_ID","message":"club_id 형식이 올바르지 않습니다.","data":null}
-```
+~~~
 
 Status Code: 404
 
-```json
+~~~json
 {"code":"CLUB_NOT_FOUND","message":"존재하지 않는 동아리입니다.","data":null}
-```
+~~~
 
 ## GET /api/v1/koth/me
 
@@ -96,7 +96,7 @@ Authorization: Bearer JWT 필요.
 
 ### Response
 
-```json
+~~~json
 {
   "code": "SUCCESS",
   "message": "성공",
@@ -119,7 +119,7 @@ Authorization: Bearer JWT 필요.
     "active_count": 2
   }
 }
-```
+~~~
 
 Status Code: 200, 401
 
@@ -129,7 +129,7 @@ Authorization: Bearer JWT 필요. 같은 팀의 모든 구성원은 같은 team_
 
 ### Response
 
-```json
+~~~json
 {
   "code": "SUCCESS",
   "message": "성공",
@@ -140,7 +140,7 @@ Authorization: Bearer JWT 필요. 같은 팀의 모든 구성원은 같은 team_
     "issued_at": "2026-07-31T10:00:00Z"
   }
 }
-```
+~~~
 
 Status Code: 200, 401, 404
 
@@ -150,16 +150,16 @@ Status Code: 200, 401, 404
 
 ### Request
 
-```json
+~~~json
 {
   "koth_challenge_id": "018f3f1e-0700-7a91-a30b-630000000010",
   "team_token": "koth_example_token"
 }
-```
+~~~
 
 ### Response
 
-```json
+~~~json
 {
   "code": "SUCCESS",
   "message": "성공",
@@ -170,7 +170,7 @@ Status Code: 200, 401, 404
     "koth_challenge_id": "018f3f1e-0700-7a91-a30b-630000000010"
   }
 }
-```
+~~~
 
 검증 실패 시 valid는 false이고 team_id, team_name은 null이다.
 
@@ -180,15 +180,15 @@ Status Code: 200
 
 Status Code: 400
 
-```json
+~~~json
 {"code":"INVALID_REQUEST","message":"요청 값이 올바르지 않습니다","data":null}
-```
+~~~
 
 Status Code: 401
 
-```json
+~~~json
 {"code":"INVALID_INTERNAL_TOKEN","message":"문제 서버 인증에 실패했습니다.","data":null}
-```
+~~~
 
 ## GET /internal/teams
 
@@ -196,13 +196,13 @@ Status Code: 401
 
 ### Request
 
-```json
+~~~json
 {"koth_challenge_id":"018f3f1e-0700-7a91-a30b-630000000010"}
-```
+~~~
 
 ### Response
 
-```json
+~~~json
 {
   "code": "SUCCESS",
   "message": "성공",
@@ -211,7 +211,7 @@ Status Code: 401
     "total_count": 1
   }
 }
-```
+~~~
 
 Status Code: 200, 401
 
@@ -221,13 +221,13 @@ Status Code: 200, 401
 
 ### Request
 
-```json
+~~~json
 {"period_id":"2026-07-31T10:15:00Z","scored_at":"2026-07-31T10:15:00Z"}
-```
+~~~
 
 ### Response
 
-```json
+~~~json
 {
   "code": "SUCCESS",
   "message": "성공",
@@ -241,6 +241,6 @@ Status Code: 200, 401
     }]
   }
 }
-```
+~~~
 
 빈 구간은 data가 null이다. period_rank는 표준 경쟁 순위로 반환한다. 동점 2팀이 1위면 다음 순위는 3위(1, 1, 3)이며, 순위를 건너뛰지 않는 패턴(1, 1, 2)은 허용하지 않는다. Status Code: 200, 400, 401, 409, 500

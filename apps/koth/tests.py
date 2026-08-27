@@ -193,3 +193,17 @@ class KothScorePollingTests(TestCase):
         with self.assertRaises(ScoreFetchError):
             poll_challenge_period(self.challenge, self.period)
         self.assertEqual(KothScorePeriod.objects.get().status, KothScorePeriodStatus.FAILED)
+
+    @patch("apps.koth.services._request_scores")
+    def test_banned_team_in_rank_gap_does_not_fail_period(self, request_scores):
+        self.second.is_banned = True
+        self.second.save(update_fields=["is_banned"])
+        payload = self.payload()
+        payload["data"]["results"][1]["period_rank"] = 2
+        request_scores.return_value = payload
+
+        self.assertTrue(poll_challenge_period(self.challenge, self.period))
+        self.assertEqual(KothScorePeriod.objects.get().status, KothScorePeriodStatus.APPLIED)
+        self.assertEqual(KothSolve.objects.get(team=self.first).earned_score, 40)
+        self.assertEqual(KothSolve.objects.get(team=self.third).earned_score, 15)
+        self.assertFalse(KothSolve.objects.filter(team=self.second).exists())

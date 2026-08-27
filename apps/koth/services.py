@@ -98,11 +98,11 @@ def _validated_results(challenge, period, payload):
         seen_teams.add(team_id)
         parsed.append((team_id, rank))
 
+    _validate_rank_sequence(parsed)
     teams = Team.objects.in_bulk([team_id for team_id, _ in parsed], field_name="team_id")
     if len(teams) != len(parsed):
         raise ScoreFetchError("score response contains an unknown team")
     results = [(teams[team_id], rank) for team_id, rank in parsed if not teams[team_id].is_banned]
-    _validate_rank_sequence(results)
     return results
 
 
