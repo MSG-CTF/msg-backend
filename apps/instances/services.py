@@ -84,8 +84,30 @@ def get_active_instance(user):
 
 
 def get_challenge_runtime_config(challenge):
-    # 문제의 컨테이너 실행 설정을 조회한다
-    return ChallengeRuntimeConfig.objects.filter(challenge=challenge).first()
+    # 문제의 실행 설정을 현재 릴리스와 함께 조회한다
+    return (
+        ChallengeRuntimeConfig.objects
+        .select_related("current_release")
+        .filter(challenge=challenge)
+        .first()
+    )
+
+
+def resolve_release_workload(release):
+    # 현 Scheduler 계약이 받는 대표 컨테이너의 이미지와 포트를 릴리스에서 뽑는다
+    for container in release.containers.all():
+        public_ports = [
+            entry["port"] for entry in container.ports if entry.get("public")
+        ]
+        if public_ports:
+            return container.image_ref, public_ports[0]
+
+    # activate 게이트가 public 컨테이너 없는 릴리스를 막으므로 정상 흐름에서는 오지 않는다
+    raise SchedulerError(
+        "RELEASE_NOT_DEPLOYABLE",
+        "현재 릴리스에 public 컨테이너가 없습니다.",
+        500,
+    )
 
 
 def serialize_instance(instance, include_title=False, include_replaced=False):
@@ -174,31 +196,32 @@ def scheduler_error_from_response(error):
     )
 
 
-def build_scheduler_create_body(user, team, challenge, runtime_config):
-    # Scheduler 인스턴스 생성 요청 body를 만든다
+def build_scheduler_create_body(user, team, challenge, runtime_config, release):
+    # Scheduler 인스턴스 생성 요청 body를 현재 릴리스 값으로 만든다
+    container_image, container_port = resolve_release_workload(release)
     return {
         "team_id": str(team.team_id),
         "user_id": str(user.user_id),
         "challenge_id": str(challenge.challenge_id),
-        "container_image": runtime_config.container_image,
-        "container_port": runtime_config.container_port,
-        "architecture": runtime_config.architecture,
+        "container_image": container_image,
+        "container_port": container_port,
+        "architecture": release.architecture,
         "resource_profile": {
-            "cpu_millicores": runtime_config.cpu_millicores,
-            "memory_mib": runtime_config.memory_mib,
-            "ephemeral_storage_mib": runtime_config.ephemeral_storage_mib,
+            "cpu_millicores": release.cpu_millicores,
+            "memory_mib": release.memory_mib,
+            "ephemeral_storage_mib": release.ephemeral_storage_mib,
         },
         "ttl_minutes": runtime_config.ttl_minutes,
         "hard_timeout_minutes": runtime_config.hard_timeout_minutes,
     }
 
 
-def call_scheduler_create(user, team, challenge, runtime_config, auth_header=None):
+def call_scheduler_create(user, team, challenge, runtime_config, release, auth_header=None):
     # Scheduler에 인스턴스 생성을 요청한다
     return scheduler_request(
         "POST",
         "/api/instances",
-        body=build_scheduler_create_body(user, team, challenge, runtime_config),
+        body=build_scheduler_create_body(user, team, challenge, runtime_config, release),
         auth_header=auth_header,
     )
 
@@ -279,7 +302,9 @@ def update_instance_from_scheduler(instance, scheduler_data):
     return instance
 
 
-def create_instance_from_scheduler(scheduler_data, user, team, challenge=None, replaced_instance=None):
+def create_instance_from_scheduler(
+    scheduler_data, user, team, challenge=None, replaced_instance=None, release=None
+):
     # Scheduler가 발급한 instance_id로 백엔드 인스턴스 row를 만든다
     if challenge is None:
         challenge = Challenge.objects.filter(challenge_id=scheduler_data.get("challenge_id")).first()
@@ -296,6 +321,8 @@ def create_instance_from_scheduler(scheduler_data, user, team, challenge=None, r
             "expires_at": parse_scheduler_datetime(scheduler_data.get("expires_at")),
             "hard_expires_at": parse_scheduler_datetime(scheduler_data.get("hard_expires_at")),
             "replaced_instance": replaced_instance,
+            # 어떤 릴리스로 떴는지 추적하기 위한 생성 시점 스냅샷
+            "release": release,
         },
     )
     return instance
