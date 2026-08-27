@@ -27,6 +27,9 @@ POLLER_CREATED_BY = "release-poller"
 def github_request(path, token=None, timeout=10):
     # 공급망 artifact 조회용 GitHub API 호출. 응답 본문 bytes를 돌려준다
     base = settings.RELEASE_POLL_API_BASE.rstrip("/")
+    if not base.startswith(("http://", "https://")):
+        raise ReleaseValidationError("RELEASE_POLL_API_BASE는 http 또는 https 주소여야 합니다")
+
     headers = {
         "Accept": "application/vnd.github+json",
         "User-Agent": "msg-backend-release-poller",
@@ -34,7 +37,8 @@ def github_request(path, token=None, timeout=10):
     if token:
         headers["Authorization"] = "Bearer " + token
     request = Request(base + path, headers=headers)
-    with urlopen(request, timeout=timeout) as response:
+    # 위에서 scheme을 http와 https로 제한한 운영 설정만 사용한다
+    with urlopen(request, timeout=timeout) as response:  # nosec B310
         return response.read()
 
 
@@ -123,6 +127,10 @@ def poll_once(token=None):
     summary = {"registered": 0, "duplicate": 0, "unmatched": 0, "invalid": 0, "error": 0}
     try:
         artifacts = list_bundle_artifacts(token=token)
+    except ReleaseValidationError as error:
+        logger.warning("release poller 설정 오류: %s", error.message)
+        summary["error"] += 1
+        return summary
     except (HTTPError, URLError, TimeoutError, ValueError) as error:
         logger.warning("release poller artifact 목록 조회 실패: %s", error)
         summary["error"] += 1
