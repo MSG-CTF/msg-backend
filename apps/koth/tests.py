@@ -30,16 +30,21 @@ class KothApiTests(TestCase):
         self.user = User.objects.create_user(login_id="me", password="pw1234", nickname="나", team=self.team)
         self.other_user = User.objects.create_user(login_id="other", password="pw1234", nickname="상대", team=self.other)
         self.no_team_user = User.objects.create_user(login_id="none", password="pw1234", nickname="무소속")
-        self.club = KothClub.objects.create(name="MJSEC")
+        self.clubs = [
+            KothClub.objects.create(name=name)
+            for name in ("MJSEC", "ALPHA", "BRAVO", "CHARLIE", "DELTA", "ECHO")
+        ]
+        self.club = self.clubs[0]
         self.challenge = KothChallenge.objects.create(
             club=self.club, title="KOTH A", status=KothChallengeStatus.ACTIVE, open_group=1,
             inbound_internal_token_hash=hash_token("inbound-secret"),
             score_api_url="https://koth.example/internal/koth/scores", score_api_token_env="KOTH_A_TOKEN",
         )
-        self.second = KothChallenge.objects.create(
-            club=self.club, title="KOTH B", status=KothChallengeStatus.SCHEDULED, open_group=2,
-            inbound_internal_token_hash=hash_token("second-secret"),
-        )
+        for number, club in enumerate(self.clubs[1:], start=2):
+            KothChallenge.objects.create(
+                club=club, title=f"KOTH {number}", status=KothChallengeStatus.SCHEDULED,
+                open_group=number, inbound_internal_token_hash=hash_token(f"secret-{number}"),
+            )
 
     def auth(self, login_id="me"):
         response = self.client.post("/api/v1/auth/login", {"login_id": login_id, "password": "pw1234"}, format="json")
@@ -49,14 +54,18 @@ class KothApiTests(TestCase):
         KothSolve.objects.create(team=self.team, challenge=self.challenge, earned_score=Decimal("40"))
         response = self.client.get("/api/v1/koth/clubs")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["data"]["total_count"], 1)
-        self.assertEqual(response.data["data"]["challenge_count"], 2)
-        challenge = response.data["data"]["clubs"][0]["challenges"][0]
+        self.assertEqual(response.data["data"]["total_count"], 6)
+        self.assertEqual(response.data["data"]["challenge_count"], 6)
+        club = next(
+            club for club in response.data["data"]["clubs"]
+            if club["club_id"] == str(self.club.club_id)
+        )
+        challenge = club["challenges"][0]
         self.assertEqual(challenge["current_owner_team_id"], str(self.team.team_id))
         self.assertEqual(challenge["current_score"], 40)
 
         detail = self.client.get(f"/api/v1/koth/clubs/{self.club.club_id}")
-        self.assertEqual(detail.data["data"]["challenge_count"], 2)
+        self.assertEqual(detail.data["data"]["challenge_count"], 1)
         self.assertEqual(self.client.get("/api/v1/koth/clubs/not-a-uuid").data["code"], "INVALID_CLUB_ID")
         self.assertEqual(self.client.get(f"/api/v1/koth/clubs/{KothClub().club_id}").data["code"], "CLUB_NOT_FOUND")
 
@@ -67,7 +76,7 @@ class KothApiTests(TestCase):
         response = self.client.get("/api/v1/koth/me")
         self.assertEqual(response.data["data"]["total_koth_score"], 40)
         self.assertEqual(response.data["data"]["challenges"][0]["rank"], 2)
-        self.assertEqual(response.data["data"]["total_count"], 2)
+        self.assertEqual(response.data["data"]["total_count"], 6)
 
         first = self.client.get("/api/v1/koth/team_token").data["data"]["team_token"]
         User.objects.create_user(login_id="member", password="pw1234", nickname="팀원", team=self.team)

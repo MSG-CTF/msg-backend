@@ -1,6 +1,6 @@
 # KOTH API 계약 스냅샷
 
-노션 KOTH 데이터베이스를 2026-08-24에 내보낸 로컬 계약 파일이다. 동적 값(UUID, UTC 시각, 팀 토큰)은 예시 형식만 검증한다.
+노션 KOTH 데이터베이스를 2026-08-24에 내보낸 로컬 계약 파일이다. 이번 대회는 동아리 6개에 각 1문제, 총 6문제다. 동적 값(UUID, UTC 시각, 팀 토큰)은 예시 형식만 검증한다.
 
 ## GET /api/v1/koth/clubs
 
@@ -28,7 +28,7 @@
         "closed_at": null
       }]
     }],
-    "total_count": 3,
+    "total_count": 6,
     "challenge_count": 6,
     "active_count": 2
   }
@@ -69,7 +69,7 @@ Status Code: 500
       "current_owner_team_name": "MJSEC",
       "current_score": 200
     }],
-    "challenge_count": 2
+    "challenge_count": 1
   }
 }
 ```
