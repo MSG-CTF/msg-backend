@@ -56,6 +56,7 @@ INSTALLED_APPS = [
     "apps.timer",
     "apps.accounts",
     "apps.adminpanel",
+    "apps.board",
     "apps.common",
     "apps.teams",
     "apps.ranking",
