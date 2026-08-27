@@ -43,6 +43,9 @@ def _request_scores(challenge, period):
     token = os.getenv(challenge.score_api_token_env)
     if not token:
         raise ScoreFetchError("score API token environment variable is empty")
+    parsed_url = urllib.parse.urlsplit(challenge.score_api_url)
+    if parsed_url.scheme not in {"http", "https"} or not parsed_url.hostname:
+        raise ScoreFetchError("score API URL must be an http or https URL")
     query = urllib.parse.urlencode({"period_id": format_utc(period), "scored_at": format_utc(period)})
     request = urllib.request.Request(
         f"{challenge.score_api_url}?{query}",
@@ -50,7 +53,7 @@ def _request_scores(challenge, period):
         method="GET",
     )
     try:
-        with urllib.request.urlopen(request, timeout=10) as response:
+        with urllib.request.urlopen(request, timeout=10) as response:  # nosec B310 - scheme and host validated above
             body = response.read().decode("utf-8")
             if response.status != 200:
                 raise ScoreFetchError(f"score server returned HTTP {response.status}")

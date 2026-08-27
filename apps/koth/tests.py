@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timezone as dt_timezone
 from decimal import Decimal
 from unittest.mock import patch
@@ -13,7 +14,7 @@ from .models import (
     KothChallenge, KothChallengeStatus, KothClub, KothScorePeriod,
     KothScorePeriodStatus, KothSolve, KothTeamToken, KothTokenVerificationAttempt,
 )
-from .services import poll_challenge_period
+from .services import ScoreFetchError, _request_scores, poll_challenge_period
 
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 
@@ -121,6 +122,12 @@ class KothScorePollingTests(TestCase):
         self.second = Team.objects.create(team_name="second")
         self.third = Team.objects.create(team_name="third")
         self.period = datetime(2026, 7, 31, 10, 15, tzinfo=dt_timezone.utc)
+
+    @patch.dict(os.environ, {"TEST_SCORE_TOKEN": "test-token"})
+    def test_score_api_url_must_use_http_or_https(self):
+        self.challenge.score_api_url = "file:///tmp/scores"
+        with self.assertRaises(ScoreFetchError):
+            _request_scores(self.challenge, self.period)
 
     def payload(self):
         return {"code": "SUCCESS", "message": "성공", "data": {
