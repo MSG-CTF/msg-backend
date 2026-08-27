@@ -113,7 +113,7 @@ common_error_codes:
   # 플래그 제출 전용. team_tokens/verify는 인증 전 단계라 플랫폼이 차단하지 않으므로
   # 429를 반환하지 않는다 (admin.md "검증 제한 정책" 참고).
   - {http: 429, code: TOO_MANY_ATTEMPTS}
-    # 문제 상세 / 플래그 제출 (challenge 앱, PR #8)
+  # 문제 상세 / 플래그 제출 (challenge 앱, PR #8)
   - {http: 403, code: CHALLENGE_LOCKED}
   - {http: 404, code: CHALLENGE_NOT_FOUND}
   - {http: 409, code: ALREADY_SOLVED}
