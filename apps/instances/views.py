@@ -53,8 +53,11 @@ class InstanceCreateView(APIView):
             return fail("CHALLENGE_LOCKED", "아직 개방되지 않은 문제입니다.", 403)
 
         runtime_config = get_challenge_runtime_config(challenge)
-        if runtime_config is None:
+        if runtime_config is None or runtime_config.current_release_id is None:
+            # 활성 릴리스가 없으면 배포할 이미지가 없는 문제다
             return fail("RUNTIME_CONFIG_NOT_FOUND", "문제 실행 설정이 없습니다.", 404)
+
+        release = runtime_config.current_release
 
         with transaction.atomic():
             lock_instance_user(user)
@@ -65,6 +68,7 @@ class InstanceCreateView(APIView):
                     team,
                     challenge,
                     runtime_config,
+                    release,
                     scheduler_auth_header(request),
                 )
             except SchedulerError as error:
@@ -86,6 +90,7 @@ class InstanceCreateView(APIView):
                 team=team,
                 challenge=challenge,
                 replaced_instance=replaced_instance,
+                release=release,
             )
 
         message = "인스턴스 생성 요청이 접수되었습니다."
