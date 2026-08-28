@@ -3,6 +3,7 @@ import secrets
 from decimal import Decimal
 
 from django.db import transaction
+from django.db.models import Sum
 from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
 
@@ -29,8 +30,7 @@ def team_me(request):
     team = _get_team(request)
 
     jeopardy_score = team.team_score
-    #KOTH 앱이 생기면 SUM(koth_solves.earned_score) 로 교체한다.
-    koth_score = Decimal("0")
+    koth_score = team.koth_solves.aggregate(total=Sum("earned_score"))["total"] or Decimal("0")
 
     members = [
         {

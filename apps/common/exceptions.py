@@ -55,6 +55,23 @@ class UserHasNoTeam(APIError):
     message = "소속된 팀이 없습니다"
 
 
+class InvalidInternalToken(APIError):
+    status_code = status.HTTP_401_UNAUTHORIZED
+    code = "INVALID_INTERNAL_TOKEN"
+    message = "문제 서버 인증에 실패했습니다."
+
+
+class InvalidClubId(APIError):
+    code = "INVALID_CLUB_ID"
+    message = "club_id 형식이 올바르지 않습니다."
+
+
+class ClubNotFound(APIError):
+    status_code = status.HTTP_404_NOT_FOUND
+    code = "CLUB_NOT_FOUND"
+    message = "존재하지 않는 동아리입니다."
+
+
 class InvalidRequest(APIError):
     pass
 

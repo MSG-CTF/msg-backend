@@ -29,7 +29,10 @@ HEADING_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
-JSON_FENCE_RE = re.compile(r"```(?:json)?\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
+JSON_FENCE_RE = re.compile(
+    r"(?P<fence>`{3}|~{3})(?:json)?\s*\n(?P<body>.*?)(?P=fence)",
+    re.DOTALL | re.IGNORECASE,
+)
 
 TABLE_ROW_RE = re.compile(r"^\|(.+)\|\s*$", re.MULTILINE)
 
@@ -63,7 +66,7 @@ def _extract_json_objects(block: str) -> list[tuple[int, dict]]:
     """블록 내 JSON 코드펜스를 최대한 파싱. (위치, dict) 리스트 반환. 파싱 실패는 무시."""
     results = []
     for m in JSON_FENCE_RE.finditer(block):
-        raw = m.group(1).strip()
+        raw = m.group("body").strip()
         try:
             obj = json.loads(raw)
         except json.JSONDecodeError:
