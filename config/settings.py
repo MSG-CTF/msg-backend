@@ -1,5 +1,7 @@
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
+
 from dotenv import load_dotenv
 from django.core.exceptions import ImproperlyConfigured
 
@@ -22,9 +24,23 @@ if not SECRET_KEY:
 
 # SECURITY WARNING: don't run with debug turned on in production!
 # 기본값 False, True 가 기본이면 환경변수 누락 시 실서버에서도 디버그 모드로 뜨게됨.
-DEBUG = os.getenv("DJANGO_DEBUG", "True").lower() == "true"
+DEBUG = os.getenv("DJANGO_DEBUG", "False").lower() == "true"
 
-ALLOWED_HOSTS = [host.strip() for host in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if host.strip()]
+ALLOWED_HOSTS = [
+    host.strip()
+    for host in os.getenv(
+        "DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1"
+    ).split(",")
+    if host.strip()
+]
+
+SECURE_SSL_REDIRECT = not DEBUG
+SESSION_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_SECURE = not DEBUG
+SECURE_HSTS_SECONDS = 0 if DEBUG else 31536000
+SECURE_HSTS_INCLUDE_SUBDOMAINS = not DEBUG
+SECURE_HSTS_PRELOAD = not DEBUG
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
 
 # Application definition
@@ -40,11 +56,13 @@ INSTALLED_APPS = [
     "apps.timer",
     "apps.accounts",
     "apps.adminpanel",
+    "apps.board",
     "apps.common",
     "apps.teams",
     "apps.ranking",
     "apps.challenge",
     "apps.instances",
+    "apps.koth",
 
 ]
 
@@ -169,6 +187,11 @@ JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_HOURS = 1
 REFRESH_TOKEN_HOURS = 12
 
+# KOTH 팀 토큰은 원문을 DB에 보관하지 않고 이 별도 비밀값으로 결정적으로
+# 생성한다. 기존 개발 환경은 JWT_SECRET을 fallback으로 사용하되 운영에서는
+# 반드시 별도 값을 설정한다.
+KOTH_TEAM_TOKEN_SECRET = os.getenv("KOTH_TEAM_TOKEN_SECRET", JWT_SECRET)
+
 
 REST_FRAMEWORK = {
     "DATETIME_FORMAT": "%Y-%m-%dT%H:%M:%SZ",
@@ -184,9 +207,31 @@ REST_FRAMEWORK = {
         "login": "10/min",
     }
 }
+SCHEDULER_BASE_URL = os.getenv(
+    "SCHEDULER_BASE_URL", "http://127.0.0.1:8001"
+).rstrip("/")
+_scheduler_url = urlsplit(SCHEDULER_BASE_URL)
+try:
+    _scheduler_url.port
+except ValueError as error:
+    raise ImproperlyConfigured(
+        "SCHEDULER_BASE_URL 포트가 올바르지 않습니다."
+    ) from error
 
+if (
+    _scheduler_url.scheme not in {"http", "https"}
+    or not _scheduler_url.hostname
+    or _scheduler_url.username
+    or _scheduler_url.password
+    or _scheduler_url.path not in {"", "/"}
+    or _scheduler_url.query
+    or _scheduler_url.fragment
+):
+    raise ImproperlyConfigured(
+        "SCHEDULER_BASE_URL은 사용자 정보, 경로, query, fragment가 없는 "
+        "http 또는 https 주소여야 합니다."
+    )
 
-SCHEDULER_BASE_URL = os.getenv("SCHEDULER_BASE_URL", "http://127.0.0.1:8001")
 SCHEDULER_TIMEOUT_SECONDS = int(os.getenv("SCHEDULER_TIMEOUT_SECONDS", "5"))
 INSTANCE_EXTEND_MINUTES = int(os.getenv("INSTANCE_EXTEND_MINUTES", "30"))
 
