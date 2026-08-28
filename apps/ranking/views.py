@@ -22,9 +22,9 @@ def collect_team_data():
             "team_name": team.team_name,
             "jeopardy_score": team.team_score,
             "mileage": team.mileage,
-            "koth_score": Decimal("0"),         
+            "koth_score": Decimal("0"),
             "jeopardy_solved_at": team.last_jeopardy_at,
-            "koth_solved_at": None,             
+            "koth_solved_at": None,
         })
     return team_data
 
@@ -40,6 +40,8 @@ def team_ranking(request):
 
     for row in rankings:                            
         row["team_score"] = num(row["team_score"])
+        if row["last_solved_at"] is not None:
+            row["last_solved_at"] = row["last_solved_at"].strftime("%Y-%m-%dT%H:%M:%SZ")
 
     start = (page - 1) * size
     end = start + size
