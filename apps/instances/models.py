@@ -58,6 +58,14 @@ class Instance(models.Model):
         choices=InstanceStatus.choices,
         default=InstanceStatus.REQUESTED,
     )
+    release = models.ForeignKey(
+        "instances.ChallengeRelease",
+        on_delete=models.SET_NULL,
+        db_column="release_id",
+        related_name="instances",
+        null=True,
+        blank=True,
+    )
     host = models.CharField(max_length=255, null=True, blank=True)
     ports = models.JSONField(default=list, blank=True)
     expires_at = models.DateTimeField(null=True, blank=True)
@@ -118,16 +126,14 @@ class ChallengeRuntimeConfig(models.Model):
         primary_key=True,
         related_name="runtime_config",
     )
-    container_image = models.CharField(max_length=255)
-    container_port = models.IntegerField()
-    architecture = models.CharField(
-        max_length=20,
-        choices=ArchitectureType.choices,
-        default=ArchitectureType.AMD64,
+    current_release = models.ForeignKey(
+        "instances.ChallengeRelease",
+        on_delete=models.SET_NULL,
+        db_column="current_release_id",
+        related_name="active_runtime_configs",
+        null=True,
+        blank=True,
     )
-    cpu_millicores = models.IntegerField(default=500)
-    memory_mib = models.IntegerField(default=512)
-    ephemeral_storage_mib = models.IntegerField(default=1024)
     ttl_minutes = models.IntegerField(default=120)
     hard_timeout_minutes = models.IntegerField(default=180)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -138,3 +144,72 @@ class ChallengeRuntimeConfig(models.Model):
 
     def __str__(self):
         return str(self.challenge_id)
+
+
+class ChallengeRelease(models.Model):
+    # 문제 실행 릴리즈 정보를 저장한다
+    release_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    challenge = models.ForeignKey(
+        "challenge.Challenge",
+        on_delete=models.CASCADE,
+        db_column="challenge_id",
+        related_name="releases",
+    )
+    revision = models.PositiveIntegerField()
+    architecture = models.CharField(
+        max_length=20,
+        choices=ArchitectureType.choices,
+        default=ArchitectureType.AMD64,
+    )
+    cpu_millicores = models.IntegerField(default=500)
+    memory_mib = models.IntegerField(default=512)
+    ephemeral_storage_mib = models.IntegerField(default=1024)
+    is_active = models.BooleanField(default=False)
+    source_path = models.CharField(max_length=255, null=True, blank=True)
+    source_commit_sha = models.CharField(max_length=40, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "challenge_releases"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["challenge", "revision"],
+                name="unique_challenge_release_revision",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["challenge", "is_active"]),
+        ]
+
+    def __str__(self):
+        return f"{self.challenge_id} r{self.revision}"
+
+
+class ReleaseContainer(models.Model):
+    # 릴리즈별 컨테이너 목록을 저장한다
+    release_container_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    release = models.ForeignKey(
+        "instances.ChallengeRelease",
+        on_delete=models.CASCADE,
+        db_column="release_id",
+        related_name="containers",
+    )
+    name = models.CharField(max_length=63)
+    image = models.CharField(max_length=500)
+    ports = models.JSONField(default=list)
+    expose = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "release_containers"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["release", "name"],
+                name="unique_release_container_name",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.release_id} {self.name}"

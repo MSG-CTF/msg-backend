@@ -177,19 +177,31 @@ def scheduler_error_from_response(error):
     )
 
 
+def serialize_release_container(container):
+    # Scheduler create 요청에 들어갈 컨테이너 정보를 생성
+    return {
+        "name": container.name,
+        "image": container.image,
+        "ports": container.ports,
+        "expose": container.expose,
+    }
+
 def build_scheduler_create_body(user, team, challenge, runtime_config):
     # Scheduler 인스턴스 생성 요청 body를 만든다
+    release = runtime_config.current_release
+    containers = release.containers.order_by("name")
+
     return {
         "team_id": str(team.team_id),
         "user_id": str(user.user_id),
         "challenge_id": str(challenge.challenge_id),
-        "container_image": runtime_config.container_image,
-        "container_port": runtime_config.container_port,
-        "architecture": runtime_config.architecture,
+        "containers": [serialize_release_container(container) for container in containers],
+        "registry_revision": release.revision,
+        "architecture": release.architecture,
         "resource_profile": {
-            "cpu_millicores": runtime_config.cpu_millicores,
-            "memory_mib": runtime_config.memory_mib,
-            "ephemeral_storage_mib": runtime_config.ephemeral_storage_mib,
+            "cpu_millicores": release.cpu_millicores,
+            "memory_mib": release.memory_mib,
+            "ephemeral_storage_mib": release.ephemeral_storage_mib,
         },
         "ttl_minutes": runtime_config.ttl_minutes,
         "hard_timeout_minutes": runtime_config.hard_timeout_minutes,
@@ -282,7 +294,7 @@ def update_instance_from_scheduler(instance, scheduler_data):
     return instance
 
 
-def create_instance_from_scheduler(scheduler_data, user, team, challenge=None, replaced_instance=None):
+def create_instance_from_scheduler(scheduler_data, user, team, challenge=None, release=None, replaced_instance=None):
     # Scheduler가 발급한 instance_id로 백엔드 인스턴스 row를 만든다
     if challenge is None:
         challenge = Challenge.objects.filter(challenge_id=scheduler_data.get("challenge_id")).first()
@@ -299,6 +311,7 @@ def create_instance_from_scheduler(scheduler_data, user, team, challenge=None, r
             "expires_at": parse_scheduler_datetime(scheduler_data.get("expires_at")),
             "hard_expires_at": parse_scheduler_datetime(scheduler_data.get("hard_expires_at")),
             "replaced_instance": replaced_instance,
+            "release": release,
         },
     )
     return instance

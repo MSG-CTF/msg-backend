@@ -10,12 +10,18 @@ from rest_framework.test import APIClient
 from apps.accounts.models import Team, User
 from apps.challenge.models import Challenge
 from apps.challenge.services import hash_flag
-from apps.instances.models import ChallengeRuntimeConfig, InstanceLock
+from apps.instances.models import (
+    ArchitectureType,
+    ChallengeRelease,
+    ChallengeRuntimeConfig,
+    InstanceLock,
+    ReleaseContainer,
+)
 
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 
 
-@override_settings(CACHES=LOCMEM)
+@override_settings(CACHES=LOCMEM, SECURE_SSL_REDIRECT=False)
 class InstanceLockTests(TestCase):
     def setUp(self):
         cache.clear()
@@ -36,10 +42,27 @@ class InstanceLockTests(TestCase):
             flag_hash=hash_flag("MSG{flag}"),
             is_published=True,
         )
+        self.release = ChallengeRelease.objects.create(
+            challenge=self.challenge,
+            revision=1,
+            architecture=ArchitectureType.AMD64,
+            cpu_millicores=500,
+            memory_mib=512,
+            ephemeral_storage_mib=1024,
+            is_active=True,
+        )
+
+        ReleaseContainer.objects.create(
+            release=self.release,
+            name="web",
+            image="ghcr.io/msg-ctf/challenges/web-basic/web@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            ports=[8080],
+            expose=True,
+        )
+
         ChallengeRuntimeConfig.objects.create(
             challenge=self.challenge,
-            container_image="registry.msgctf.local/challenges/web-basic:latest",
-            container_port=8080,
+            current_release=self.release,
         )
         self.auth()
 
