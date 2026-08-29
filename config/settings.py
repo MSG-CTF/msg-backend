@@ -45,7 +45,7 @@ INSTALLED_APPS = [
     "apps.ranking",
     "apps.challenge",
     "apps.instances",
-
+    "apps.leaderboard",
 ]
 
 MIDDLEWARE = [

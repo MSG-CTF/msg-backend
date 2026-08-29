@@ -10,5 +10,6 @@ urlpatterns = [
     path("api/v1/", include("apps.ranking.urls")),
     path("api/v1/", include("apps.challenge.urls")),
     path("api/v1/", include("apps.instances.urls")),
+    path("api/v1/", include("apps.leaderboard.urls")),
 ]
 
