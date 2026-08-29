@@ -50,3 +50,41 @@ def sort_key(row):
 
     return (score, no_solve, solved_at, row["team_id"])
 
+def member_sort_key(row):
+    score = row["user_score"] * -1
+
+    last_solved_at = row["last_solved_at"]
+
+    if last_solved_at is None:
+        no_solve = True
+        solved_at = 0
+    else:
+        no_solve = False
+        solved_at = last_solved_at.timestamp()
+
+    return (score, no_solve, solved_at, row["user_id"])
+
+
+def build_member_ranking(member_data):
+    # 개인 순위 목록
+    result = []
+
+    for row in member_data:
+        result.append({
+            "user_id": row["user_id"],
+            "nickname": row["nickname"],
+            "team_id": row["team_id"],
+            "team_name": row["team_name"],
+            "user_score": row["user_score"],
+            "solved_count": row["solved_count"],
+            "last_solved_at": row["last_solved_at"],
+        })
+
+    result.sort(key=member_sort_key)
+
+    rank = 1
+    for row in result:
+        row["rank"] = rank
+        rank = rank + 1
+
+    return result

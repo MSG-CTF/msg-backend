@@ -1,6 +1,10 @@
 from datetime import datetime, timedelta, timezone
 from django.test import SimpleTestCase
-from apps.ranking.ranking import build_team_ranking, resolve_last_solved_at
+from apps.ranking.ranking import (
+    build_team_ranking,
+    build_member_ranking,
+    resolve_last_solved_at,
+)
 
 from apps.ranking.scoring import calculate_dynamic_score
 
@@ -21,6 +25,16 @@ def make_team(name, jeopardy=0, koth=0, mileage=0, jeopardy_at=None, koth_at=Non
     }
 
 
+def make_member(name, score=0, solved=0, at=None):
+    return {
+        "user_id": name,
+        "nickname": name,
+        "team_id": "team_" + name,
+        "team_name": "team_" + name,
+        "user_score": score,
+        "solved_count": solved,
+        "last_solved_at": at,
+    }
 class ResolveLastSolvedAtTest(SimpleTestCase):
 
     def test_both_none_returns_none(self):
@@ -134,3 +148,40 @@ class CalculateDynamicScoreTest(SimpleTestCase):
     def test_accepts_decimal_input(self):
         result = calculate_dynamic_score(Decimal("1000"), Decimal("600"), 70, 10)
         self.assertEqual(result, 992)
+
+class BuildMemberRankingTest(SimpleTestCase):
+
+    def test_higher_score_first(self):
+        data = [
+            make_member("low", 500, 1, BASE_TIME),
+            make_member("high", 900, 2, BASE_TIME),
+        ]
+        result = build_member_ranking(data)
+        self.assertEqual(result[0]["nickname"], "high")
+
+    def test_tie_breaks_by_earlier_solve(self):
+        early = BASE_TIME
+        late = BASE_TIME + timedelta(hours=1)
+        data = [
+            make_member("late", 800, 1, late),
+            make_member("early", 800, 1, early),
+        ]
+        result = build_member_ranking(data)
+        self.assertEqual(result[0]["nickname"], "early")
+
+    def test_no_solve_goes_last(self):
+        data = [
+            make_member("nothing"),
+            make_member("solved", 100, 1, BASE_TIME),
+        ]
+        result = build_member_ranking(data)
+        self.assertEqual(result[1]["nickname"], "nothing")
+
+    def test_rank_starts_from_one(self):
+        data = [
+            make_member("a", 900, 2, BASE_TIME),
+            make_member("b", 500, 1, BASE_TIME),
+        ]
+        result = build_member_ranking(data)
+        self.assertEqual(result[0]["rank"], 1)
+        self.assertEqual(result[1]["rank"], 2)
