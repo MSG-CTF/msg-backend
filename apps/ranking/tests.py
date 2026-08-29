@@ -2,6 +2,9 @@ from datetime import datetime, timedelta, timezone
 from django.test import SimpleTestCase
 from apps.ranking.ranking import build_team_ranking, resolve_last_solved_at
 
+from apps.ranking.scoring import calculate_dynamic_score
+
+from decimal import Decimal
 
 BASE_TIME = datetime(2026, 8, 16, 0, 0, 0, tzinfo=timezone.utc) 
 
@@ -104,3 +107,30 @@ class BuildTeamRankingTest(SimpleTestCase):
         ]
         result = build_team_ranking(team_data)
         self.assertEqual(result[0]["team_name"], "aaa")
+
+class CalculateDynamicScoreTest(SimpleTestCase):
+
+    def test_no_solve_returns_initial(self):
+        result = calculate_dynamic_score(1000, 600, 70, 0)
+        self.assertEqual(result, 1000)
+
+    def test_decreases_as_solve_count_grows(self):
+        ten = calculate_dynamic_score(1000, 600, 70, 10)
+        thirty = calculate_dynamic_score(1000, 600, 70, 30)
+        self.assertLess(thirty, ten)
+
+    def test_reaches_minimum_at_decay(self):
+        result = calculate_dynamic_score(1000, 600, 70, 70)
+        self.assertEqual(result, 600)
+
+    def test_never_below_minimum(self):
+        result = calculate_dynamic_score(1000, 600, 70, 200)
+        self.assertEqual(result, 600)
+
+    def test_known_value(self):
+        result = calculate_dynamic_score(1000, 600, 70, 10)
+        self.assertEqual(result, 992)
+
+    def test_accepts_decimal_input(self):
+        result = calculate_dynamic_score(Decimal("1000"), Decimal("600"), 70, 10)
+        self.assertEqual(result, 992)
