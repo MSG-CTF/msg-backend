@@ -4,7 +4,6 @@ from django.conf import settings
 from django.db import DatabaseError
 from django.http import Http404
 from django.utils import timezone
-from django.views.generic import TemplateView
 from rest_framework.generics import ListAPIView
 from rest_framework.permissions import AllowAny
 from rest_framework.views import APIView
@@ -64,10 +63,6 @@ def _serialize_active_challenge(access):
         "solve_deadline_at": deadline,
         "remaining_seconds": remaining_seconds,
     }
-
-
-class DashboardView(TemplateView):
-    template_name = "board/dashboard.html"
 
 
 class BoardView(ListAPIView):
