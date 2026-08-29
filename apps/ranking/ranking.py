@@ -2,7 +2,7 @@ def resolve_last_solved_at(jeopardy_solved_at, koth_solved_at):
     if jeopardy_solved_at is not None:
         return jeopardy_solved_at
 
-    return koth_solved_at 
+    return koth_solved_at
 
 def build_team_ranking(team_data, limit=None):
     result = []
@@ -11,7 +11,7 @@ def build_team_ranking(team_data, limit=None):
         total = row["jeopardy_score"] + row["koth_score"]
 
         last_solved_at = resolve_last_solved_at(
-            row["jeopardy_solved_at"], 
+            row["jeopardy_solved_at"],
             row["koth_solved_at"]
         )
 
@@ -25,7 +25,7 @@ def build_team_ranking(team_data, limit=None):
 
     result.sort(key=sort_key)
 
-    if limit is None: #/ranking/me           
+    if limit is None: #/ranking/me
         top = result
     else:
         top = result[:limit] #/ranking
