@@ -414,6 +414,8 @@ class PaymentTests(TestCase):
         self.assertEqual(res.status_code, 400)
         self.assertEqual(res.data["code"], "INVALID_REQUEST")
 
+
+@override_settings(SCHEDULER_API_TOKEN="test-scheduler-token")
 class AdminInstanceTests(TestCase):
     def setUp(self):
         cache.clear()
