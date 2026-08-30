@@ -3,7 +3,7 @@ from decimal import Decimal
 
 from django.test import SimpleTestCase, TestCase
 
-from apps.accounts.models import Team
+from apps.accounts.models import Team, User
 from apps.challenge.models import Challenge, Solve
 from apps.koth.models import KothChallenge, KothClub, KothSolve
 from apps.ranking.ranking import (
@@ -13,6 +13,9 @@ from apps.ranking.ranking import (
 )
 from apps.ranking.scoring import calculate_dynamic_score
 from apps.ranking.views import collect_team_data
+
+from rest_framework.test import APITestCase
+from apps.common.jwt import issue_access_token
 
 BASE_TIME = datetime(2026, 8, 16, 0, 0, 0, tzinfo=timezone.utc)
 
@@ -40,7 +43,8 @@ def make_member(name, score=0, solved=0, at=None):
         "last_solved_at": at,
     }
 
-
+def auth(client, user):
+    client.credentials(HTTP_AUTHORIZATION=f"Bearer {issue_access_token(user)}")
 class ResolveLastSolvedAtTest(SimpleTestCase):
 
     def test_both_none_returns_none(self):
@@ -277,3 +281,102 @@ class CollectTeamDataTest(TestCase):
         self.assertEqual(data[0]["koth_score"], Decimal("0"))
         self.assertIsNone(data[0]["jeopardy_solved_at"])
         self.assertIsNone(data[0]["koth_solved_at"])
+
+class MemberRankingAPITest(APITestCase):
+
+    URL = "/api/v1/ranking/member"
+
+    def setUp(self):
+        self.team = Team.objects.create(team_name="알파")
+        self.user = User.objects.create_user(
+            login_id="me", password="pw", nickname="나", team=self.team,
+        )
+
+    def make_challenge(self, name, score):
+        return Challenge.objects.create(
+            title=name,
+            category="WEB",
+            difficulty="EASY",
+            score=Decimal(score),
+            current_score=Decimal(score),
+            flag_hash=f"hash_{name}",
+            is_published=True,
+        )
+
+    def solve(self, user, name, score):
+        c = self.make_challenge(name, score)
+        Solve.objects.create(
+            team=user.team, challenge=c, solved_by_user=user,
+            earned_score=Decimal(score), earned_mileage=100,
+        )
+
+    def test_returns_my_rank(self):
+        self.solve(self.user, "문제1", "1000")
+        auth(self.client, self.user)
+
+        res = self.client.get(self.URL)
+
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data["data"]["user_score"], 1000)
+        self.assertEqual(res.data["data"]["rank"], 1)
+
+    def test_without_token_returns_401(self):
+        res = self.client.get(self.URL)
+
+        self.assertEqual(res.status_code, 401)
+        self.assertEqual(res.data["code"], "TOKEN_MISSING")
+
+    def test_user_without_team_returns_404(self):
+        admin = User.objects.create_user(login_id="admin", password="pw", nickname="관리자")
+        auth(self.client, admin)
+
+        res = self.client.get(self.URL)
+
+        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.data["code"], "USER_HAS_NO_TEAM")
+
+    def test_banned_team_returns_null(self):
+        self.solve(self.user, "문제1", "1000")
+        Team.objects.filter(pk=self.team.pk).update(is_banned=True)
+        auth(self.client, self.user)
+
+        res = self.client.get(self.URL)
+
+        self.assertEqual(res.status_code, 200)
+        self.assertIsNone(res.data["data"])
+
+    def test_no_solve_returns_zero(self):
+        auth(self.client, self.user)
+
+        res = self.client.get(self.URL)
+
+        self.assertEqual(res.data["data"]["user_score"], 0)
+        self.assertEqual(res.data["data"]["solved_count"], 0)
+        self.assertIsNone(res.data["data"]["last_solved_at"])
+
+    def test_teammate_solve_is_excluded(self):
+        mate = User.objects.create_user(
+            login_id="mate", password="pw", nickname="팀원", team=self.team,
+        )
+        self.solve(self.user, "내문제", "1000")
+        self.solve(mate, "팀원문제", "500")
+        auth(self.client, self.user)
+
+        res = self.client.get(self.URL)
+
+        self.assertEqual(res.data["data"]["user_score"], 1000)
+        self.assertEqual(res.data["data"]["solved_count"], 1)
+
+    def test_response_has_exact_keys(self):
+        self.solve(self.user, "문제1", "1000")
+        auth(self.client, self.user)
+
+        res = self.client.get(self.URL)
+
+        self.assertEqual(
+            set(res.data["data"].keys()),
+            {
+                "rank", "user_id", "nickname", "team_id", "team_name",
+                "user_score", "solved_count", "last_solved_at",
+            },
+        )
