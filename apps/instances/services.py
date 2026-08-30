@@ -64,12 +64,16 @@ def parse_scheduler_datetime(value):
     return parse_datetime(value)
 
 
-def scheduler_auth_header(request):
-    # 사용자의 Authorization 헤더를 Scheduler 호출에 그대로 전달한다
-    if request is None:
-        return None
+def scheduler_auth_header(request=None):
+    # Scheduler 호출에 사용할 내부 API 토큰 헤더를 만든다
+    if not settings.SCHEDULER_API_TOKEN:
+        raise SchedulerError(
+            "SCHEDULER_UNAVAILABLE",
+            "인스턴스 서버 설정이 올바르지 않습니다.",
+            503,
+        )
 
-    return request.headers.get("Authorization")
+    return f"Bearer {settings.SCHEDULER_API_TOKEN}"
 
 
 def get_active_instance(user):
@@ -186,9 +190,11 @@ def serialize_release_container(container):
         "expose": container.expose,
     }
 
+
 def build_scheduler_create_body(user, team, challenge, runtime_config):
     # Scheduler 인스턴스 생성 요청 body를 만든다
     release = runtime_config.current_release
+    validate_release_for_scheduler(release)
     containers = release.containers.order_by("name")
 
     return {
@@ -197,6 +203,7 @@ def build_scheduler_create_body(user, team, challenge, runtime_config):
         "challenge_id": str(challenge.challenge_id),
         "containers": [serialize_release_container(container) for container in containers],
         "registry_revision": release.revision,
+        "isolation_profile": release.isolation_profile,
         "architecture": release.architecture,
         "resource_profile": {
             "cpu_millicores": release.cpu_millicores,
@@ -324,3 +331,22 @@ def sync_instance_from_scheduler(instance, auth_header=None):
 
     scheduler_data = call_scheduler_detail(instance, auth_header)
     return update_instance_from_scheduler(instance, scheduler_data)
+
+
+def validate_release_for_scheduler(release):
+    # Scheduler create 요청 전에 릴리즈 컨테이너 조건을 확인한다
+    containers = list(release.containers.all())
+    exposed = [container for container in containers if container.expose]
+
+    if not 1 <= len(containers) <= 8:
+        raise SchedulerError("INVALID_REQUEST", "컨테이너 설정을 확인해주세요.", 400)
+
+    if len(exposed) != 1:
+        raise SchedulerError("INVALID_REQUEST", "공개 컨테이너 설정을 확인해주세요.", 400)
+
+    if len(exposed[0].ports) != 1:
+        raise SchedulerError("INVALID_REQUEST", "공개 컨테이너 포트 설정을 확인해주세요.", 400)
+
+    for container in containers:
+        if not str(container.image).startswith("ghcr.io/") or "@sha256:" not in container.image:
+            raise SchedulerError("INVALID_REQUEST", "컨테이너 이미지 설정을 확인해주세요.", 400)

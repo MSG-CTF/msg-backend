@@ -15,13 +15,18 @@ from apps.instances.models import (
     ChallengeRelease,
     ChallengeRuntimeConfig,
     InstanceLock,
+    IsolationProfile,
     ReleaseContainer,
 )
 
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 
 
-@override_settings(CACHES=LOCMEM, SECURE_SSL_REDIRECT=False)
+@override_settings(
+    CACHES=LOCMEM,
+    SECURE_SSL_REDIRECT=False,
+    SCHEDULER_API_TOKEN="test-scheduler-token",
+)
 class InstanceLockTests(TestCase):
     def setUp(self):
         cache.clear()
@@ -46,6 +51,7 @@ class InstanceLockTests(TestCase):
             challenge=self.challenge,
             revision=1,
             architecture=ArchitectureType.AMD64,
+            isolation_profile=IsolationProfile.WEB,
             cpu_millicores=500,
             memory_mib=512,
             ephemeral_storage_mib=1024,

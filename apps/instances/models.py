@@ -33,6 +33,12 @@ class ArchitectureType(models.TextChoices):
     ARM64 = "ARM64"
 
 
+class IsolationProfile(models.TextChoices):
+    # Scheduler에 전달할 문제 격리 정책을 정의한다
+    WEB = "WEB"
+    PWN = "PWN"
+
+
 class Instance(models.Model):
     instance_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(
@@ -160,6 +166,12 @@ class ChallengeRelease(models.Model):
         max_length=20,
         choices=ArchitectureType.choices,
         default=ArchitectureType.AMD64,
+    )
+
+    isolation_profile = models.CharField(
+        max_length=20,
+        choices=IsolationProfile.choices,
+        default=IsolationProfile.WEB,
     )
     cpu_millicores = models.IntegerField(default=500)
     memory_mib = models.IntegerField(default=512)
