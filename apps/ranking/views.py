@@ -10,6 +10,12 @@ from apps.ranking.pagination import parse_pagination
 from django.db.models import Max, Min, OuterRef, Subquery, Sum
 from apps.koth.models import KothSolve
 
+
+def format_datetime(value):
+    if value is None:
+        return None
+    return value.strftime("%Y-%m-%dT%H:%M:%SZ")
+
 def collect_team_data():
     koth_score_sq = KothSolve.objects.filter(
         team=OuterRef("pk"),
@@ -48,12 +54,11 @@ def team_ranking(request):
         request.query_params.get("size"),
     )
 
-    rankings = build_team_ranking(collect_team_data(), limit=None) 
+    rankings = build_team_ranking(collect_team_data(), limit=None)
 
-    for row in rankings:                            
+    for row in rankings:
         row["team_score"] = num(row["team_score"])
-        if row["last_solved_at"] is not None:
-            row["last_solved_at"] = row["last_solved_at"].strftime("%Y-%m-%dT%H:%M:%SZ")
+        row["last_solved_at"] = format_datetime(row["last_solved_at"])
 
     start = (page - 1) * size
     end = start + size
@@ -79,7 +84,7 @@ def my_team_ranking(request):
     for row in rankings:
         if row["team_id"] == my_team_id:
             row["team_score"] = num(row["team_score"])
+            row["last_solved_at"] = format_datetime(row["last_solved_at"])
             return ok(row)
 
     return ok(None)
-        
