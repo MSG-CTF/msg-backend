@@ -1,18 +1,16 @@
-from django.shortcuts import render
 from decimal import Decimal
-
-from django.db.models import Max
+from django.db.models import Max, Min, OuterRef, Subquery, Sum
 from rest_framework.decorators import api_view
-
 from apps.accounts.models import Team
 from apps.challenge.models import Solve
 from apps.common.response import ok
 from apps.common.utils import num
+from apps.koth.models import KothSolve
 from apps.ranking.ranking import build_team_ranking
 
+TOP_TEAM_COUNT = 8
+TOP3_COUNT = 3
 
-TOP_TEAM_COUNT = 8   
-TOP3_COUNT = 3      
 
 def format_datetime(value):
     if value is None:
@@ -21,41 +19,68 @@ def format_datetime(value):
 
 
 def collect_team_data():
+    koth_score_sq = KothSolve.objects.filter(
+        team=OuterRef("pk"),
+    ).values("team").annotate(total=Sum("earned_score")).values("total")
+
+    koth_first_sq = KothSolve.objects.filter(
+        team=OuterRef("pk"),
+        solved_at__isnull=False,
+    ).values("team").annotate(first=Min("solved_at")).values("first")
+
     teams = Team.objects.filter(is_banned=False).annotate(
+        jeopardy_total=Sum("solves__challenge__current_score"),
         last_jeopardy_at=Max("solves__solved_at"),
+        koth_total=Subquery(koth_score_sq),
+        first_koth_at=Subquery(koth_first_sq),
     )
 
     team_data = []
     for team in teams:
-        if team.last_jeopardy_at is None:
+        if team.last_jeopardy_at is None and team.first_koth_at is None:
             continue
 
         team_data.append({
             "team_id": str(team.team_id),
             "team_name": team.team_name,
-            "jeopardy_score": team.team_score,
+            "jeopardy_score": team.jeopardy_total or Decimal("0"),
             "mileage": team.mileage,
-            # KOTH 앱이 생기면 SUM(koth_solves.earned_score)로 수정
-            "koth_score": Decimal("0"),
+            "koth_score": team.koth_total or Decimal("0"),
             "jeopardy_solved_at": team.last_jeopardy_at,
-            # KOTH 앱이 생기면 MIN(koth_solves.solved_at)로 수정
-            "koth_solved_at": None,
+            "koth_solved_at": team.first_koth_at,
         })
     return team_data
 
-def collect_solves(team_id): # 그래프용 solve
-    solves = Solve.objects.filter(
-        team_id=team_id,
-    ).select_related("challenge").order_by("solved_at")
 
+def collect_solves(team_id):
     result = []
-    for solve in solves:
+
+    jeopardy = Solve.objects.filter(
+        team_id=team_id,
+    ).select_related("challenge")
+
+    for solve in jeopardy:
         result.append({
             "challenge_id": str(solve.challenge_id),
             "source_type": "JEOPARDY",
             "solved_at": format_datetime(solve.solved_at),
             "points": num(solve.challenge.current_score),
         })
+
+    koth = KothSolve.objects.filter(
+        team_id=team_id,
+        solved_at__isnull=False,
+    )
+
+    for solve in koth:
+        result.append({
+            "challenge_id": str(solve.challenge_id),
+            "source_type": "KOTH",
+            "solved_at": format_datetime(solve.solved_at),
+            "points": num(solve.earned_score),
+        })
+
+    result.sort(key=lambda row: row["solved_at"])
     return result
 
 

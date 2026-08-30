@@ -5,6 +5,7 @@ from django.test import TestCase
 from django.utils import timezone
 from apps.accounts.models import Team, User
 from apps.challenge.models import Challenge, Solve
+from apps.koth.models import KothChallenge, KothClub, KothSolve
 
 
 class LeaderboardAPITest(TestCase):
@@ -18,6 +19,19 @@ class LeaderboardAPITest(TestCase):
             score=Decimal("1000"),
             flag_hash="dummy",
             is_published=True,
+        )
+
+    def make_koth_solve(self, team, name, score, at):
+        club = KothClub.objects.create(name=f"동아리_{name}")
+        kc = KothChallenge.objects.create(
+            club=club,
+            title=name,
+            open_group=1,
+            inbound_internal_token_hash=f"hash_{name}",
+        )
+        return KothSolve.objects.create(
+            team=team, challenge=kc,
+            earned_score=Decimal(score), solved_at=at,
         )
 
     def make_team_with_solve(self, name, score, solved_at=None):
@@ -100,3 +114,44 @@ class LeaderboardAPITest(TestCase):
 
         self.assertEqual(data["teams"], [])
         self.assertEqual(data["total_count"], 0)
+
+
+    def test_koth_only_team_is_included(self):
+        # KOTH만 푼 팀도 그래프에 포함한다
+        team = Team.objects.create(team_name="koth팀")
+        self.make_koth_solve(team, "koth1", "40", timezone.now())
+
+        data = self.client.get("/api/v1/leaderboard").data["data"]
+
+        names = [t["team_name"] for t in data["teams"]]
+        self.assertIn("koth팀", names)
+
+    def test_header_score_matches_graph_sum(self):
+        # 헤더 team_score와 그래프 points 합이 같아야 한다
+        self.make_team_with_solve("팀", 0)
+
+        data = self.client.get("/api/v1/leaderboard").data["data"]
+        team = data["teams"][0]
+
+        graph_sum = sum(s["points"] for s in team["solves"])
+        self.assertEqual(team["team_score"], graph_sum)
+
+    def test_total_score_sums_jeopardy_and_koth(self):
+        # 총점은 제오파디 + KOTH다
+        team = self.make_team_with_solve("팀", 0)
+        self.make_koth_solve(team, "koth1", "40", timezone.now())
+
+        data = self.client.get("/api/v1/leaderboard").data["data"]
+
+        # 제오파디 1000 + KOTH 40
+        self.assertEqual(data["teams"][0]["team_score"], 1040)
+
+    def test_graph_includes_koth_solve(self):
+        # 그래프에 KOTH 항목이 들어간다
+        team = self.make_team_with_solve("팀", 0)
+        self.make_koth_solve(team, "koth1", "40", timezone.now())
+
+        data = self.client.get("/api/v1/leaderboard").data["data"]
+
+        types = {s["source_type"] for s in data["teams"][0]["solves"]}
+        self.assertEqual(types, {"JEOPARDY", "KOTH"})
