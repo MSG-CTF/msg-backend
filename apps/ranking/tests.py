@@ -1,9 +1,13 @@
 from datetime import datetime, timedelta, timezone
+from django.utils import timezone as django_timezone
 from django.test import SimpleTestCase
 from apps.ranking.ranking import build_team_ranking, resolve_last_solved_at
-
+from django.test import TestCase
+from apps.accounts.models import Team
 from apps.ranking.scoring import calculate_dynamic_score
-
+from apps.challenge.models import Challenge, Solve
+from apps.koth.models import KothChallenge, KothClub, KothSolve
+from apps.ranking.views import collect_team_data
 from decimal import Decimal
 
 BASE_TIME = datetime(2026, 8, 16, 0, 0, 0, tzinfo=timezone.utc) 
@@ -134,3 +138,88 @@ class CalculateDynamicScoreTest(SimpleTestCase):
     def test_accepts_decimal_input(self):
         result = calculate_dynamic_score(Decimal("1000"), Decimal("600"), 70, 10)
         self.assertEqual(result, 992)
+
+class CollectTeamDataTest(TestCase):
+
+    def make_challenge(self, name, score):
+        return Challenge.objects.create(
+            title=name,
+            category="WEB",
+            difficulty="EASY",
+            score=Decimal(score),
+            current_score=Decimal(score),
+            flag_hash=f"hash_{name}",
+            is_published=True,
+        )
+
+    def make_koth_challenge(self, club, name):
+        return KothChallenge.objects.create(
+            club=club,
+            title=name,
+            open_group=1,
+            inbound_internal_token_hash=f"hash_{name}",
+        )
+
+    def test_jeopardy_score_sums_current_score(self):
+        team = Team.objects.create(team_name="팀", team_score=Decimal("999"))
+        for i in range(3):
+            c = self.make_challenge(f"문제{i}", "1000")
+            Solve.objects.create(
+                team=team, challenge=c,
+                earned_score=Decimal("1000"), earned_mileage=100,
+            )
+
+        data = collect_team_data()
+        self.assertEqual(data[0]["jeopardy_score"], Decimal("3000"))
+
+    def test_koth_sum_is_not_inflated_by_join(self):
+        team = Team.objects.create(team_name="팀")
+
+        for i in range(3):
+            c = self.make_challenge(f"문제{i}", "1000")
+            Solve.objects.create(
+                team=team, challenge=c,
+                earned_score=Decimal("1000"), earned_mileage=100,
+            )
+
+        club = KothClub.objects.create(name="동아리")
+        for i in range(2):
+            club = KothClub.objects.create(name=f"동아리{i}")
+            kc = self.make_koth_challenge(club, f"koth{i}")
+            KothSolve.objects.create(
+                team=team, challenge=kc,
+                earned_score=Decimal("100"),
+                solved_at=BASE_TIME,
+            )
+
+        data = collect_team_data()
+
+        self.assertEqual(data[0]["jeopardy_score"], Decimal("3000"))
+        self.assertEqual(data[0]["koth_score"], Decimal("200"))
+
+    def test_koth_first_solved_at_uses_min(self):
+        team = Team.objects.create(team_name="팀")
+        early = BASE_TIME
+        late = BASE_TIME + timedelta(hours=2)
+
+        for i, at in enumerate([late, early]):
+            club = KothClub.objects.create(name=f"동아리{i}")
+            kc = self.make_koth_challenge(club, f"koth{i}")
+            KothSolve.objects.create(
+                team=team, challenge=kc,
+                earned_score=Decimal("100"), solved_at=at,
+            )
+
+        data = collect_team_data()
+
+        self.assertEqual(data[0]["koth_solved_at"], early)
+
+    def test_team_without_solve_has_zero(self):
+        Team.objects.create(team_name="팀", team_score=Decimal("500"))
+
+        data = collect_team_data()
+
+        self.assertEqual(data[0]["jeopardy_score"], Decimal("0"))
+        self.assertEqual(data[0]["koth_score"], Decimal("0"))
+        self.assertIsNone(data[0]["jeopardy_solved_at"])
+        self.assertIsNone(data[0]["koth_solved_at"])
