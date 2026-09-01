@@ -190,6 +190,221 @@ class AdminTests(TestCase):
         )
         self.assertEqual(res.data["code"], "TEAM_NOT_FOUND")
 
+    def test_team_detail_success(self):
+        from apps.teams.models import MileageHistory, MileageType
+        self.auth("root")
+        MileageHistory.objects.create(team=self.team, type=MileageType.ADMIN_GRANT,
+                                      amount=100, reason="지급", processed_by="root")
+        MileageHistory.objects.create(team=self.team, type=MileageType.PURCHASE,
+                                      amount=-30, reason="음료", processed_by="root")
+        MileageHistory.objects.create(team=self.team, type=MileageType.REFUND,
+                                      amount=30, reason="환불", processed_by="root")
+        res = self.client.get(f"/api/v1/admin/teams/{self.team.team_id}")
+        self.assertEqual(res.data["code"], "SUCCESS")
+        d = res.data["data"]
+        self.assertEqual(d["team_id"], str(self.team.team_id))
+        self.assertEqual(d["member_count"], 1)
+        self.assertEqual(d["members"][0]["login_id"], "player")
+        self.assertEqual(d["mileage_summary"],
+                         {"total_earned": 130, "total_spent": 30,
+                          "purchase_count": 1, "refund_count": 1})
+        self.assertEqual(len(d["recent_mileage_history"]), 3)
+
+    def test_team_detail_not_found(self):
+        import uuid
+        self.auth("root")
+        res = self.client.get(f"/api/v1/admin/teams/{uuid.uuid4()}")
+        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.data["code"], "TEAM_NOT_FOUND")
+
+    def test_team_detail_participant_blocked(self):
+        self.auth("player")
+        res = self.client.get(f"/api/v1/admin/teams/{self.team.team_id}")
+        self.assertEqual(res.status_code, 403)
+
+    def test_team_detail_history_limit(self):
+        from apps.teams.models import MileageHistory, MileageType
+        self.auth("root")
+        for i in range(15):
+            MileageHistory.objects.create(team=self.team, type=MileageType.ADMIN_GRANT,
+                                          amount=1, reason=f"r{i}", processed_by="root")
+        res = self.client.get(f"/api/v1/admin/teams/{self.team.team_id}?history_limit=5")
+        self.assertEqual(len(res.data["data"]["recent_mileage_history"]), 5)
+
+    def test_team_detail_board_position(self):
+        from apps.board.models import Cell, TeamBoardState
+        self.auth("root")
+        cell = Cell.objects.create(cell_index=12, type="CHALLENGE", name="12번칸")
+        TeamBoardState.objects.create(team=self.team, position=cell)
+        res = self.client.get(f"/api/v1/admin/teams/{self.team.team_id}")
+        self.assertEqual(res.data["data"]["board_position_states"], 12)
+
+    def test_team_detail_board_position_null_when_no_state(self):
+        self.auth("root")
+        res = self.client.get(f"/api/v1/admin/teams/{self.team.team_id}")
+        self.assertIsNone(res.data["data"]["board_position_states"])
+
+
+@override_settings(CACHES=LOCMEM)
+class AdminDashboardTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.team = Team.objects.create(team_name="팀A", team_score=100, mileage=200)
+        self.admin = User.objects.create_user(
+            login_id="root", password="pw1234", nickname="운영자",
+            team=None, role=Role.ADMIN,
+        )
+        self.player = User.objects.create_user(
+            login_id="player", password="pw1234", nickname="참가자", team=self.team
+        )
+        self.auth("root")
+
+    def auth(self, login_id):
+        res = self.client.post("/api/v1/auth/login",
+                               {"login_id": login_id, "password": "pw1234"}, format="json")
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {res.data['data']['access_token']}"
+        )
+
+    def test_dashboard_aggregates(self):
+        from apps.teams.models import MileageHistory, MileageType
+        from apps.challenge.models import Challenge, Solve
+        from apps.instances.models import Instance, InstanceStatus
+        MileageHistory.objects.create(team=self.team, type=MileageType.PURCHASE,
+                                      amount=-100, reason="x", processed_by="root")
+        MileageHistory.objects.create(team=self.team, type=MileageType.REFUND,
+                                      amount=30, reason="x", processed_by="root")
+        ch = Challenge.objects.create(title="c1", category="WEB", difficulty="EASY",
+                                      score=500, flag_hash="x", is_published=True)
+        Challenge.objects.create(title="c2", category="WEB", difficulty="EASY",
+                                 score=500, flag_hash="x", is_published=False)
+        Instance.objects.create(user=self.player, team=self.team, challenge=ch,
+                                status=InstanceStatus.RUNNING)
+        Instance.objects.create(user=self.player, team=self.team, challenge=ch,
+                                status=InstanceStatus.FAILED)
+        Solve.objects.create(team=self.team, challenge=ch, solved_by_user=self.player,
+                             earned_score=500, earned_mileage=100)
+
+        res = self.client.get("/api/v1/admin/dashboard")
+        self.assertEqual(res.data["code"], "SUCCESS")
+        d = res.data["data"]
+        self.assertEqual(d["teams"]["total_count"], 1)
+        self.assertEqual(d["teams"]["total_mileage"], 200)
+        self.assertEqual(d["payment"],
+                         {"purchase_count": 1, "refund_count": 1, "net_spent": 70})
+        self.assertEqual(d["instances"], {"running": 1, "failed": 1, "total": 2})
+        self.assertEqual(d["challenges"], {"total": 2, "published": 1, "solved_total": 1})
+        self.assertIsNone(d["contest"])
+
+    def test_dashboard_with_active_contest(self):
+        import datetime
+        from django.utils import timezone
+        from apps.timer.models import Contest
+        now = timezone.now()
+        Contest.objects.create(name="대회", is_active=True,
+                               start_time=now - datetime.timedelta(hours=1),
+                               end_time=now + datetime.timedelta(hours=1))
+        res = self.client.get("/api/v1/admin/dashboard")
+        self.assertEqual(res.data["data"]["contest"]["status"], "RUNNING")
+        self.assertGreater(res.data["data"]["contest"]["remaining_seconds"], 0)
+
+    def test_dashboard_participant_blocked(self):
+        self.auth("player")
+        res = self.client.get("/api/v1/admin/dashboard")
+        self.assertEqual(res.status_code, 403)
+
+@override_settings(CACHES=LOCMEM)
+class AdminChallengeTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.team = Team.objects.create(team_name="팀A", team_score=0)
+        self.team2 = Team.objects.create(team_name="팀B", team_score=0)
+        self.admin = User.objects.create_user(
+            login_id="root", password="pw1234", nickname="운영자",
+            team=None, role=Role.ADMIN,
+        )
+        self.player = User.objects.create_user(
+            login_id="player", password="pw1234", nickname="참가자", team=self.team
+        )
+        self.auth("root")
+
+    def auth(self, login_id):
+        res = self.client.post("/api/v1/auth/login",
+                               {"login_id": login_id, "password": "pw1234"}, format="json")
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {res.data['data']['access_token']}"
+        )
+
+    def test_challenge_list_counts(self):
+        from apps.challenge.models import Challenge, Solve
+        from apps.instances.models import Instance, InstanceStatus
+        ch = Challenge.objects.create(title="웹1", category="WEB", difficulty="EASY",
+                                      score=500, flag_hash="x", is_published=True)
+        Instance.objects.create(user=self.player, team=self.team, challenge=ch,
+                                status=InstanceStatus.RUNNING)
+        Instance.objects.create(user=self.player, team=self.team, challenge=ch,
+                                status=InstanceStatus.RUNNING)
+        Instance.objects.create(user=self.player, team=self.team, challenge=ch,
+                                status=InstanceStatus.FAILED)
+        Solve.objects.create(team=self.team, challenge=ch, solved_by_user=self.player,
+                             earned_score=500, earned_mileage=100)
+        Solve.objects.create(team=self.team2, challenge=ch, solved_by_user=None,
+                             earned_score=500, earned_mileage=100)
+        res = self.client.get("/api/v1/admin/challenges")
+        self.assertEqual(res.data["code"], "SUCCESS")
+        self.assertEqual(res.data["data"]["total_count"], 1)
+        row = res.data["data"]["challenges"][0]
+        self.assertEqual(row["running_instance_count"], 2)
+        self.assertEqual(row["failed_instance_count"], 1)
+        self.assertEqual(row["solved_team_count"], 2)
+        self.assertTrue(row["is_published"])
+
+    def test_challenge_list_filters(self):
+        from apps.challenge.models import Challenge
+        Challenge.objects.create(title="웹", category="WEB", difficulty="EASY",
+                                 score=100, flag_hash="x", is_published=True)
+        Challenge.objects.create(title="크립토", category="CRYPTO", difficulty="HARD",
+                                 score=100, flag_hash="x", is_published=False)
+        res = self.client.get("/api/v1/admin/challenges?category=WEB")
+        self.assertEqual(res.data["data"]["total_count"], 1)
+        res = self.client.get("/api/v1/admin/challenges?is_published=false")
+        self.assertEqual(res.data["data"]["total_count"], 1)
+        self.assertEqual(res.data["data"]["challenges"][0]["category"], "CRYPTO")
+
+    def test_challenge_list_invalid_sort(self):
+        res = self.client.get("/api/v1/admin/challenges?sort=nope")
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data["code"], "INVALID_REQUEST")
+
+    def test_challenge_list_participant_blocked(self):
+        self.auth("player")
+        res = self.client.get("/api/v1/admin/challenges")
+        self.assertEqual(res.status_code, 403)
+
+    def test_challenge_list_new_categories(self):
+        from apps.challenge.models import Challenge
+        Challenge.objects.create(title="web3챌", category="WEB3", difficulty="EASY",
+                                 score=100, flag_hash="x", is_published=True)
+        Challenge.objects.create(title="osint챌", category="OSINT", difficulty="EASY",
+                                 score=100, flag_hash="x", is_published=True)
+        res = self.client.get("/api/v1/admin/challenges?category=WEB3")
+        self.assertEqual(res.data["data"]["total_count"], 1)
+        self.assertEqual(res.data["data"]["challenges"][0]["category"], "WEB3")
+        self.assertEqual(
+            self.client.get("/api/v1/admin/challenges?category=OSINT").data["data"]["total_count"], 1)
+
+    def test_challenge_list_invalid_is_published(self):
+        res = self.client.get("/api/v1/admin/challenges?is_published=maybe")
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data["code"], "INVALID_REQUEST")
+
+    def test_challenge_list_invalid_category(self):
+        res = self.client.get("/api/v1/admin/challenges?category=NOPE")
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data["code"], "INVALID_REQUEST")
+
 
 @override_settings(CACHES=LOCMEM)
 class PaymentTests(TestCase):

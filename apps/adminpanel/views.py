@@ -2,8 +2,7 @@ import uuid
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
-from django.db.models import Count, Prefetch
-from django.db.models import Sum
+from django.db.models import Count, Prefetch, Q, Sum
 from django.utils import timezone
 
 from rest_framework.decorators import api_view, permission_classes
@@ -14,6 +13,9 @@ from apps.common.permissions import IsAdmin
 from apps.common.response import fail, ok
 from apps.common.utils import num
 from apps.common.jwt import hash_token
+from apps.challenge.models import Challenge, Solve
+from apps.board.models import TeamBoardState
+from apps.timer.models import Contest
 
 from apps.teams.models import (
     MileageHistory,
@@ -653,4 +655,216 @@ def instance_force_reset(request, instance_id):
         },
         message="인스턴스 재시작 요청이 접수되었습니다.",
         status=202,
+    )
+
+
+@api_view(["GET"])
+@permission_classes([IsAdmin])
+def team_detail(request, team_id):
+    """GET /api/v1/admin/teams/{team_id}. 팀 상세 조회."""
+    raw_limit = request.query_params.get("history_limit")
+    if raw_limit in (None, ""):
+        history_limit = 10
+    else:
+        try:
+            history_limit = int(raw_limit)
+        except (TypeError, ValueError):
+            raise InvalidRequest("history_limit 은 정수여야 합니다")
+        history_limit = max(1, min(history_limit, 50))
+
+    try:
+        team = Team.objects.select_related("board_state").prefetch_related(
+            Prefetch("members", queryset=User.objects.order_by("-is_leader", "nickname"))
+        ).get(pk=team_id)
+    except (Team.DoesNotExist, ValidationError, ValueError):
+        raise TeamNotFound()
+
+    members = list(team.members.all())
+
+    try:
+        board_position = team.board_state.position_id
+    except TeamBoardState.DoesNotExist:
+        board_position = None
+
+    agg = MileageHistory.objects.filter(team=team).aggregate(
+        earned=Sum("amount", filter=Q(amount__gt=0)),
+        spent=Sum("amount", filter=Q(amount__lt=0)),
+        purchase=Count("history_id", filter=Q(type=MileageType.PURCHASE)),
+        refund=Count("history_id", filter=Q(type=MileageType.REFUND)),
+    )
+    recent = MileageHistory.objects.filter(team=team).order_by(
+        "-created_at", "-history_id"
+    )[:history_limit]
+
+    return ok(
+        {
+            "team_id": str(team.team_id),
+            "team_name": team.team_name,
+            "team_score": num(team.team_score),
+            "mileage": team.mileage,
+            "board_position_states": board_position,
+            "is_banned": team.is_banned,
+            "ban_reason": team.ban_reason,
+            "banned_at": team.banned_at,
+            "banned_by": team.banned_by,
+            "created_at": team.created_at,
+            "member_count": len(members),
+            "members": [
+                {
+                    "user_id": str(m.user_id),
+                    "login_id": m.login_id,
+                    "nickname": m.nickname,
+                    "role": m.role,
+                    "is_leader": m.is_leader,
+                }
+                for m in members
+            ],
+            "mileage_summary": {
+                "total_earned": agg["earned"] or 0,
+                "total_spent": abs(agg["spent"] or 0),
+                "purchase_count": agg["purchase"],
+                "refund_count": agg["refund"],
+            },
+            "recent_mileage_history": [
+                {
+                    "history_id": str(r.history_id),
+                    "type": r.type,
+                    "amount": r.amount,
+                    "reason": r.reason,
+                    "processed_by": r.processed_by,
+                    "created_at": r.created_at,
+                }
+                for r in recent
+            ],
+        }
+    )
+
+@api_view(["GET"])
+@permission_classes([IsAdmin])
+def dashboard(request):
+    now = timezone.now().replace(microsecond=0)
+
+    team_agg = Team.objects.aggregate(
+        total=Count("team_id"),
+        banned=Count("team_id", filter=Q(is_banned=True)),
+        mileage=Sum("mileage"),
+    )
+    pay = MileageHistory.objects.aggregate(
+        purchase=Count("history_id", filter=Q(type=MileageType.PURCHASE)),
+        refund=Count("history_id", filter=Q(type=MileageType.REFUND)),
+        pay_sum=Sum(
+            "amount",
+            filter=Q(type__in=[MileageType.PURCHASE, MileageType.REFUND]),
+        ),
+    )
+    inst = Instance.objects.aggregate(
+        running=Count("instance_id", filter=Q(status=InstanceStatus.RUNNING)),
+        failed=Count("instance_id", filter=Q(status=InstanceStatus.FAILED)),
+        total=Count("instance_id"),
+    )
+
+    contest = Contest.objects.filter(is_active=True).first()
+    if contest is None:
+        contest_data = None
+    else:
+        snap = contest.snapshot(now)
+        contest_data = {
+            "status": snap["status"],
+            "start_time": contest.start_time,
+            "end_time": contest.end_time,
+            "remaining_seconds": snap["remaining_seconds"],
+        }
+
+    return ok(
+        {
+            "teams": {
+                "total_count": team_agg["total"],
+                "banned_count": team_agg["banned"],
+                "total_mileage": team_agg["mileage"] or 0,
+            },
+            "payment": {
+                "purchase_count": pay["purchase"],
+                "refund_count": pay["refund"],
+                "net_spent": -(pay["pay_sum"] or 0),
+            },
+            "contest": contest_data,
+            "instances": {
+                "running": inst["running"],
+                "failed": inst["failed"],
+                "total": inst["total"],
+            },
+            "challenges": {
+                "total": Challenge.objects.count(),
+                "published": Challenge.objects.filter(is_published=True).count(),
+                "solved_total": Solve.objects.count(),
+            },
+            "collected_at": now,
+        }
+    )
+
+CHALLENGE_SORT = {
+    "running": "-running_instance_count",
+    "title": "title",
+    "score": "-score",
+}
+
+
+@api_view(["GET"])
+@permission_classes([IsAdmin])
+def challenge_list(request):
+    """GET /api/v1/admin/challenges. 문제 목록 + 문제별 인스턴스 현황."""
+    sort = request.query_params.get("sort", "running")
+    if sort not in CHALLENGE_SORT:
+        raise InvalidRequest("정렬 기준이 올바르지 않습니다. (running, title, score 중 선택)")
+
+    category = request.query_params.get("category")
+    if category and category not in Challenge.CategoryType.values:
+        raise InvalidRequest("카테고리가 올바르지 않습니다")
+
+    page = _page_number(request.query_params.get("page"), 1, MAX_PAGE)
+    size = min(_page_number(request.query_params.get("size"), 50), MAX_PAGE_SIZE)
+
+    queryset = Challenge.objects.annotate(
+        solved_team_count=Count("solves", distinct=True),
+        running_instance_count=Count(
+            "instances",
+            filter=Q(instances__status=InstanceStatus.RUNNING),
+            distinct=True,
+        ),
+        failed_instance_count=Count(
+            "instances",
+            filter=Q(instances__status=InstanceStatus.FAILED),
+            distinct=True,
+        ),
+    )
+    if category:
+        queryset = queryset.filter(category=category)
+
+    is_published = request.query_params.get("is_published")
+    if is_published is not None:
+        if is_published.lower() not in ("true", "false"):
+            raise InvalidRequest("is_published 는 true 또는 false 여야 합니다")
+        queryset = queryset.filter(is_published=(is_published.lower() == "true"))
+
+    total_count = queryset.count()
+    offset = (page - 1) * size
+    rows = queryset.order_by(CHALLENGE_SORT[sort], "title")[offset : offset + size]
+
+    challenges = [
+        {
+            "challenge_id": str(c.challenge_id),
+            "title": c.title,
+            "category": c.category,
+            "difficulty": c.difficulty,
+            "score": num(c.score),
+            "is_published": c.is_published,
+            "solved_team_count": c.solved_team_count,
+            "running_instance_count": c.running_instance_count,
+            "failed_instance_count": c.failed_instance_count,
+        }
+        for c in rows
+    ]
+
+    return ok(
+        {"challenges": challenges, "total_count": total_count, "page": page, "size": size}
     )
