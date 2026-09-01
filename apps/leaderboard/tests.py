@@ -6,7 +6,8 @@ from django.utils import timezone
 from apps.accounts.models import Team, User
 from apps.challenge.models import Challenge, Solve
 from apps.koth.models import KothChallenge, KothClub, KothSolve
-
+from unittest.mock import patch
+from apps.leaderboard import views
 
 class LeaderboardAPITest(TestCase):
 
@@ -155,3 +156,21 @@ class LeaderboardAPITest(TestCase):
 
         types = {s["source_type"] for s in data["teams"][0]["solves"]}
         self.assertEqual(types, {"JEOPARDY", "KOTH"})
+
+    def test_header_and_graph_stay_consistent_under_update(self):
+        team = self.make_team_with_solve("팀", 0)
+        koth = self.make_koth_solve(team, "koth1", "40", timezone.now())
+
+        original = views.collect_solves_map
+
+        def bump_koth_after_read():
+            data = original()
+            KothSolve.objects.filter(pk=koth.pk).update(earned_score=Decimal("80"))
+            return data
+
+        with patch.object(views, "collect_solves_map", bump_koth_after_read):
+            data = self.client.get("/api/v1/leaderboard").data["data"]
+
+        row = data["teams"][0]
+        graph_sum = sum(s["points"] for s in row["solves"])
+        self.assertEqual(row["team_score"], graph_sum)
