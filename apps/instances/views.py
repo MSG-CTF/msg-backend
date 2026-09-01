@@ -255,11 +255,14 @@ class MyInstanceView(APIView):
             if challenge is None:
                 return fail("CHALLENGE_NOT_FOUND", "존재하지 않는 문제 ID입니다.", 404)
 
+            runtime_config = get_challenge_runtime_config(challenge)
+            release = runtime_config.current_release if runtime_config else None
             instance = create_instance_from_scheduler(
                 scheduler_data,
                 user=request.user,
                 team=team,
                 challenge=challenge,
+                release=release,
             )
         else:
             update_instance_from_scheduler(instance, scheduler_data)

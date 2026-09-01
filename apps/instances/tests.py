@@ -18,6 +18,7 @@ from apps.instances.models import (
     IsolationProfile,
     ReleaseContainer,
 )
+from apps.instances.services import build_scheduler_create_body
 
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 
@@ -65,6 +66,13 @@ class InstanceLockTests(TestCase):
             ports=[8080],
             expose=True,
         )
+        ReleaseContainer.objects.create(
+            release=self.release,
+            name="db",
+            image="ghcr.io/valkey-io/valkey@sha256:70739f85ad2ee01a726a965584a0f94895f01b0c60b3cc8b0aeef11eaa6888cf",
+            ports=[6379],
+            expose=False,
+        )
 
         ChallengeRuntimeConfig.objects.create(
             challenge=self.challenge,
@@ -105,3 +113,30 @@ class InstanceLockTests(TestCase):
         self.assertEqual(res.status_code, 202)
         self.assertEqual(res.data["code"], "SUCCESS")
         self.assertTrue(InstanceLock.objects.filter(user=self.user).exists())
+
+    def test_scheduler_create_body_uses_multi_container_payload(self):
+        # 릴리즈 컨테이너 목록을 Scheduler 멀티 컨테이너 요청 형식으로 변환한다
+        runtime_config = ChallengeRuntimeConfig.objects.get(challenge=self.challenge)
+
+        body = build_scheduler_create_body(
+            self.user,
+            self.team,
+            self.challenge,
+            runtime_config,
+        )
+
+        self.assertEqual(body["registry_revision"], 1)
+        self.assertEqual(body["containers"], [
+            {
+                "name": "db",
+                "image": "ghcr.io/valkey-io/valkey@sha256:70739f85ad2ee01a726a965584a0f94895f01b0c60b3cc8b0aeef11eaa6888cf",
+                "ports": [6379],
+                "expose": False,
+            },
+            {
+                "name": "web",
+                "image": "ghcr.io/msg-ctf/challenges/web-basic/web@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "ports": [8080],
+                "expose": True,
+            },
+        ])

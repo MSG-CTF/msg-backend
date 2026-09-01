@@ -181,13 +181,50 @@ def scheduler_error_from_response(error):
     )
 
 
+def release_registry_revision(release):
+    # PR #26 registry_revision과 기존 revision 필드를 모두 지원한다
+    revision = getattr(release, "registry_revision", None)
+    if revision is None:
+        revision = getattr(release, "revision", None)
+
+    if not isinstance(revision, int) or revision <= 0:
+        raise SchedulerError("INVALID_REQUEST", "릴리즈 revision 설정을 확인해주세요.", 400)
+
+    return revision
+
+
+def release_container_image(container):
+    # Registry 내부 image_ref를 Scheduler의 image 필드로 변환한다
+    return getattr(container, "image_ref", getattr(container, "image", None))
+
+
+def release_container_ports(container):
+    # PR #26 포트 객체 배열과 기존 정수 배열을 Scheduler 포트 배열로 변환한다
+    ports = []
+    for entry in container.ports:
+        if isinstance(entry, dict):
+            ports.append(entry.get("port"))
+        else:
+            ports.append(entry)
+
+    return ports
+
+
+def release_container_expose(container):
+    # PR #26 public 포트 정보를 Scheduler의 expose 값으로 변환한다
+    if hasattr(container, "expose"):
+        return container.expose
+
+    return any(entry.get("public") for entry in container.ports if isinstance(entry, dict))
+
+
 def serialize_release_container(container):
-    # Scheduler create 요청에 들어갈 컨테이너 정보를 생성
+    # Scheduler create 요청에 들어갈 컨테이너 정보를 생성한다
     return {
         "name": container.name,
-        "image": container.image,
-        "ports": container.ports,
-        "expose": container.expose,
+        "image": release_container_image(container),
+        "ports": release_container_ports(container),
+        "expose": release_container_expose(container),
     }
 
 
@@ -202,8 +239,8 @@ def build_scheduler_create_body(user, team, challenge, runtime_config):
         "user_id": str(user.user_id),
         "challenge_id": str(challenge.challenge_id),
         "containers": [serialize_release_container(container) for container in containers],
-        "registry_revision": release.revision,
-        "isolation_profile": release.isolation_profile,
+        "registry_revision": release_registry_revision(release),
+        "isolation_profile": getattr(release, "isolation_profile", "WEB"),
         "architecture": release.architecture,
         "resource_profile": {
             "cpu_millicores": release.cpu_millicores,
@@ -335,8 +372,11 @@ def sync_instance_from_scheduler(instance, auth_header=None):
 
 def validate_release_for_scheduler(release):
     # Scheduler create 요청 전에 릴리즈 컨테이너 조건을 확인한다
+    if release is None:
+        raise SchedulerError("ACTIVE_RELEASE_NOT_FOUND", "활성화된 문제 릴리즈가 없습니다.", 404)
+
     containers = list(release.containers.all())
-    exposed = [container for container in containers if container.expose]
+    exposed = [container for container in containers if release_container_expose(container)]
 
     if not 1 <= len(containers) <= 8:
         raise SchedulerError("INVALID_REQUEST", "컨테이너 설정을 확인해주세요.", 400)
@@ -344,9 +384,13 @@ def validate_release_for_scheduler(release):
     if len(exposed) != 1:
         raise SchedulerError("INVALID_REQUEST", "공개 컨테이너 설정을 확인해주세요.", 400)
 
-    if len(exposed[0].ports) != 1:
+    if len(release_container_ports(exposed[0])) != 1:
         raise SchedulerError("INVALID_REQUEST", "공개 컨테이너 포트 설정을 확인해주세요.", 400)
 
     for container in containers:
-        if not str(container.image).startswith("ghcr.io/") or "@sha256:" not in container.image:
+        image = release_container_image(container)
+        ports = release_container_ports(container)
+        if not str(image).startswith("ghcr.io/") or "@sha256:" not in str(image):
             raise SchedulerError("INVALID_REQUEST", "컨테이너 이미지 설정을 확인해주세요.", 400)
+        if not ports or any(not isinstance(port, int) for port in ports):
+            raise SchedulerError("INVALID_REQUEST", "컨테이너 포트 설정을 확인해주세요.", 400)

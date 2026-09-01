@@ -635,6 +635,7 @@ def instance_force_reset(request, instance_id):
             user=instance.user,
             team=instance.team,
             challenge=instance.challenge,
+            release=instance.release,
             replaced_instance=instance,
         )
 
