@@ -7,20 +7,42 @@ from apps.ranking.ranking import build_team_ranking
 from apps.common.exceptions import UserHasNoTeam
 from apps.common.permissions import IsAuthenticated
 from apps.ranking.pagination import parse_pagination
+from django.db.models import Max, Min, OuterRef, Subquery, Sum
+from apps.koth.models import KothSolve
 
+
+def format_datetime(value):
+    if value is None:
+        return None
+    return value.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 def collect_team_data():
-    teams = Team.objects.filter(is_banned=False)
+    koth_score_sq = KothSolve.objects.filter(
+        team=OuterRef("pk"),
+    ).values("team").annotate(total=Sum("earned_score")).values("total")
+
+    koth_first_sq = KothSolve.objects.filter(
+        team=OuterRef("pk"),
+        solved_at__isnull=False,
+    ).values("team").annotate(first=Min("solved_at")).values("first")
+
+    teams = Team.objects.filter(is_banned=False).annotate(
+        jeopardy_total=Sum("solves__challenge__current_score"),
+        last_jeopardy_at=Max("solves__solved_at"),
+        koth_total=Subquery(koth_score_sq),
+        first_koth_at=Subquery(koth_first_sq),
+    )
+
     team_data = []
     for team in teams:
         team_data.append({
             "team_id": str(team.team_id),
             "team_name": team.team_name,
-            "jeopardy_score": team.team_score,
+            "jeopardy_score": team.jeopardy_total or Decimal("0"),
             "mileage": team.mileage,
-            "koth_score": Decimal("0"), #koth앱 생기면 SUM(koth점수)로 수정
-            "jeopardy_solved_at": None, #solves앱 생기면 MAX(solves.solved_at)로 수정
-            "koth_solved_at": None,
+            "koth_score": team.koth_total or Decimal("0"),
+            "jeopardy_solved_at": team.last_jeopardy_at,
+            "koth_solved_at": team.first_koth_at,
         })
     return team_data
 
@@ -32,10 +54,11 @@ def team_ranking(request):
         request.query_params.get("size"),
     )
 
-    rankings = build_team_ranking(collect_team_data(), limit=None) 
+    rankings = build_team_ranking(collect_team_data(), limit=None)
 
-    for row in rankings:                            
+    for row in rankings:
         row["team_score"] = num(row["team_score"])
+        row["last_solved_at"] = format_datetime(row["last_solved_at"])
 
     start = (page - 1) * size
     end = start + size
@@ -61,7 +84,7 @@ def my_team_ranking(request):
     for row in rankings:
         if row["team_id"] == my_team_id:
             row["team_score"] = num(row["team_score"])
+            row["last_solved_at"] = format_datetime(row["last_solved_at"])
             return ok(row)
 
     return ok(None)
-        

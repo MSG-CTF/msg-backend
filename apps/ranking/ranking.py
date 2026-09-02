@@ -1,13 +1,8 @@
 def resolve_last_solved_at(jeopardy_solved_at, koth_solved_at):
-    if jeopardy_solved_at is None:
-        return koth_solved_at
-    if koth_solved_at is None:
+    if jeopardy_solved_at is not None:
         return jeopardy_solved_at
 
-    if jeopardy_solved_at > koth_solved_at:
-        return jeopardy_solved_at
-    else:
-        return koth_solved_at
+    return koth_solved_at 
 
 def build_team_ranking(team_data, limit=None):
     result = []
