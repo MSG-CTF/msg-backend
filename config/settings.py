@@ -208,6 +208,7 @@ REST_FRAMEWORK = {
         "login": "10/min",
     }
 }
+SCHEDULER_API_TOKEN = os.getenv("SCHEDULER_API_TOKEN", "")
 SCHEDULER_BASE_URL = os.getenv(
     "SCHEDULER_BASE_URL", "http://127.0.0.1:8001"
 ).rstrip("/")

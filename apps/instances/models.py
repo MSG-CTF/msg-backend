@@ -39,6 +39,11 @@ class RuntimeType(models.TextChoices):
     VM = "VM"
 
 
+class IsolationProfile(models.TextChoices):
+    WEB = "WEB"
+    PWN = "PWN"
+
+
 class Instance(models.Model):
     instance_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(
@@ -150,6 +155,11 @@ class ChallengeRelease(models.Model):
         max_length=20,
         choices=ArchitectureType.choices,
         default=ArchitectureType.AMD64,
+    )
+    isolation_profile = models.CharField(
+        max_length=20,
+        choices=IsolationProfile.choices,
+        default=IsolationProfile.WEB,
     )
     cpu_millicores = models.IntegerField()
     memory_mib = models.IntegerField()

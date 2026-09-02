@@ -174,6 +174,7 @@ class InstanceResetView(APIView):
                 team=instance.team,
                 challenge=instance.challenge,
                 replaced_instance=instance,
+                release=instance.release,
             )
             response_data = serialize_instance(new_instance, include_replaced=True)
 
