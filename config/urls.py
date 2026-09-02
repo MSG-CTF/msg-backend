@@ -17,6 +17,7 @@ urlpatterns = [
     path("api/v1/", include("apps.ranking.urls")),
     path("api/v1/", include("apps.challenge.urls")),
     path("api/v1/", include("apps.instances.urls")),
+    path("api/v1/", include("apps.leaderboard.urls")),
     path("api/v1/board", BoardView.as_view(), name="board"),
     path("api/v1/board/", include("apps.board.urls")),
     path("api/v1/", include("apps.koth.urls")),
