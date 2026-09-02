@@ -1,21 +1,28 @@
 from datetime import datetime, timedelta, timezone
-from django.utils import timezone as django_timezone
-from django.test import SimpleTestCase
-from apps.ranking.ranking import build_team_ranking, resolve_last_solved_at
-from django.test import TestCase
-from apps.accounts.models import Team
-from apps.ranking.scoring import calculate_dynamic_score
-from apps.challenge.models import Challenge, Solve
-from apps.koth.models import KothChallenge, KothClub, KothSolve
-from apps.ranking.views import collect_team_data
 from decimal import Decimal
 
-BASE_TIME = datetime(2026, 8, 16, 0, 0, 0, tzinfo=timezone.utc) 
+from django.test import SimpleTestCase, TestCase
+
+from apps.accounts.models import Team, User
+from apps.challenge.models import Challenge, Solve
+from apps.koth.models import KothChallenge, KothClub, KothSolve
+from apps.ranking.ranking import (
+    build_team_ranking,
+    build_member_ranking,
+    resolve_last_solved_at,
+)
+from apps.ranking.scoring import calculate_dynamic_score
+from apps.ranking.views import collect_team_data
+
+from rest_framework.test import APITestCase
+from apps.common.jwt import issue_access_token
+
+BASE_TIME = datetime(2026, 8, 16, 0, 0, 0, tzinfo=timezone.utc)
 
 
 def make_team(name, jeopardy=0, koth=0, mileage=0, jeopardy_at=None, koth_at=None):
     return {
-        "team_id": name,          
+        "team_id": name,
         "team_name": name,
         "jeopardy_score": jeopardy,
         "koth_score": koth,
@@ -25,6 +32,19 @@ def make_team(name, jeopardy=0, koth=0, mileage=0, jeopardy_at=None, koth_at=Non
     }
 
 
+def make_member(name, score=0, solved=0, at=None):
+    return {
+        "user_id": name,
+        "nickname": name,
+        "team_id": "team_" + name,
+        "team_name": "team_" + name,
+        "user_score": score,
+        "solved_count": solved,
+        "last_solved_at": at,
+    }
+
+def auth(client, user):
+    client.credentials(HTTP_AUTHORIZATION=f"Bearer {issue_access_token(user)}")
 class ResolveLastSolvedAtTest(SimpleTestCase):
 
     def test_both_none_returns_none(self):
@@ -43,6 +63,7 @@ class ResolveLastSolvedAtTest(SimpleTestCase):
         later = BASE_TIME + timedelta(hours=1)
         result = resolve_last_solved_at(BASE_TIME, later)
         self.assertEqual(result, BASE_TIME)
+
 
 class BuildTeamRankingTest(SimpleTestCase):
 
@@ -79,8 +100,6 @@ class BuildTeamRankingTest(SimpleTestCase):
         self.assertEqual(result[0]["team_name"], "solved")
         self.assertEqual(result[1]["team_name"], "nothing")
 
-   
-
     def test_rank_starts_from_one(self):
         team_data = [
             make_team("A", jeopardy=100, jeopardy_at=BASE_TIME),
@@ -112,6 +131,7 @@ class BuildTeamRankingTest(SimpleTestCase):
         result = build_team_ranking(team_data)
         self.assertEqual(result[0]["team_name"], "aaa")
 
+
 class CalculateDynamicScoreTest(SimpleTestCase):
 
     def test_no_solve_returns_initial(self):
@@ -138,6 +158,45 @@ class CalculateDynamicScoreTest(SimpleTestCase):
     def test_accepts_decimal_input(self):
         result = calculate_dynamic_score(Decimal("1000"), Decimal("600"), 70, 10)
         self.assertEqual(result, 992)
+
+
+class BuildMemberRankingTest(SimpleTestCase):
+
+    def test_higher_score_first(self):
+        data = [
+            make_member("low", 500, 1, BASE_TIME),
+            make_member("high", 900, 2, BASE_TIME),
+        ]
+        result = build_member_ranking(data)
+        self.assertEqual(result[0]["nickname"], "high")
+
+    def test_tie_breaks_by_earlier_solve(self):
+        early = BASE_TIME
+        late = BASE_TIME + timedelta(hours=1)
+        data = [
+            make_member("late", 800, 1, late),
+            make_member("early", 800, 1, early),
+        ]
+        result = build_member_ranking(data)
+        self.assertEqual(result[0]["nickname"], "early")
+
+    def test_no_solve_goes_last(self):
+        data = [
+            make_member("nothing"),
+            make_member("solved", 100, 1, BASE_TIME),
+        ]
+        result = build_member_ranking(data)
+        self.assertEqual(result[1]["nickname"], "nothing")
+
+    def test_rank_starts_from_one(self):
+        data = [
+            make_member("a", 900, 2, BASE_TIME),
+            make_member("b", 500, 1, BASE_TIME),
+        ]
+        result = build_member_ranking(data)
+        self.assertEqual(result[0]["rank"], 1)
+        self.assertEqual(result[1]["rank"], 2)
+
 
 class CollectTeamDataTest(TestCase):
 
@@ -182,7 +241,6 @@ class CollectTeamDataTest(TestCase):
                 earned_score=Decimal("1000"), earned_mileage=100,
             )
 
-        club = KothClub.objects.create(name="동아리")
         for i in range(2):
             club = KothClub.objects.create(name=f"동아리{i}")
             kc = self.make_koth_challenge(club, f"koth{i}")
@@ -223,3 +281,102 @@ class CollectTeamDataTest(TestCase):
         self.assertEqual(data[0]["koth_score"], Decimal("0"))
         self.assertIsNone(data[0]["jeopardy_solved_at"])
         self.assertIsNone(data[0]["koth_solved_at"])
+
+class MemberRankingAPITest(APITestCase):
+
+    URL = "/api/v1/ranking/member"
+
+    def setUp(self):
+        self.team = Team.objects.create(team_name="알파")
+        self.user = User.objects.create_user(
+            login_id="me", password="pw", nickname="나", team=self.team,
+        )
+
+    def make_challenge(self, name, score):
+        return Challenge.objects.create(
+            title=name,
+            category="WEB",
+            difficulty="EASY",
+            score=Decimal(score),
+            current_score=Decimal(score),
+            flag_hash=f"hash_{name}",
+            is_published=True,
+        )
+
+    def solve(self, user, name, score):
+        c = self.make_challenge(name, score)
+        Solve.objects.create(
+            team=user.team, challenge=c, solved_by_user=user,
+            earned_score=Decimal(score), earned_mileage=100,
+        )
+
+    def test_returns_my_rank(self):
+        self.solve(self.user, "문제1", "1000")
+        auth(self.client, self.user)
+
+        res = self.client.get(self.URL)
+
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data["data"]["user_score"], 1000)
+        self.assertEqual(res.data["data"]["rank"], 1)
+
+    def test_without_token_returns_401(self):
+        res = self.client.get(self.URL)
+
+        self.assertEqual(res.status_code, 401)
+        self.assertEqual(res.data["code"], "TOKEN_MISSING")
+
+    def test_user_without_team_returns_404(self):
+        admin = User.objects.create_user(login_id="admin", password="pw", nickname="관리자")
+        auth(self.client, admin)
+
+        res = self.client.get(self.URL)
+
+        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.data["code"], "USER_HAS_NO_TEAM")
+
+    def test_banned_team_returns_null(self):
+        self.solve(self.user, "문제1", "1000")
+        Team.objects.filter(pk=self.team.pk).update(is_banned=True)
+        auth(self.client, self.user)
+
+        res = self.client.get(self.URL)
+
+        self.assertEqual(res.status_code, 200)
+        self.assertIsNone(res.data["data"])
+
+    def test_no_solve_returns_zero(self):
+        auth(self.client, self.user)
+
+        res = self.client.get(self.URL)
+
+        self.assertEqual(res.data["data"]["user_score"], 0)
+        self.assertEqual(res.data["data"]["solved_count"], 0)
+        self.assertIsNone(res.data["data"]["last_solved_at"])
+
+    def test_teammate_solve_is_excluded(self):
+        mate = User.objects.create_user(
+            login_id="mate", password="pw", nickname="팀원", team=self.team,
+        )
+        self.solve(self.user, "내문제", "1000")
+        self.solve(mate, "팀원문제", "500")
+        auth(self.client, self.user)
+
+        res = self.client.get(self.URL)
+
+        self.assertEqual(res.data["data"]["user_score"], 1000)
+        self.assertEqual(res.data["data"]["solved_count"], 1)
+
+    def test_response_has_exact_keys(self):
+        self.solve(self.user, "문제1", "1000")
+        auth(self.client, self.user)
+
+        res = self.client.get(self.URL)
+
+        self.assertEqual(
+            set(res.data["data"].keys()),
+            {
+                "rank", "user_id", "nickname", "team_id", "team_name",
+                "user_score", "solved_count", "last_solved_at",
+            },
+        )
