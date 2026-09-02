@@ -1,5 +1,4 @@
 from decimal import Decimal
-from django.db import transaction
 from rest_framework.decorators import api_view
 from apps.accounts.models import Team
 from apps.challenge.models import Solve
@@ -85,9 +84,8 @@ def build_team_data(teams, solves_map):
 
 @api_view(["GET"])
 def leaderboard(request):
-    with transaction.atomic():
-        solves_map = collect_solves_map()
-        teams = list(Team.objects.filter(is_banned=False))
+    solves_map = collect_solves_map()
+    teams = list(Team.objects.filter(is_banned=False))
 
     rankings = build_team_ranking(build_team_data(teams, solves_map), limit=TOP_TEAM_COUNT)
 

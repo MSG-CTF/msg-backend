@@ -1,18 +1,17 @@
-from django.test import TestCase
 from datetime import timedelta
 from decimal import Decimal
+from unittest.mock import patch
 from django.test import TestCase
 from django.utils import timezone
-from apps.accounts.models import Team, User
+from apps.accounts.models import Team
 from apps.challenge.models import Challenge, Solve
 from apps.koth.models import KothChallenge, KothClub, KothSolve
-from unittest.mock import patch
 from apps.leaderboard import views
+
 
 class LeaderboardAPITest(TestCase):
 
     def setUp(self):
-        #문제 하나를 만들어 여러 팀이 풀게 한다
         self.challenge = Challenge.objects.create(
             title="테스트문제",
             category="WEB",
@@ -52,8 +51,27 @@ class LeaderboardAPITest(TestCase):
             earned_mileage=100,
         )
         if solved_at is not None:
-            # auto_now_add라 생성 후 직접 갱신한다
             Solve.objects.filter(pk=solve.pk).update(solved_at=solved_at)
+        return team
+
+    def make_team_with_score(self, name, stored, actual):
+        # 저장된 team_score와 실제 문제 점수를 따로 지정한다
+        team = Team.objects.create(team_name=name, team_score=Decimal(stored))
+        challenge = Challenge.objects.create(
+            title=f"문제_{name}",
+            category="WEB",
+            difficulty="EASY",
+            score=Decimal(actual),
+            current_score=Decimal(actual),
+            flag_hash=f"hash_{name}",
+            is_published=True,
+        )
+        Solve.objects.create(
+            team=team,
+            challenge=challenge,
+            earned_score=Decimal(actual),
+            earned_mileage=100,
+        )
         return team
 
     def test_team_without_solve_is_excluded(self):
@@ -116,9 +134,7 @@ class LeaderboardAPITest(TestCase):
         self.assertEqual(data["teams"], [])
         self.assertEqual(data["total_count"], 0)
 
-
     def test_koth_only_team_is_included(self):
-        # KOTH만 푼 팀도 그래프에 포함한다
         team = Team.objects.create(team_name="koth팀")
         self.make_koth_solve(team, "koth1", "40", timezone.now())
 
@@ -128,7 +144,6 @@ class LeaderboardAPITest(TestCase):
         self.assertIn("koth팀", names)
 
     def test_header_score_matches_graph_sum(self):
-        # 헤더 team_score와 그래프 points 합이 같아야 한다
         self.make_team_with_solve("팀", 0)
 
         data = self.client.get("/api/v1/leaderboard").data["data"]
@@ -138,17 +153,14 @@ class LeaderboardAPITest(TestCase):
         self.assertEqual(team["team_score"], graph_sum)
 
     def test_total_score_sums_jeopardy_and_koth(self):
-        # 총점은 제오파디 + KOTH다
         team = self.make_team_with_solve("팀", 0)
         self.make_koth_solve(team, "koth1", "40", timezone.now())
 
         data = self.client.get("/api/v1/leaderboard").data["data"]
 
-        # 제오파디 1000 + KOTH 40
         self.assertEqual(data["teams"][0]["team_score"], 1040)
 
     def test_graph_includes_koth_solve(self):
-        # 그래프에 KOTH 항목이 들어간다
         team = self.make_team_with_solve("팀", 0)
         self.make_koth_solve(team, "koth1", "40", timezone.now())
 
@@ -156,6 +168,17 @@ class LeaderboardAPITest(TestCase):
 
         types = {s["source_type"] for s in data["teams"][0]["solves"]}
         self.assertEqual(types, {"JEOPARDY", "KOTH"})
+
+    def test_stored_team_score_is_ignored(self):
+        self.make_team_with_score("저장9999", stored="9999", actual="100")
+        self.make_team_with_score("저장0", stored="0", actual="200")
+
+        data = self.client.get("/api/v1/leaderboard").data["data"]
+
+        self.assertEqual(data["teams"][0]["team_name"], "저장0")
+        self.assertEqual(data["teams"][0]["team_score"], 200)
+        self.assertEqual(data["teams"][1]["team_name"], "저장9999")
+        self.assertEqual(data["teams"][1]["team_score"], 100)
 
     def test_header_and_graph_stay_consistent_under_update(self):
         team = self.make_team_with_solve("팀", 0)
