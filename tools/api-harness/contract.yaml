@@ -54,7 +54,7 @@ enum_rules:
   - leaf: difficulty
     values: [EASY, MEDIUM, HARD]
   - leaf: category
-    values: [WEB, PWN, REV, CRYPTO, FORENSIC, MISC]
+    values: [WEB, PWN, REV, CRYPTO, FORENSIC, MISC, WEB3, OSINT]
   - leaf: status
     parents: [instance, instances]
     values: [REQUESTED, SCHEDULING, PROVISIONING, RUNNING, RESTARTING, RESETTING, STOPPING, STOPPED, FAILED, EXPIRED, CLEANUP_PENDING, CLEANED]
