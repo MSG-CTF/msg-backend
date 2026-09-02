@@ -124,8 +124,18 @@ class ReleaseRegisterTests(ReleaseTestBase):
         )
         self.assertEqual(res.data["data"]["version"], 2)
 
-    def test_register_multi_container_is_not_deployable(self):
-        # 멀티 컨테이너 릴리스는 등록되지만 현 Scheduler 계약으로는 배포 불가로 표시된다
+    def test_register_pwn_release_sets_isolation_profile(self):
+        self.auth("root")
+        res = self.register(category="pwn")
+
+        self.assertEqual(res.status_code, 200)
+        release = ChallengeRelease.objects.get(
+            release_id=res.data["data"]["release_id"]
+        )
+        self.assertEqual(release.isolation_profile, "PWN")
+
+    def test_register_multi_container_is_deployable(self):
+        # 공개 포트가 하나인 멀티 컨테이너 릴리스는 Scheduler 계약으로 배포할 수 있다
         self.auth("root")
         res = self.register(
             containers=[
@@ -142,7 +152,7 @@ class ReleaseRegisterTests(ReleaseTestBase):
             ]
         )
         self.assertEqual(res.status_code, 200)
-        self.assertFalse(res.data["data"]["is_deployable"])
+        self.assertTrue(res.data["data"]["is_deployable"])
 
     def test_register_rejects_tag_reference(self):
         # digest가 아닌 태그 참조는 거절한다
@@ -288,8 +298,8 @@ class ReleaseActivateTests(ReleaseTestBase):
         self.assertEqual(res.status_code, 200)
         self.assertIsNone(res.data["data"]["previous_release_id"])
 
-    def test_activate_rejects_multi_container_release(self):
-        # 현 Scheduler 계약으로 배포할 수 없는 릴리스는 전환을 거절한다
+    def test_activate_accepts_multi_container_release(self):
+        # 공개 포트가 하나인 멀티 컨테이너 릴리스도 현재 릴리스로 전환할 수 있다
         self.auth("root")
         release_id = self.register(
             containers=[
@@ -307,8 +317,8 @@ class ReleaseActivateTests(ReleaseTestBase):
         ).data["data"]["release_id"]
 
         res = self.activate(release_id)
-        self.assertEqual(res.status_code, 400)
-        self.assertEqual(res.data["code"], "RELEASE_NOT_DEPLOYABLE")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data["data"]["release_id"], release_id)
 
     def test_activate_unknown_release(self):
         self.auth("root")
@@ -352,7 +362,7 @@ class ReleaseListTests(ReleaseTestBase):
         self.assertEqual(res.data["data"]["total_count"], 0)
 
 
-@override_settings(CACHES=LOCMEM)
+@override_settings(CACHES=LOCMEM, SCHEDULER_API_TOKEN="test-scheduler-token")
 class ReleaseInstanceCreateTests(ReleaseTestBase):
     def setUp(self):
         super().setUp()
@@ -374,9 +384,23 @@ class ReleaseInstanceCreateTests(ReleaseTestBase):
 
     @patch("apps.instances.services.scheduler_request")
     def test_create_uses_current_release_and_saves_snapshot(self, scheduler_request):
-        # 생성 요청은 현재 릴리스의 이미지로 나가고 인스턴스에 릴리스가 스냅샷된다
+        # 생성 요청은 현재 릴리스의 멀티 컨테이너 값으로 나가고 인스턴스에 릴리스가 스냅샷된다
         self.auth("root")
-        release_id = self.register(revision=1).data["data"]["release_id"]
+        release_id = self.register(
+            revision=1,
+            containers=[
+                {
+                    "name": "web",
+                    "image": f"ghcr.io/msg-ctf/challenges/web-basic/web@sha256:{DIGEST_A}",
+                    "ports": [{"port": 8080, "public": True}],
+                },
+                {
+                    "name": "db",
+                    "image": f"ghcr.io/msg-ctf/challenges/web-basic/db@sha256:{DIGEST_B}",
+                    "ports": [{"port": 5432, "public": False}],
+                },
+            ],
+        ).data["data"]["release_id"]
         self.activate(release_id)
 
         instance_id = uuid.uuid4()
@@ -401,13 +425,67 @@ class ReleaseInstanceCreateTests(ReleaseTestBase):
         body = scheduler_request.call_args.kwargs.get("body")
         if body is None:
             body = scheduler_request.call_args.args[2]
+        self.assertEqual(
+            scheduler_request.call_args.kwargs["auth_header"],
+            "Bearer test-scheduler-token",
+        )
         release = ChallengeRelease.objects.get(release_id=release_id)
-        container = release.containers.first()
-        self.assertEqual(body["container_image"], container.image_ref)
-        self.assertEqual(body["container_port"], 8080)
+        self.assertEqual(body["registry_revision"], release.registry_revision)
+        self.assertEqual(body["isolation_profile"], "WEB")
         self.assertEqual(body["architecture"], "AMD64")
+        self.assertEqual(
+            body["containers"],
+            [
+                {
+                    "name": "db",
+                    "image": f"ghcr.io/msg-ctf/challenges/web-basic/db@sha256:{DIGEST_B}",
+                    "ports": [5432],
+                    "expose": False,
+                },
+                {
+                    "name": "web",
+                    "image": f"ghcr.io/msg-ctf/challenges/web-basic/web@sha256:{DIGEST_A}",
+                    "ports": [8080],
+                    "expose": True,
+                },
+            ],
+        )
 
         from apps.instances.models import Instance
 
         instance = Instance.objects.get(instance_id=instance_id)
         self.assertEqual(instance.release_id, release.release_id)
+
+    def test_create_from_scheduler_restores_release_by_registry_revision(self):
+        self.auth("root")
+        release_id = self.register(revision=1).data["data"]["release_id"]
+        self.register(
+            revision=2,
+            containers=[
+                {
+                    "name": "app",
+                    "image": f"ghcr.io/msg-ctf/challenges/web-basic/app@sha256:{DIGEST_B}",
+                    "ports": [{"port": 8080, "public": True}],
+                }
+            ],
+        )
+
+        from apps.instances.services import create_instance_from_scheduler
+
+        instance_id = uuid.uuid4()
+        instance = create_instance_from_scheduler(
+            {
+                "instance_id": str(instance_id),
+                "challenge_id": str(self.challenge.challenge_id),
+                "registry_revision": 1,
+                "status": "RUNNING",
+                "service_url": "https://instance.example",
+                "expires_at": "2026-11-08T10:00:00Z",
+                "hard_expires_at": "2026-11-08T11:00:00Z",
+            },
+            user=self.player,
+            team=self.team,
+            challenge=self.challenge,
+        )
+
+        self.assertEqual(str(instance.release_id), release_id)

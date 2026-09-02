@@ -8,7 +8,12 @@ from django.conf import settings
 from django.utils.dateparse import parse_datetime
 
 from apps.challenge.models import Challenge
-from apps.instances.models import ChallengeRuntimeConfig, Instance, InstanceStatus
+from apps.instances.models import (
+    ChallengeRelease,
+    ChallengeRuntimeConfig,
+    Instance,
+    InstanceStatus,
+)
 
 
 ACTIVE_INSTANCE_STATUSES = [
@@ -64,12 +69,16 @@ def parse_scheduler_datetime(value):
     return parse_datetime(value)
 
 
-def scheduler_auth_header(request):
-    # 사용자의 Authorization 헤더를 Scheduler 호출에 그대로 전달한다
-    if request is None:
-        return None
+def scheduler_auth_header(request=None):
+    # Scheduler 호출에 사용할 내부 API 토큰 헤더를 만든다
+    if not settings.SCHEDULER_API_TOKEN:
+        raise SchedulerError(
+            "SCHEDULER_UNAVAILABLE",
+            "인스턴스 서버 설정이 올바르지 않습니다.",
+            503,
+        )
 
-    return request.headers.get("Authorization")
+    return f"Bearer {settings.SCHEDULER_API_TOKEN}"
 
 
 def get_active_instance(user):
@@ -93,21 +102,79 @@ def get_challenge_runtime_config(challenge):
     )
 
 
-def resolve_release_workload(release):
-    # 현 Scheduler 계약이 받는 대표 컨테이너의 이미지와 포트를 릴리스에서 뽑는다
-    for container in release.containers.all():
-        public_ports = [
-            entry["port"] for entry in container.ports if entry.get("public")
-        ]
-        if public_ports:
-            return container.image_ref, public_ports[0]
+def get_release_from_scheduler_data(challenge, scheduler_data):
+    registry_revision = scheduler_data.get("registry_revision")
+    if registry_revision is not None:
+        release = ChallengeRelease.objects.filter(
+            challenge=challenge,
+            registry_revision=registry_revision,
+        ).first()
+        if release is not None:
+            return release
 
-    # activate 게이트가 public 컨테이너 없는 릴리스를 막으므로 정상 흐름에서는 오지 않는다
-    raise SchedulerError(
-        "RELEASE_NOT_DEPLOYABLE",
-        "현재 릴리스에 public 컨테이너가 없습니다.",
-        500,
-    )
+    runtime_config = get_challenge_runtime_config(challenge)
+    if runtime_config is None:
+        return None
+    return runtime_config.current_release
+
+
+def release_container_ports(container):
+    return [entry["port"] for entry in container.ports]
+
+
+def release_container_public_ports(container):
+    return [entry["port"] for entry in container.ports if entry.get("public")]
+
+
+def release_container_expose(container):
+    return bool(release_container_public_ports(container))
+
+
+def serialize_release_container(container):
+    return {
+        "name": container.name,
+        "image": container.image_ref,
+        "ports": release_container_ports(container),
+        "expose": release_container_expose(container),
+    }
+
+
+def validate_release_for_scheduler(release):
+    containers = list(release.containers.all())
+    exposed = [
+        container for container in containers
+        if release_container_expose(container)
+    ]
+
+    if release.registry_revision <= 0:
+        raise SchedulerError(
+            "RELEASE_NOT_DEPLOYABLE",
+            "Scheduler에 전달할 수 없는 legacy 릴리스입니다.",
+            400,
+        )
+
+    if not 1 <= len(containers) <= 8:
+        raise SchedulerError(
+            "RELEASE_NOT_DEPLOYABLE",
+            "현재 Scheduler 계약으로 배포할 수 없는 릴리스입니다.",
+            400,
+        )
+
+    if len(exposed) != 1:
+        raise SchedulerError(
+            "RELEASE_NOT_DEPLOYABLE",
+            "공개 컨테이너 설정을 확인해주세요.",
+            400,
+        )
+
+    if len(release_container_public_ports(exposed[0])) != 1 or len(
+        release_container_ports(exposed[0])
+    ) != 1:
+        raise SchedulerError(
+            "RELEASE_NOT_DEPLOYABLE",
+            "공개 컨테이너 포트 설정을 확인해주세요.",
+            400,
+        )
 
 
 def serialize_instance(instance, include_title=False, include_replaced=False):
@@ -201,13 +268,18 @@ def scheduler_error_from_response(error):
 
 def build_scheduler_create_body(user, team, challenge, runtime_config, release):
     # Scheduler 인스턴스 생성 요청 body를 현재 릴리스 값으로 만든다
-    container_image, container_port = resolve_release_workload(release)
+    validate_release_for_scheduler(release)
+    containers = release.containers.order_by("name")
     return {
         "team_id": str(team.team_id),
         "user_id": str(user.user_id),
         "challenge_id": str(challenge.challenge_id),
-        "container_image": container_image,
-        "container_port": container_port,
+        "containers": [
+            serialize_release_container(container)
+            for container in containers
+        ],
+        "registry_revision": release.registry_revision,
+        "isolation_profile": release.isolation_profile,
         "architecture": release.architecture,
         "resource_profile": {
             "cpu_millicores": release.cpu_millicores,
@@ -311,6 +383,8 @@ def create_instance_from_scheduler(
     # Scheduler가 발급한 instance_id로 백엔드 인스턴스 row를 만든다
     if challenge is None:
         challenge = Challenge.objects.filter(challenge_id=scheduler_data.get("challenge_id")).first()
+    if release is None and challenge is not None:
+        release = get_release_from_scheduler_data(challenge, scheduler_data)
 
     instance, _ = Instance.objects.update_or_create(
         instance_id=scheduler_data["instance_id"],

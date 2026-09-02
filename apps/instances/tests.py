@@ -20,7 +20,7 @@ from apps.instances.models import (
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 
 
-@override_settings(CACHES=LOCMEM)
+@override_settings(CACHES=LOCMEM, SCHEDULER_API_TOKEN="test-scheduler-token")
 class InstanceLockTests(TestCase):
     def setUp(self):
         cache.clear()

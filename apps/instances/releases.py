@@ -2,7 +2,7 @@ import re
 
 from django.db.models import Max
 
-from apps.instances.models import ChallengeRelease, ReleaseContainer
+from apps.instances.models import ChallengeRelease, IsolationProfile, ReleaseContainer
 from apps.instances.services import isoformat_z
 
 # 공급망 발행 명명과 동일한 digest 고정 GHCR 참조만 허용한다
@@ -14,7 +14,7 @@ IMAGE_REF_PATTERN = re.compile(
 )
 
 SUPPORTED_SCHEMA_VERSION = "2.0"
-MAX_CONTAINERS = 10
+MAX_CONTAINERS = 8
 MAX_NOTE_LENGTH = 500
 
 
@@ -34,6 +34,12 @@ def _require_positive_int(value, field):
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ReleaseValidationError(f"{field} 값은 양의 정수여야 합니다")
     return value
+
+
+def _isolation_profile_from_category(category):
+    if isinstance(category, str) and category.lower() == "pwn":
+        return IsolationProfile.PWN
+    return IsolationProfile.WEB
 
 
 def _validate_ports(raw_ports, container_name):
@@ -151,6 +157,7 @@ def validate_release_payload(body):
         "registry_revision": _require_positive_int(artifact.get("revision"), "revision"),
         "runtime_type": runtime_type,
         "architecture": architecture,
+        "isolation_profile": _isolation_profile_from_category(artifact.get("category")),
         "cpu_millicores": _require_positive_int(
             resource_profile.get("cpu_millicores"), "resource_profile.cpu_millicores"
         ),
@@ -200,6 +207,7 @@ def create_release(challenge, validated, created_by):
         challenge_slug=validated["challenge_slug"],
         runtime_type=validated["runtime_type"],
         architecture=validated["architecture"],
+        isolation_profile=validated["isolation_profile"],
         cpu_millicores=validated["cpu_millicores"],
         memory_mib=validated["memory_mib"],
         ephemeral_storage_mib=validated["ephemeral_storage_mib"],
@@ -232,12 +240,22 @@ def public_container(release):
 
 
 def is_deployable(release):
-    # 현 Scheduler 계약(단일 container_image)으로 배포 가능한지 판정한다
+    # Scheduler 계약에 맞게 공개 포트가 하나뿐인 릴리스만 활성화한다
     containers = list(release.containers.all())
-    if len(containers) != 1:
+    if not 1 <= len(containers) <= 8:
         return False
-    public_ports = [entry["port"] for entry in containers[0].ports if entry.get("public")]
-    return len(public_ports) == 1
+
+    public_container_count = 0
+    for container in containers:
+        public_ports = [entry["port"] for entry in container.ports if entry.get("public")]
+        if len(public_ports) > 1:
+            return False
+        if public_ports:
+            if len(container.ports) != 1:
+                return False
+            public_container_count += 1
+
+    return public_container_count == 1
 
 
 def serialize_release(release, current_release_id=None):
