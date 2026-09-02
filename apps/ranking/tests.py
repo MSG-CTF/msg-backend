@@ -9,6 +9,8 @@ from apps.challenge.models import Challenge, Solve
 from apps.koth.models import KothChallenge, KothClub, KothSolve
 from apps.ranking.views import collect_team_data
 from decimal import Decimal
+from django.db import transaction
+from apps.ranking.scoring import calculate_dynamic_score, recalculate_challenge_score
 
 BASE_TIME = datetime(2026, 8, 16, 0, 0, 0, tzinfo=timezone.utc) 
 
@@ -223,3 +225,70 @@ class CollectTeamDataTest(TestCase):
         self.assertEqual(data[0]["koth_score"], Decimal("0"))
         self.assertIsNone(data[0]["jeopardy_solved_at"])
         self.assertIsNone(data[0]["koth_solved_at"])
+
+
+class RecalculateChallengeScoreTest(TestCase):
+
+    def make_challenge(self, minimum, decay):
+        return Challenge.objects.create(
+            title="문제",
+            category="WEB",
+            difficulty="EASY",
+            score=Decimal("1000"),
+            initial_score=Decimal("1000"),
+            minimum_score=Decimal(minimum),
+            decay=decay,
+            current_score=Decimal("1000"),
+            flag_hash="hash",
+            is_published=True,
+        )
+
+    def solve_by(self, team_name, challenge):
+        team = Team.objects.create(team_name=team_name)
+        Solve.objects.create(
+            team=team, challenge=challenge,
+            earned_score=Decimal("1000"), earned_mileage=100,
+        )
+
+    def test_no_solve_keeps_initial(self):
+        challenge = self.make_challenge("600", 2)
+
+        with transaction.atomic():
+            result = recalculate_challenge_score(challenge.challenge_id)
+
+        self.assertEqual(result, 1000)
+
+    def test_score_drops_after_solves(self):
+        # decay 2, minimum 600이면 첫 solve 후 900, 둘째 후 600
+        challenge = self.make_challenge("600", 2)
+
+        self.solve_by("팀1", challenge)
+        with transaction.atomic():
+            first = recalculate_challenge_score(challenge.challenge_id)
+
+        self.solve_by("팀2", challenge)
+        with transaction.atomic():
+            second = recalculate_challenge_score(challenge.challenge_id)
+
+        self.assertEqual(first, 900)
+        self.assertEqual(second, 600)
+
+    def test_saved_to_current_score(self):
+        challenge = self.make_challenge("600", 2)
+        self.solve_by("팀1", challenge)
+
+        with transaction.atomic():
+            recalculate_challenge_score(challenge.challenge_id)
+
+        challenge.refresh_from_db()
+        self.assertEqual(challenge.current_score, 900)
+
+    def test_never_below_minimum(self):
+        challenge = self.make_challenge("600", 2)
+        for i in range(5):
+            self.solve_by(f"팀{i}", challenge)
+
+        with transaction.atomic():
+            result = recalculate_challenge_score(challenge.challenge_id)
+
+        self.assertEqual(result, 600)
