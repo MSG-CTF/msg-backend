@@ -1,20 +1,22 @@
 from datetime import timedelta
 import time
 from concurrent.futures import ThreadPoolExecutor
-from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.core.cache import cache
 from django.core.management import call_command
-from django.test import SimpleTestCase, TestCase, override_settings
+from django.db import close_old_connections
+from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
-from rest_framework.test import APIClient
+from rest_framework.test import APIClient, APIRequestFactory
 from rest_framework.response import Response
 
 from apps.accounts.models import Team, User
 from apps.board.models import (
     Cell,
     ChanceCard,
+    DiceRoll,
+    IdempotencyRequest,
     PendingDiceRoll,
     QuarantineEscapeCode,
     TeamBoardState,
@@ -25,14 +27,36 @@ from apps.board.models import (
 )
 from apps.board.services import SOLVE_LIMIT_SECONDS, get_or_create_board_state
 from apps.board.idempotency import idempotent
-from apps.challenge.models import Challenge, OpenedChallenge
+from apps.board.exceptions import IdempotencyKeyConflict
+from apps.challenge.models import Challenge, OpenedChallenge, Solve
 from apps.teams.models import MileageHistory
 
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 
 
 @override_settings(CACHES=LOCMEM)
-class IdempotencyConcurrencyTestCase(SimpleTestCase):
+class IdempotencyPersistenceTestCase(TransactionTestCase):
+    def setUp(self):
+        cache.clear()
+        self.team = Team.objects.create(team_name="idempotency-team")
+        self.user = User.objects.create_user(
+            login_id="idempotency-user",
+            password="pw1234",
+            nickname="idempotency-user",
+            team=self.team,
+        )
+        self.factory = APIRequestFactory()
+
+    def request(self, body, key="parallel-key"):
+        request = self.factory.post(
+            "/api/v1/board/dice/roll",
+            body,
+            format="json",
+            HTTP_IDEMPOTENCY_KEY=key,
+        )
+        request.user = self.user
+        return request
+
     def test_same_key_concurrent_requests_execute_view_once_and_replay_response(self):
         calls = []
 
@@ -43,27 +67,52 @@ class IdempotencyConcurrencyTestCase(SimpleTestCase):
                 time.sleep(0.2)
                 return Response({"value": len(calls)}, status=200)
 
-        from rest_framework.test import APIRequestFactory
+        requests = [self.request({"roll": True}) for _ in range(2)]
 
-        factory = APIRequestFactory()
-        requests = [
-            factory.post(
-                "/api/v1/board/dice/roll",
-                {"roll": True},
-                format="json",
-                HTTP_IDEMPOTENCY_KEY="parallel-key",
-            )
-            for _ in range(2)
-        ]
-        for request in requests:
-            request.user = SimpleNamespace(user_id=1)
+        def invoke(request):
+            close_old_connections()
+            try:
+                return ProbeView().post(request)
+            finally:
+                close_old_connections()
 
-        cache.clear()
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            responses = list(executor.map(ProbeView().post, requests))
+        with patch("apps.board.idempotency.cache.get", return_value=None):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                responses = list(executor.map(invoke, requests))
 
         self.assertEqual(len(calls), 1)
         self.assertEqual(responses[0].data, responses[1].data)
+        self.assertEqual(IdempotencyRequest.objects.count(), 1)
+        self.assertEqual(
+            IdempotencyRequest.objects.get().status,
+            IdempotencyRequest.Status.SUCCEEDED,
+        )
+
+    def test_same_key_with_different_body_is_rejected_after_cache_clear(self):
+        class ProbeView:
+            @idempotent
+            def post(self, request):
+                return Response({"ok": True}, status=200)
+
+        ProbeView().post(self.request({"roll": True}, key="conflict-key"))
+        cache.clear()
+
+        with self.assertRaises(IdempotencyKeyConflict):
+            ProbeView().post(self.request({"roll": False}, key="conflict-key"))
+
+    def test_view_exception_rolls_back_claim_and_domain_changes(self):
+        class ProbeView:
+            @idempotent
+            def post(inner_self, request):
+                Team.objects.filter(pk=self.team.pk).update(mileage=120)
+                raise RuntimeError("simulated process failure")
+
+        with self.assertRaises(RuntimeError):
+            ProbeView().post(self.request({}, key="crash-key"))
+
+        self.team.refresh_from_db()
+        self.assertEqual(self.team.mileage, 0)
+        self.assertFalse(IdempotencyRequest.objects.filter(key="crash-key").exists())
 
 
 @override_settings(DEBUG=False)
@@ -359,6 +408,35 @@ class BoardApiTestCase(TestCase):
         self.assertEqual(first.json(), second.json())
         self.assertEqual(TeamBoardState.objects.get(team=self.team).dice_rolls_left, 0)
 
+    def test_dice_roll_replays_from_database_when_cache_is_cleared(self):
+        with patch("apps.board.services.random.randint", side_effect=[1, 1]):
+            first = self.post_idem("/api/v1/board/dice/roll", key="restart-key")
+        cache.clear()
+        second = self.post_idem("/api/v1/board/dice/roll", key="restart-key")
+
+        self.assertEqual(first.json(), second.json())
+        self.assertEqual(DiceRoll.objects.filter(team=self.team).count(), 1)
+        self.assertEqual(TeamBoardState.objects.get(team=self.team).dice_rolls_left, 0)
+
+    def test_dice_roll_cache_write_failure_does_not_repeat_side_effects(self):
+        with patch("apps.board.services.random.randint", side_effect=[1, 1]):
+            with patch(
+                "apps.board.idempotency.cache.set",
+                side_effect=RuntimeError("redis unavailable"),
+            ):
+                with self.assertLogs("apps.board.idempotency", level="WARNING"):
+                    first = self.post_idem(
+                        "/api/v1/board/dice/roll", key="cache-failure-key"
+                    )
+
+        cache.clear()
+        second = self.post_idem("/api/v1/board/dice/roll", key="cache-failure-key")
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.json(), second.json())
+        self.assertEqual(DiceRoll.objects.filter(team=self.team).count(), 1)
+        self.assertEqual(TeamBoardState.objects.get(team=self.team).dice_rolls_left, 0)
+
     def test_dice_roll_moves_team_and_consumes_cell(self):
         with patch("apps.board.services.random.randint", side_effect=[1, 1]):
             response = self.post_idem("/api/v1/board/dice/roll")
@@ -645,6 +723,38 @@ class BoardApiTestCase(TestCase):
         self.assertEqual(access.status, TeamChallengeAccess.Status.CLEARED)
         self.state.refresh_from_db()
         self.assertIsNone(self.state.active_challenge_access_id)
+
+    def test_challenge_submission_failure_rolls_back_board_completion(self):
+        self.set_position(2, consumed=True)
+        current = self.client.get("/api/v1/board/cell/current").json()["data"]
+        challenge_id = current["challenge_candidates"][0]["challenge_id"]
+        challenge = Challenge.objects.get(challenge_id=challenge_id)
+        self.post_idem(
+            "/api/v1/board/cell/open",
+            {"challenge_id": challenge_id},
+            key="rollback-open",
+        )
+        access = TeamChallengeAccess.objects.get(team=self.team, challenge=challenge)
+
+        with patch(
+            "apps.challenge.views.update_dynamic_score_and_team_scores",
+            side_effect=RuntimeError("simulated scoring failure"),
+        ):
+            with self.assertLogs("apps.common.exceptions", level="ERROR"):
+                response = self.client.post(
+                    f"/api/v1/challenges/{challenge_id}/submit",
+                    {"flag": f"MSG{{challenge_{challenge.board_meta.challenge_number:02d}}}"},
+                    format="json",
+                )
+
+        self.assertEqual(response.status_code, 500)
+        access.refresh_from_db()
+        self.state.refresh_from_db()
+        self.team.refresh_from_db()
+        self.assertEqual(access.status, TeamChallengeAccess.Status.OPENED)
+        self.assertEqual(self.state.active_challenge_access_id, access.id)
+        self.assertEqual(self.team.mileage, 0)
+        self.assertFalse(Solve.objects.filter(team=self.team, challenge=challenge).exists())
 
     def test_cell_open_requires_challenge_cell(self):
         response = self.post_idem("/api/v1/board/cell/open", {"challenge_id": "not-a-uuid"})

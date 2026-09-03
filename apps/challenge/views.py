@@ -12,7 +12,12 @@ from apps.challenge.models import (
     OpenedChallenge,
     Solve,
 )
-from apps.challenge.services import hash_flag, is_correct_flag
+from apps.challenge.services import (
+    get_team_total_score,
+    hash_flag,
+    is_correct_flag,
+    update_dynamic_score_and_team_scores,
+)
 from apps.common.response import fail, ok
 from apps.instances.models import Instance
 from apps.instances.services import (
@@ -82,7 +87,7 @@ class ChallengeDetailView(APIView):
                 "title": challenge.title,
                 "category": challenge.category,
                 "difficulty": challenge.difficulty,
-                "score": number_value(challenge.score),
+                "score": number_value(challenge.current_score),
                 "description": challenge.description,
                 "files": [],
                 "solved_team_count": Solve.objects.filter(challenge=challenge).count(),
@@ -115,6 +120,7 @@ class ChallengeSubmitView(APIView):
         submitted_flag_hash = hash_flag(flag)
 
         with transaction.atomic():
+            challenge = Challenge.objects.select_for_update().get(pk=challenge.pk)
             flag_lock, _ = FlagSubmissionLock.objects.select_for_update().get_or_create(
                 team=team,
                 challenge=challenge,
@@ -172,7 +178,7 @@ class ChallengeSubmitView(APIView):
                 return fail(code, message, status_code, data)
 
             is_extra_dice_granted = opened_challenge.solve_deadline_at >= now
-            earned_score = challenge.score
+            earned_score = challenge.current_score
             earned_mileage = CHALLENGE_MILEAGE_REWARDS[challenge.difficulty]
 
             try:
@@ -209,6 +215,9 @@ class ChallengeSubmitView(APIView):
             )
 
             complete_challenge_from_submission(team, challenge, is_extra_dice_granted)
+            update_dynamic_score_and_team_scores(challenge)
+            team_score = get_team_total_score(team.pk)
+            team.refresh_from_db(fields=["mileage"])
 
         return ok(
             message="정답입니다!",
@@ -217,6 +226,8 @@ class ChallengeSubmitView(APIView):
                 "earned_score": number_value(earned_score),
                 "earned_mileage": earned_mileage,
                 "is_extra_dice_granted": is_extra_dice_granted,
+                "team_score": number_value(team_score),
+                "mileage": team.mileage,
                 "solved_at": isoformat_z(solve.solved_at),
             },
         )

@@ -49,6 +49,16 @@
 `challenge_id`는 2026-08-08 규약 개정으로 이미 UUID 문자열이었으나 이 표에는 반영되지 않고 있었다. `/api/v1/board/opened_challenges` 명세가 근거다.
 `user_id`, `history_id`도 UUID 문자열이다 (강지원 확인, 2026-08-16).
 
+## Idempotency-Key
+
+- 보드 쓰기 API는 `Idempotency-Key` 헤더가 필수다.
+- 멱등 범위는 `(user_id, HTTP method, path, Idempotency-Key)` 조합이다.
+- 서버는 요청 본문 해시, 처리 상태, 최초 HTTP 상태와 응답 본문을 DB에 영속 저장한다.
+- 같은 키와 같은 본문의 재요청은 Redis 초기화나 서버 재시작 이후에도 최초 응답을 반환한다.
+- 같은 키에 다른 본문을 보내면 `409 IDEMPOTENCY_KEY_CONFLICT`를 반환한다.
+- Redis의 5분 TTL 응답은 조회 가속용일 뿐이며 DB 기록이 원본이다.
+- DB 멱등 기록은 대회 데이터 보관 기간 동안 자동 만료하지 않는다.
+
 ## 시간 포맷
 
 전부 ISO-8601 UTC, 끝에 `Z` (`"2026-11-08T04:00:00Z"`). 표시용 KST 변환은 프론트 책임.
@@ -185,6 +195,15 @@ STOPPED / FAILED / EXPIRED → CLEANUP_PENDING → CLEANED
 | `REFUND` | 결제 환불 | + |
 | `PURCHASE` | QR 결제 (부스 구매) | − |
 | `ADMIN_DEDUCT` | 관리자 수동 차감 | − |
+
+문제 해결 마일리지 지급표는 다음과 같다.
+
+| 난이도 | 문제 수 | 문제당 지급 | 전체 획득 가능 |
+| --- | ---: | ---: | ---: |
+| `HARD` | 6 | 120 | 720 |
+| `MEDIUM` | 12 | 60 | 720 |
+| `EASY` | 12 | 30 | 360 |
+| 합계 | 30 |  | 1,800 |
 
 **규칙**
 - 부호는 `amount` 필드가 가진다. `type`은 그 이유를 나타낼 뿐이다.

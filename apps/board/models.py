@@ -1,6 +1,42 @@
 import uuid
 
+from django.core.serializers.json import DjangoJSONEncoder
 from django.db import models
+
+
+class IdempotencyRequest(models.Model):
+    class Status(models.TextChoices):
+        PROCESSING = "PROCESSING"
+        SUCCEEDED = "SUCCEEDED"
+        FAILED = "FAILED"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        "accounts.User",
+        on_delete=models.CASCADE,
+        related_name="idempotency_requests",
+    )
+    method = models.CharField(max_length=10)
+    path = models.CharField(max_length=500)
+    key = models.CharField(max_length=255)
+    request_hash = models.CharField(max_length=64)
+    status = models.CharField(max_length=20, choices=Status.choices)
+    response_status = models.PositiveSmallIntegerField(null=True, blank=True)
+    response_body = models.JSONField(null=True, blank=True, encoder=DjangoJSONEncoder)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "idempotency_requests"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "method", "path", "key"],
+                name="unique_idempotency_request",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["status", "updated_at"], name="idem_status_updated_idx"),
+        ]
 
 
 class Cell(models.Model):

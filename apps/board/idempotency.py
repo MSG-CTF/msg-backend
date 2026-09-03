@@ -1,16 +1,16 @@
 import functools
 import hashlib
-import time
-import uuid
+import logging
 
 from django.core.cache import cache
+from django.db import IntegrityError, transaction
 from rest_framework.response import Response
 
 from .exceptions import IdempotencyInProgress, IdempotencyKeyConflict, IdempotencyKeyRequired
+from .models import IdempotencyRequest
 
 IDEMPOTENCY_TTL_SECONDS = 300
-IDEMPOTENCY_WAIT_SECONDS = 10
-IDEMPOTENCY_POLL_SECONDS = 0.05
+logger = logging.getLogger(__name__)
 
 
 def _request_fingerprint(request):
@@ -21,6 +21,38 @@ def _response_from_cache(cached, fingerprint):
     if cached.get("fingerprint") not in (None, fingerprint):
         raise IdempotencyKeyConflict()
     return Response(cached["body"], status=cached["status"])
+
+
+def _response_from_record(record, fingerprint):
+    if record.request_hash != fingerprint:
+        raise IdempotencyKeyConflict()
+    if record.status == IdempotencyRequest.Status.PROCESSING:
+        raise IdempotencyInProgress()
+    return Response(record.response_body, status=record.response_status)
+
+
+def _cache_get(cache_key):
+    try:
+        return cache.get(cache_key)
+    except Exception:
+        logger.warning("idempotency cache read failed", exc_info=True)
+        return None
+
+
+def _cache_set(cache_key, response, fingerprint):
+    try:
+        cache.set(
+            cache_key,
+            {
+                "body": response.data,
+                "status": response.status_code,
+                "fingerprint": fingerprint,
+            },
+            IDEMPOTENCY_TTL_SECONDS,
+        )
+    except Exception:
+        # Redis is only an accelerator. The database record is authoritative.
+        logger.warning("idempotency cache write failed", exc_info=True)
 
 
 def idempotent(view_method):
@@ -34,50 +66,49 @@ def idempotent(view_method):
 
         fingerprint = _request_fingerprint(request)
         cache_key = f"idem:{request.user.user_id}:{request.method}:{request.path}:{key}"
-        lock_key = f"{cache_key}:lock"
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return _response_from_cache(cached, fingerprint)
 
-        while True:
-            cached = cache.get(cache_key)
-            if cached is not None:
-                return _response_from_cache(cached, fingerprint)
+        lookup = {
+            "user_id": request.user.user_id,
+            "method": request.method,
+            "path": request.path,
+            "key": key,
+        }
 
-            lock_value = {"token": uuid.uuid4().hex, "fingerprint": fingerprint}
-            # django-redis implements add() as an atomic SET NX operation.
-            if cache.add(lock_key, lock_value, IDEMPOTENCY_TTL_SECONDS):
-                try:
-                    response = view_method(self, request, *args, **kwargs)
-                    if response.status_code < 500:
-                        cache.set(
-                            cache_key,
-                            {
-                                "body": response.data,
-                                "status": response.status_code,
-                                "fingerprint": fingerprint,
-                            },
-                            IDEMPOTENCY_TTL_SECONDS,
-                        )
-                    return response
-                finally:
-                    # The response is written before releasing the claim. The TTL
-                    # remains a crash-safety fallback if the process dies earlier.
-                    cache.delete(lock_key)
-
-            existing_lock = cache.get(lock_key)
-            if (
-                isinstance(existing_lock, dict)
-                and existing_lock.get("fingerprint") not in (None, fingerprint)
-            ):
-                raise IdempotencyKeyConflict()
-
-            deadline = time.monotonic() + IDEMPOTENCY_WAIT_SECONDS
-            while time.monotonic() < deadline:
-                cached = cache.get(cache_key)
-                if cached is not None:
-                    return _response_from_cache(cached, fingerprint)
-                if cache.get(lock_key) is None:
-                    break
-                time.sleep(IDEMPOTENCY_POLL_SECONDS)
+        with transaction.atomic():
+            try:
+                # The savepoint keeps the outer transaction usable when another
+                # request wins the unique-key race.
+                with transaction.atomic():
+                    record = IdempotencyRequest.objects.create(
+                        **lookup,
+                        request_hash=fingerprint,
+                        status=IdempotencyRequest.Status.PROCESSING,
+                    )
+            except IntegrityError:
+                record = IdempotencyRequest.objects.select_for_update().get(**lookup)
+                response = _response_from_record(record, fingerprint)
             else:
-                raise IdempotencyInProgress()
+                response = view_method(self, request, *args, **kwargs)
+                record.status = (
+                    IdempotencyRequest.Status.FAILED
+                    if response.status_code >= 500
+                    else IdempotencyRequest.Status.SUCCEEDED
+                )
+                record.response_status = response.status_code
+                record.response_body = response.data
+                record.save(
+                    update_fields=[
+                        "status",
+                        "response_status",
+                        "response_body",
+                        "updated_at",
+                    ]
+                )
+
+        _cache_set(cache_key, response, fingerprint)
+        return response
 
     return wrapper

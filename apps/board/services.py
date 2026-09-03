@@ -720,7 +720,7 @@ def get_opened_challenges_summary(team):
                 "title": access.challenge.title,
                 "category": access.challenge.category,
                 "club_name": access.challenge.board_meta.club_name,
-                "score": access.challenge.score,
+                "score": access.challenge.current_score,
                 "is_solved": access.status == TeamChallengeAccess.Status.CLEARED,
                 "solved_at": access.cleared_at,
                 "opened_at": access.opened_at,
@@ -729,7 +729,7 @@ def get_opened_challenges_summary(team):
         ],
         "total_count": len(accesses),
         "solved_count": len(solved_accesses),
-        "total_score": sum(access.challenge.score for access in solved_accesses),
+        "total_score": sum(access.challenge.current_score for access in solved_accesses),
     }
 
 
@@ -764,7 +764,7 @@ def get_challenges_progress_summary(team):
                 "title": challenge.title,
                 "category": challenge.category,
                 "difficulty": challenge.difficulty,
-                "score": challenge.score,
+                "score": challenge.current_score,
                 "is_opened": is_opened,
                 "is_solved": is_solved,
                 "cell_index": access.source_cell_id if access is not None else None,

@@ -1,4 +1,6 @@
 import datetime
+from decimal import Decimal
+from unittest.mock import patch
 
 from django.core.cache import cache
 from django.test import TestCase, override_settings
@@ -29,7 +31,11 @@ class ChallengeSubmitTests(TestCase):
             title="SQL Injection 기초",
             category=Challenge.CategoryType.WEB,
             difficulty=Challenge.DifficultyType.EASY,
-            score=500,
+            score=1000,
+            initial_score=1000,
+            minimum_score=100,
+            decay=20,
+            current_score=1000,
             description="테스트 문제",
             flag_hash=hash_flag("MSG{correct_flag}"),
             is_published=True,
@@ -99,6 +105,100 @@ class ChallengeSubmitTests(TestCase):
             Solve.objects.filter(team=self.team, challenge=self.challenge).count(),
             1,
         )
+
+    def test_submit_updates_dynamic_score_and_matches_ranking_contract(self):
+        response = self.submit("MSG{correct_flag}")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.data["data"]
+        self.assertEqual(
+            set(data),
+            {
+                "challenge_id",
+                "earned_score",
+                "earned_mileage",
+                "is_extra_dice_granted",
+                "team_score",
+                "mileage",
+                "solved_at",
+            },
+        )
+        self.assertEqual(data["earned_score"], 1000)
+        self.assertEqual(data["earned_mileage"], 30)
+        self.assertEqual(data["team_score"], 998)
+        self.assertEqual(data["mileage"], 30)
+
+        self.challenge.refresh_from_db()
+        self.team.refresh_from_db()
+        solve = Solve.objects.get(team=self.team, challenge=self.challenge)
+        self.assertEqual(solve.earned_score, Decimal("1000"))
+        self.assertEqual(self.challenge.current_score, Decimal("998"))
+        self.assertEqual(self.team.team_score, Decimal("998"))
+
+        ranking = self.client.get("/api/v1/ranking").data["data"]["rankings"][0]
+        leaderboard = self.client.get("/api/v1/leaderboard").data["data"]["teams"][0]
+        self.assertEqual(ranking["team_score"], 998)
+        self.assertEqual(leaderboard["team_score"], 998)
+        self.assertEqual(leaderboard["solves"][0]["points"], 998)
+        detail = self.client.get(f"/api/v1/challenges/{self.challenge.challenge_id}")
+        self.assertEqual(detail.data["data"]["score"], 998)
+
+    def test_later_solve_updates_scores_of_all_teams_that_solved_challenge(self):
+        self.submit("MSG{correct_flag}")
+
+        other_team = Team.objects.create(team_name="second-team")
+        User.objects.create_user(
+            login_id="second-user",
+            password="pw1234",
+            nickname="second-user",
+            team=other_team,
+        )
+        OpenedChallenge.objects.create(
+            team=other_team,
+            challenge=self.challenge,
+            cell_index=2,
+            solve_deadline_at=timezone.now() + datetime.timedelta(minutes=15),
+        )
+        second_client = APIClient()
+        login = second_client.post(
+            "/api/v1/auth/login",
+            {"login_id": "second-user", "password": "pw1234"},
+            format="json",
+        )
+        second_client.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {login.data['data']['access_token']}"
+        )
+
+        response = second_client.post(
+            f"/api/v1/challenges/{self.challenge.challenge_id}/submit",
+            {"flag": "MSG{correct_flag}"},
+            format="json",
+        )
+
+        self.challenge.refresh_from_db()
+        self.team.refresh_from_db()
+        other_team.refresh_from_db()
+        self.assertEqual(response.data["data"]["earned_score"], 998)
+        self.assertEqual(self.challenge.current_score, Decimal("991"))
+        self.assertEqual(self.team.team_score, Decimal("991"))
+        self.assertEqual(other_team.team_score, Decimal("991"))
+
+    def test_submission_failure_rolls_back_solve_score_and_mileage(self):
+        with patch(
+            "apps.challenge.views.update_dynamic_score_and_team_scores",
+            side_effect=RuntimeError("simulated scoring failure"),
+        ):
+            with self.assertLogs("apps.common.exceptions", level="ERROR"):
+                response = self.submit("MSG{correct_flag}")
+
+        self.assertEqual(response.status_code, 500)
+        self.challenge.refresh_from_db()
+        self.team.refresh_from_db()
+        self.assertFalse(Solve.objects.filter(team=self.team, challenge=self.challenge).exists())
+        self.assertFalse(MileageHistory.objects.filter(team=self.team).exists())
+        self.assertEqual(self.challenge.current_score, Decimal("1000"))
+        self.assertEqual(self.team.team_score, Decimal("0"))
+        self.assertEqual(self.team.mileage, 0)
 
     def test_successful_solve_awards_mileage_by_difficulty(self):
         extra_challenges = []
