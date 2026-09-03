@@ -1,20 +1,23 @@
 from decimal import Decimal
+
+from django.db.models import Count, Max, Min, OuterRef, Subquery, Sum
 from rest_framework.decorators import api_view, permission_classes
-from apps.accounts.models import Team
-from apps.common.response import ok
-from apps.common.utils import num
-from apps.ranking.ranking import build_team_ranking
+
+from apps.accounts.models import Team, User
 from apps.common.exceptions import UserHasNoTeam
 from apps.common.permissions import IsAuthenticated
-from apps.ranking.pagination import parse_pagination
-from django.db.models import Max, Min, OuterRef, Subquery, Sum
+from apps.common.response import ok
+from apps.common.utils import num
 from apps.koth.models import KothSolve
+from apps.ranking.pagination import parse_pagination
+from apps.ranking.ranking import build_team_ranking, build_member_ranking
 
 
 def format_datetime(value):
     if value is None:
         return None
     return value.strftime("%Y-%m-%dT%H:%M:%SZ")
+
 
 def collect_team_data():
     koth_score_sq = KothSolve.objects.filter(
@@ -45,6 +48,30 @@ def collect_team_data():
             "koth_solved_at": team.first_koth_at,
         })
     return team_data
+
+
+def collect_member_data():
+    users = User.objects.filter(
+        team__isnull=False,
+        team__is_banned=False,
+    ).select_related("team").annotate(
+        score_sum=Sum("solves__challenge__current_score"),
+        solve_count=Count("solves"),
+        last_at=Max("solves__solved_at"),
+    )
+
+    member_data = []
+    for user in users:
+        member_data.append({
+            "user_id": str(user.user_id),
+            "nickname": user.nickname,
+            "team_id": str(user.team_id),
+            "team_name": user.team.team_name,
+            "user_score": user.score_sum or 0,
+            "solved_count": user.solve_count,
+            "last_solved_at": user.last_at,
+        })
+    return member_data
 
 
 @api_view(["GET"])
@@ -79,11 +106,30 @@ def my_team_ranking(request):
 
     my_team_id = str(request.user.team_id)
 
-    rankings = build_team_ranking(collect_team_data(), limit=None) #전체 순위
+    rankings = build_team_ranking(collect_team_data(), limit=None)
 
     for row in rankings:
         if row["team_id"] == my_team_id:
             row["team_score"] = num(row["team_score"])
+            row["last_solved_at"] = format_datetime(row["last_solved_at"])
+            return ok(row)
+
+    return ok(None)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def member_ranking(request):
+    if request.user.team_id is None:
+        raise UserHasNoTeam()
+
+    my_user_id = str(request.user.user_id)
+
+    rankings = build_member_ranking(collect_member_data())
+
+    for row in rankings:
+        if row["user_id"] == my_user_id:
+            row["user_score"] = num(row["user_score"])
             row["last_solved_at"] = format_datetime(row["last_solved_at"])
             return ok(row)
 
