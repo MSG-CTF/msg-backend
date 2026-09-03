@@ -4,7 +4,6 @@ from django.urls import path, include
 
 from apps.board.views import (
     BoardView,
-    DashboardView,
     DebugReleaseQuarantineView,
     DebugSolveActiveChallengeView,
 )
@@ -18,6 +17,7 @@ urlpatterns = [
     path("api/v1/", include("apps.ranking.urls")),
     path("api/v1/", include("apps.challenge.urls")),
     path("api/v1/", include("apps.instances.urls")),
+    path("api/v1/", include("apps.leaderboard.urls")),
     path("api/v1/board", BoardView.as_view(), name="board"),
     path("api/v1/board/", include("apps.board.urls")),
     path("api/v1/", include("apps.koth.urls")),
@@ -26,7 +26,6 @@ urlpatterns = [
 
 if settings.DEBUG:
     urlpatterns += [
-        path("", DashboardView.as_view(), name="dashboard"),
         # /api/v1 명세 밖, 로컬 프리뷰 전용.
         path("board/_debug/solve", DebugSolveActiveChallengeView.as_view(), name="board-debug-solve"),
         path(

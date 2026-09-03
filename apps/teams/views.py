@@ -13,6 +13,8 @@ from apps.common.jwt import hash_token
 from apps.common.permissions import IsAuthenticated
 from apps.common.response import ok
 from apps.common.utils import num
+from apps.challenge.models import Solve
+from apps.koth.models import KothSolve
 
 from .models import MileageHistory, PaymentToken, PaymentTokenStatus
 
@@ -112,3 +114,59 @@ def qr_token(request):
             PaymentToken.objects.filter(pk__in=old_ids).update(invalidated_by_token=new_token)
 
     return ok({"payment_token": raw_token, "expires_at": expires_at})
+
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def solves(request):
+    """GET /api/v1/teams/me/solves — 제오파디 + KOTH 풀이를 최신순으로 합쳐 반환."""
+    team = _get_team(request)
+
+    items = []
+
+    for row in (
+        Solve.objects.filter(team=team)
+        .select_related("challenge", "solved_by_user")
+        .order_by("-solved_at", "-solve_id")
+    ):
+        items.append({
+            "source_type": "JEOPARDY",
+            "challenge_id": str(row.challenge_id),
+            "challenge_title": row.challenge.title,
+            "earned_score": num(row.earned_score),
+            "earned_mileage": row.earned_mileage,
+            "is_extra_dice_granted": row.is_extra_dice_granted,
+            "solved_by": (
+                {
+                    "user_id": str(row.solved_by_user_id),
+                    "nickname": row.solved_by_user.nickname,
+                }
+                if row.solved_by_user_id
+                else None
+            ),
+            "solved_at": row.solved_at,
+        })
+
+    # KOTH 는 팀 단위 집계라 개인 제출자(solved_by)가 없고, 마일리지/주사위와 무관.
+    # 아직 점수를 못 받은(solved_at 없는) 행은 풀이로 보지 않는다.
+    for row in (
+        KothSolve.objects.filter(team=team, solved_at__isnull=False)
+        .select_related("challenge")
+        .order_by("-solved_at", "-solve_id")
+    ):
+        items.append({
+            "source_type": "KOTH",
+            "koth_challenge_id": str(row.challenge_id),
+            "challenge_title": row.challenge.title,
+            "earned_score": num(row.earned_score),
+            "earned_mileage": 0,
+            "is_extra_dice_granted": False,
+            "solved_by": None,
+            "solved_at": row.solved_at,
+        })
+
+    # 두 목록을 solved_at 최신순으로 병합(파이썬 정렬은 안정적이라 동시각이면 기존 순서 유지).
+    items.sort(key=lambda s: s["solved_at"], reverse=True)
+
+    return ok({"solves": items, "total_count": len(items)})

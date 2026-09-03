@@ -76,7 +76,7 @@ DEFAULT_TEAM_NAME = "test-team"
 
 
 def get_default_team():
-    """개발용 대시보드 프리뷰(DashboardView)에서만 쓰는 단일 팀. API 뷰는 request.user.team을 쓴다."""
+    """로컬 seed_board 명령에서 사용하는 단일 테스트 팀."""
     team, _ = Team.objects.get_or_create(team_name=DEFAULT_TEAM_NAME)
     return team
 

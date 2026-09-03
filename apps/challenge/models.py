@@ -12,6 +12,8 @@ class Challenge(models.Model):
         CRYPTO = "CRYPTO"
         FORENSIC = "FORENSIC"
         MISC = "MISC"
+        WEB3 = "WEB3"
+        OSINT = "OSINT"
 
     class DifficultyType(models.TextChoices):
         EASY = "EASY"
