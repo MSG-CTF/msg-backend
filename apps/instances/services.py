@@ -11,6 +11,7 @@ from apps.challenge.models import Challenge
 from apps.instances.models import (
     ChallengeRelease,
     ChallengeRuntimeConfig,
+    DeleteReason,
     Instance,
     InstanceStatus,
 )
@@ -403,6 +404,15 @@ def create_instance_from_scheduler(
         },
     )
     return instance
+
+
+def mark_instance_replaced(instance):
+    if instance is None:
+        return
+
+    instance.status = InstanceStatus.STOPPING
+    instance.delete_reason = DeleteReason.REPLACED_BY_NEW_INSTANCE
+    instance.save(update_fields=["status", "delete_reason", "updated_at"])
 
 
 def sync_instance_from_scheduler(instance, auth_header=None):

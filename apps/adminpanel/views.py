@@ -54,6 +54,7 @@ from apps.instances.services import (
     call_scheduler_reset,
     create_instance_from_scheduler,
     isoformat_z,
+    mark_instance_replaced,
     scheduler_auth_header,
 )
 
@@ -762,6 +763,7 @@ def instance_force_reset(request, instance_id):
             replaced_instance=instance,
             release=instance.release,
         )
+        mark_instance_replaced(instance)
 
     return ok(
         {
