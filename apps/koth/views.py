@@ -2,12 +2,14 @@ import uuid
 from decimal import Decimal
 
 from django.db import transaction
+from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 
 from apps.accounts.models import Team
 from apps.common.exceptions import (
-    ClubNotFound, InvalidClubId, InvalidInternalToken, InvalidRequest, UserHasNoTeam,
+    ClubNotFound, InvalidClubId, InvalidInternalToken, InvalidKothChallengeId,
+    InvalidRequest, KothChallengeIdRequired, KothChallengeNotFound, UserHasNoTeam,
 )
 from apps.common.jwt import hash_token
 from apps.common.permissions import IsAuthenticated
@@ -104,6 +106,53 @@ def me(request):
         "team_id": str(team.team_id), "team_name": team.team_name, "total_koth_score": num(total),
         "challenges": challenge_data, "total_count": len(challenge_data),
         "active_count": sum(row["status"] == "ACTIVE" for row in challenge_data),
+    })
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def leaderboard(request):
+    challenge_id = request.query_params.get("koth_challenge_id")
+    if not challenge_id:
+        raise KothChallengeIdRequired()
+
+    try:
+        parsed_id = uuid.UUID(str(challenge_id))
+    except (ValueError, TypeError, AttributeError):
+        raise InvalidKothChallengeId()
+
+    try:
+        challenge = KothChallenge.objects.get(pk=parsed_id)
+    except KothChallenge.DoesNotExist:
+        raise KothChallengeNotFound()
+
+    solves = (
+        KothSolve.objects.select_related("team")
+        .filter(challenge=challenge, earned_score__gt=0, team__is_banned=False)
+        .order_by("-earned_score", "solved_at", "team__team_name", "team_id")
+    )
+    rows = []
+    previous_score = None
+    rank = 0
+    for index, solve in enumerate(solves, start=1):
+        if solve.earned_score != previous_score:
+            rank = index
+            previous_score = solve.earned_score
+        rows.append({
+            "rank": rank,
+            "team_id": str(solve.team_id),
+            "team_name": solve.team.team_name,
+            "earned_score": num(solve.earned_score),
+            "solved_at": solve.solved_at,
+        })
+
+    return ok({
+        "koth_challenge_id": str(challenge.koth_challenge_id),
+        "title": challenge.title,
+        "status": challenge.status,
+        "leaderboard": rows,
+        "total_count": len(rows),
+        "updated_at": timezone.now(),
     })
 
 

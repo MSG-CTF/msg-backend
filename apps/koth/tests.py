@@ -95,6 +95,60 @@ class KothApiTests(TestCase):
         self.assertEqual(KothTeamToken.objects.count(), 1)
         self.assertEqual(KothTeamToken.objects.get().token_hash, hash_token(first))
 
+    def test_leaderboard_requires_auth_and_valid_challenge_id(self):
+        url = "/api/v1/koth/leaderboard"
+        self.assertEqual(self.client.get(url).status_code, 401)
+
+        self.auth()
+        required = self.client.get(url)
+        self.assertEqual(required.status_code, 400)
+        self.assertEqual(required.data["code"], "KOTH_CHALLENGE_ID_REQUIRED")
+
+        invalid = self.client.get(f"{url}?koth_challenge_id=not-a-uuid")
+        self.assertEqual(invalid.status_code, 400)
+        self.assertEqual(invalid.data["code"], "INVALID_KOTH_CHALLENGE_ID")
+
+        missing = self.client.get(f"{url}?koth_challenge_id={KothChallenge().koth_challenge_id}")
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(missing.data["code"], "KOTH_CHALLENGE_NOT_FOUND")
+
+    def test_leaderboard_returns_score_order_and_shared_tie_rank(self):
+        third = Team.objects.create(team_name="세번째팀")
+        zero = Team.objects.create(team_name="0점팀")
+        first_at = datetime(2026, 9, 3, 7, 0, tzinfo=dt_timezone.utc)
+        second_at = datetime(2026, 9, 3, 7, 15, tzinfo=dt_timezone.utc)
+        KothSolve.objects.create(
+            team=self.team, challenge=self.challenge, earned_score=Decimal("100"), solved_at=second_at,
+        )
+        KothSolve.objects.create(
+            team=self.other, challenge=self.challenge, earned_score=Decimal("100"), solved_at=first_at,
+        )
+        KothSolve.objects.create(
+            team=third, challenge=self.challenge, earned_score=Decimal("40"), solved_at=first_at,
+        )
+        KothSolve.objects.create(
+            team=self.banned, challenge=self.challenge, earned_score=Decimal("999"), solved_at=first_at,
+        )
+        KothSolve.objects.create(team=zero, challenge=self.challenge, earned_score=Decimal("0"))
+        self.auth()
+
+        response = self.client.get(
+            f"/api/v1/koth/leaderboard?koth_challenge_id={self.challenge.koth_challenge_id}"
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.data["data"]
+        self.assertEqual(data["koth_challenge_id"], str(self.challenge.koth_challenge_id))
+        self.assertEqual(data["title"], self.challenge.title)
+        self.assertEqual(data["status"], KothChallengeStatus.ACTIVE)
+        self.assertEqual(data["total_count"], 3)
+        self.assertIsNotNone(data["updated_at"])
+        self.assertEqual(
+            [row["team_id"] for row in data["leaderboard"]],
+            [str(self.other.team_id), str(self.team.team_id), str(third.team_id)],
+        )
+        self.assertEqual([row["rank"] for row in data["leaderboard"]], [1, 1, 3])
+        self.assertEqual([row["earned_score"] for row in data["leaderboard"]], [100, 100, 40])
+
     def test_team_token_requires_team(self):
         self.auth("none")
         response = self.client.get("/api/v1/koth/team_token")
