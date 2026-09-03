@@ -6,6 +6,7 @@ from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
 from apps.accounts.models import Role, Team, User
+from apps.board.models import Cell, TeamChallengeAccess
 from apps.challenge.models import Challenge
 from apps.challenge.services import hash_flag
 from apps.instances.models import ChallengeRelease, ChallengeRuntimeConfig
@@ -72,6 +73,17 @@ class ReleaseTestBase(TestCase):
             description="릴리스 테스트 문제",
             flag_hash=hash_flag("MSG{flag}"),
             is_published=True,
+        )
+        self.cell = Cell.objects.create(
+            cell_index=2,
+            type=Cell.CellType.CHALLENGE,
+            difficulty=Cell.Difficulty.EASY,
+            name="Web Basic",
+        )
+        TeamChallengeAccess.objects.create(
+            team=self.team,
+            challenge=self.challenge,
+            source_cell=self.cell,
         )
         self.base_url = f"/api/v1/admin/challenges/{self.challenge.challenge_id}/releases"
 

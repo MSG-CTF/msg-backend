@@ -8,6 +8,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.accounts.models import Team, User
+from apps.board.models import Cell, TeamChallengeAccess
 from apps.challenge.models import Challenge
 from apps.challenge.services import hash_flag
 from apps.instances.models import (
@@ -44,6 +45,17 @@ class InstanceLockTests(TestCase):
             flag_hash=hash_flag("MSG{flag}"),
             is_published=True,
         )
+        self.cell = Cell.objects.create(
+            cell_index=2,
+            type=Cell.CellType.CHALLENGE,
+            difficulty=Cell.Difficulty.EASY,
+            name="Web Basic",
+        )
+        TeamChallengeAccess.objects.create(
+            team=self.team,
+            challenge=self.challenge,
+            source_cell=self.cell,
+        )
         self.release = ChallengeRelease.objects.create(
             challenge=self.challenge,
             version=1,
@@ -77,6 +89,25 @@ class InstanceLockTests(TestCase):
         )
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {res.data['data']['access_token']}")
 
+    def create_challenge(self, title, is_published=True):
+        return Challenge.objects.create(
+            title=title,
+            category=Challenge.CategoryType.WEB,
+            difficulty=Challenge.DifficultyType.EASY,
+            score=500,
+            description=title,
+            flag_hash=hash_flag("MSG{flag}"),
+            is_published=is_published,
+        )
+
+    def create_cell(self, cell_index, name):
+        return Cell.objects.create(
+            cell_index=cell_index,
+            type=Cell.CellType.CHALLENGE,
+            difficulty=Cell.Difficulty.EASY,
+            name=name,
+        )
+
     @patch("apps.instances.views.call_scheduler_create")
     def test_instance_create_creates_user_lock(self, call_scheduler_create):
         # 인스턴스 생성 요청은 사용자 단위 잠금 row를 만든 뒤 처리된다
@@ -102,6 +133,59 @@ class InstanceLockTests(TestCase):
         self.assertEqual(res.status_code, 202)
         self.assertEqual(res.data["code"], "SUCCESS")
         self.assertTrue(InstanceLock.objects.filter(user=self.user).exists())
+
+    @patch("apps.instances.views.call_scheduler_create")
+    def test_instance_create_rejects_unpublished_challenge(self, call_scheduler_create):
+        challenge = self.create_challenge("Private Web", is_published=False)
+        TeamChallengeAccess.objects.create(
+            team=self.team,
+            challenge=challenge,
+            source_cell=self.create_cell(3, "Private Web"),
+        )
+
+        res = self.client.post(
+            "/api/v1/instances",
+            {"challenge_id": str(challenge.challenge_id)},
+            format="json",
+        )
+
+        self.assertEqual(res.status_code, 403)
+        self.assertEqual(res.data["code"], "CHALLENGE_LOCKED")
+        call_scheduler_create.assert_not_called()
+
+    @patch("apps.instances.views.call_scheduler_create")
+    def test_instance_create_rejects_unopened_challenge(self, call_scheduler_create):
+        challenge = self.create_challenge("Locked Web")
+
+        res = self.client.post(
+            "/api/v1/instances",
+            {"challenge_id": str(challenge.challenge_id)},
+            format="json",
+        )
+
+        self.assertEqual(res.status_code, 403)
+        self.assertEqual(res.data["code"], "CHALLENGE_LOCKED")
+        call_scheduler_create.assert_not_called()
+
+    @patch("apps.instances.views.call_scheduler_create")
+    def test_instance_create_ignores_other_team_access(self, call_scheduler_create):
+        challenge = self.create_challenge("Other Team Web")
+        other_team = Team.objects.create(team_name="Other Team")
+        TeamChallengeAccess.objects.create(
+            team=other_team,
+            challenge=challenge,
+            source_cell=self.create_cell(4, "Other Team Web"),
+        )
+
+        res = self.client.post(
+            "/api/v1/instances",
+            {"challenge_id": str(challenge.challenge_id)},
+            format="json",
+        )
+
+        self.assertEqual(res.status_code, 403)
+        self.assertEqual(res.data["code"], "CHALLENGE_LOCKED")
+        call_scheduler_create.assert_not_called()
 
     @patch("apps.instances.views.call_scheduler_create")
     def test_instance_create_marks_replaced_instance_stopping(self, call_scheduler_create):

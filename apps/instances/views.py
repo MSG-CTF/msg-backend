@@ -1,6 +1,7 @@
 from django.db import transaction
 from rest_framework.views import APIView
 
+from apps.board.models import TeamChallengeAccess
 from apps.common.permissions import IsAuthenticated
 from apps.challenge.models import Challenge
 from apps.common.response import fail, ok
@@ -31,6 +32,16 @@ def lock_instance_user(user):
     InstanceLock.objects.select_for_update().get_or_create(user=user)
 
 
+def can_create_instance_for_challenge(team, challenge):
+    if not challenge.is_published:
+        return False
+
+    return TeamChallengeAccess.objects.filter(
+        team=team,
+        challenge=challenge,
+    ).exists()
+
+
 class InstanceCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -48,6 +59,9 @@ class InstanceCreateView(APIView):
         challenge = Challenge.objects.filter(challenge_id=challenge_id).first()
         if challenge is None:
             return fail("CHALLENGE_NOT_FOUND", "존재하지 않는 문제 ID입니다.", 404)
+
+        if not can_create_instance_for_challenge(team, challenge):
+            return fail("CHALLENGE_LOCKED", "아직 개방되지 않은 문제입니다.", 403)
 
         runtime_config = get_challenge_runtime_config(challenge)
         if runtime_config is None or runtime_config.current_release_id is None:
