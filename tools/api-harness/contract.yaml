@@ -130,3 +130,6 @@ common_error_codes:
   - {http: 400, code: HARD_TIMEOUT_LIMIT_EXCEEDED}
   - {http: 409, code: ACTIVE_INSTANCE_EXISTS}
   - {http: 409, code: TEAM_INSTANCE_LIMIT_EXCEEDED}
+  # 관리자 조정 멱등성 (adminpanel)
+  - {http: 400, code: IDEMPOTENCY_KEY_REQUIRED}
+  - {http: 409, code: IDEMPOTENCY_KEY_CONFLICT}
