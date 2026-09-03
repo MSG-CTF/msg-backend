@@ -100,6 +100,25 @@ class IdempotencyPersistenceTestCase(TransactionTestCase):
         with self.assertRaises(IdempotencyKeyConflict):
             ProbeView().post(self.request({"roll": False}, key="conflict-key"))
 
+    def test_database_replay_preserves_datetime_response_exactly(self):
+        opened_at = timezone.now().replace(microsecond=123456)
+
+        class ProbeView:
+            @idempotent
+            def post(self, request):
+                return Response({"opened_at": opened_at}, status=200)
+
+        first = ProbeView().post(self.request({}, key="datetime-key"))
+        cache.clear()
+        second = ProbeView().post(self.request({}, key="datetime-key"))
+
+        self.assertIsInstance(first.data["opened_at"], str)
+        self.assertEqual(first.data, second.data)
+        self.assertEqual(
+            first.data,
+            IdempotencyRequest.objects.get(key="datetime-key").response_body,
+        )
+
     def test_view_exception_rolls_back_claim_and_domain_changes(self):
         class ProbeView:
             @idempotent
@@ -692,6 +711,43 @@ class BoardApiTestCase(TestCase):
         )
         self.assertEqual(second.status_code, 409)
         self.assertEqual(second.json()["code"], "CELL_ALREADY_OPENED")
+
+    def test_cell_open_database_replay_preserves_exact_response(self):
+        self.set_position(2, consumed=True)
+        current = self.client.get("/api/v1/board/cell/current").json()["data"]
+        challenge_id = current["challenge_candidates"][0]["challenge_id"]
+
+        with patch(
+            "apps.board.idempotency.cache.set",
+            side_effect=RuntimeError("redis unavailable"),
+        ):
+            with self.assertLogs("apps.board.idempotency", level="WARNING"):
+                first = self.post_idem(
+                    "/api/v1/board/cell/open",
+                    {"challenge_id": challenge_id},
+                    key="open-cache-failure",
+                )
+
+        cache.clear()
+        second = self.post_idem(
+            "/api/v1/board/cell/open",
+            {"challenge_id": challenge_id},
+            key="open-cache-failure",
+        )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.json(), second.json())
+        self.assertEqual(
+            first.json(),
+            IdempotencyRequest.objects.get(key="open-cache-failure").response_body,
+        )
+        self.assertEqual(
+            TeamChallengeAccess.objects.filter(
+                team=self.team,
+                challenge_id=challenge_id,
+            ).count(),
+            1,
+        )
 
     def test_board_open_challenge_submit_and_board_completion_are_one_flow(self):
         cell = self.set_position(2, consumed=True)
@@ -1298,6 +1354,45 @@ class BoardApiTestCase(TestCase):
             "/api/v1/board/chance/use", {"card_id": "card_extra_roll"}, key="use-1"
         )
         self.assertEqual(use_response.status_code, 200)
+
+    def test_duplicate_card_id_remaining_card_is_usable_after_discard(self):
+        self.draw_card("card_extra_roll", source_cell_index=7)
+        self.draw_card("card_extra_roll", source_cell_index=30)
+
+        discard_response = self.post_idem(
+            "/api/v1/board/chance/discard",
+            {"card_id": "card_extra_roll"},
+            key="discard-duplicate",
+        )
+
+        self.assertEqual(discard_response.status_code, 200)
+        self.assertEqual(
+            TeamChanceCard.objects.filter(
+                team=self.team,
+                card_id="card_extra_roll",
+                discarded_at__isnull=True,
+                used_at__isnull=True,
+            ).count(),
+            1,
+        )
+
+        use_response = self.post_idem(
+            "/api/v1/board/chance/use",
+            {"card_id": "card_extra_roll"},
+            key="use-duplicate-remaining",
+        )
+
+        self.assertEqual(use_response.status_code, 200)
+        self.state.refresh_from_db()
+        self.assertEqual(self.state.dice_rolls_left, 2)
+        self.assertEqual(
+            TeamChanceCard.objects.filter(
+                team=self.team,
+                card_id="card_extra_roll",
+                used_at__isnull=False,
+            ).count(),
+            1,
+        )
 
     def test_chance_discard_requires_two_held_cards(self):
         self.draw_card("card_extra_roll")

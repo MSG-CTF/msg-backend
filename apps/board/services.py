@@ -1166,7 +1166,9 @@ def use_chance_card(team, card_id, payload):
     if not card_id:
         raise CardIdRequired()
 
-    existing_draw = TeamChanceCard.objects.filter(team=team, card_id=card_id).first()
+    existing_draw = _held_cards_queryset(team).filter(card_id=card_id).first()
+    if existing_draw is None:
+        existing_draw = TeamChanceCard.objects.filter(team=team, card_id=card_id).first()
     if existing_draw is None:
         raise ChanceCardNotFound()
     if existing_draw.used_at is not None:
@@ -1178,10 +1180,19 @@ def use_chance_card(team, card_id, payload):
     with transaction.atomic():
         state = TeamBoardState.objects.select_for_update().get(team=team)
         draw = (
-            TeamChanceCard.objects.select_related("card")
-            .filter(team=team, card_id=card_id)
+            _held_cards_queryset(team)
+            .select_for_update()
+            .select_related("card")
+            .filter(card_id=card_id)
             .first()
         )
+        if draw is None:
+            draw = (
+                TeamChanceCard.objects.select_for_update()
+                .select_related("card")
+                .filter(team=team, card_id=card_id)
+                .first()
+            )
         if draw is None:
             raise ChanceCardNotFound()
         if draw.used_at is not None:

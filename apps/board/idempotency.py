@@ -1,9 +1,11 @@
 import functools
 import hashlib
+import json
 import logging
 
 from django.core.cache import cache
 from django.db import IntegrityError, transaction
+from rest_framework.renderers import JSONRenderer
 from rest_framework.response import Response
 
 from .exceptions import IdempotencyInProgress, IdempotencyKeyConflict, IdempotencyKeyRequired
@@ -29,6 +31,13 @@ def _response_from_record(record, fingerprint):
     if record.status == IdempotencyRequest.Status.PROCESSING:
         raise IdempotencyInProgress()
     return Response(record.response_body, status=record.response_status)
+
+
+def _normalize_response_body(response):
+    """Freeze the body in the same JSON-compatible shape sent to the client."""
+    if response.data is None:
+        return None
+    return json.loads(JSONRenderer().render(response.data))
 
 
 def _cache_get(cache_key):
@@ -92,6 +101,7 @@ def idempotent(view_method):
                 response = _response_from_record(record, fingerprint)
             else:
                 response = view_method(self, request, *args, **kwargs)
+                response.data = _normalize_response_body(response)
                 record.status = (
                     IdempotencyRequest.Status.FAILED
                     if response.status_code >= 500
