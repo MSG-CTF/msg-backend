@@ -9,7 +9,6 @@ from apps.challenge.models import (
     Challenge,
     FlagSubmission,
     FlagSubmissionLock,
-    OpenedChallenge,
     Solve,
 )
 from apps.challenge.services import (
@@ -30,7 +29,8 @@ from apps.instances.services import (
 )
 from apps.common.permissions import IsAuthenticated
 from apps.accounts.models import Team
-from apps.board.services import complete_challenge_from_submission
+from apps.board.models import TeamChallengeAccess
+from apps.board.services import challenge_solve_deadline, complete_challenge_from_submission
 from apps.teams.models import MileageHistory, MileageType
 
 
@@ -58,8 +58,10 @@ class ChallengeDetailView(APIView):
         challenge = Challenge.objects.filter(challenge_id=challenge_id).first()
         if challenge is None:
             return fail("CHALLENGE_NOT_FOUND", "존재하지 않는 문제 ID입니다.", 404)
-        opened_challenge = OpenedChallenge.objects.filter(team=team, challenge=challenge).first()
-        if opened_challenge is None:
+        challenge_access = TeamChallengeAccess.objects.filter(
+            team=team, challenge=challenge
+        ).first()
+        if challenge_access is None:
             return fail("CHALLENGE_LOCKED", "아직 개방되지 않은 문제입니다.", 403)
 
         solve = Solve.objects.filter(team=team, challenge=challenge).first()
@@ -112,8 +114,10 @@ class ChallengeSubmitView(APIView):
         if challenge is None:
             return fail("CHALLENGE_NOT_FOUND", "존재하지 않는 문제 ID입니다.", 404)
 
-        opened_challenge = OpenedChallenge.objects.filter(team=team, challenge=challenge).first()
-        if opened_challenge is None:
+        challenge_access = TeamChallengeAccess.objects.filter(
+            team=team, challenge=challenge
+        ).first()
+        if challenge_access is None:
             return fail("CHALLENGE_LOCKED", "아직 개방되지 않은 문제입니다.", 403)
 
         now = timezone.now()
@@ -177,7 +181,7 @@ class ChallengeSubmitView(APIView):
                 )
                 return fail(code, message, status_code, data)
 
-            is_extra_dice_granted = opened_challenge.solve_deadline_at >= now
+            is_extra_dice_granted = challenge_solve_deadline(challenge_access) >= now
             earned_score = challenge.current_score
             earned_mileage = CHALLENGE_MILEAGE_REWARDS[challenge.difficulty]
 

@@ -41,25 +41,6 @@ class Challenge(models.Model):
         return self.title
 
 
-class OpenedChallenge(models.Model):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    team = models.ForeignKey("accounts.Team", on_delete=models.CASCADE, related_name="opened_challenges")
-    challenge = models.ForeignKey(Challenge, on_delete=models.CASCADE, related_name="opened_challenges")
-    cell_index = models.IntegerField()
-    opened_at = models.DateTimeField(auto_now_add=True)
-    solve_deadline_at = models.DateTimeField()
-
-    class Meta:
-        db_table = "opened_challenges"
-        constraints = [
-            models.UniqueConstraint(fields=["team", "challenge"], name="unique_opened_challenge"),
-            models.UniqueConstraint(fields=["team", "cell_index"], name="unique_opened_cell"),
-        ]
-        indexes = [
-            models.Index(fields=["team", "cell_index"]),
-        ]
-
-
 class Solve(models.Model):
     solve_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     team = models.ForeignKey("accounts.Team", on_delete=models.CASCADE, related_name="solves")

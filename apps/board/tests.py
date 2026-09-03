@@ -28,7 +28,7 @@ from apps.board.models import (
 from apps.board.services import SOLVE_LIMIT_SECONDS, get_or_create_board_state
 from apps.board.idempotency import idempotent
 from apps.board.exceptions import IdempotencyKeyConflict
-from apps.challenge.models import Challenge, OpenedChallenge, Solve
+from apps.challenge.models import Challenge, Solve
 from apps.teams.models import MileageHistory
 
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
@@ -760,7 +760,7 @@ class BoardApiTestCase(TestCase):
         )
         self.assertEqual(opened.status_code, 200)
         self.assertTrue(
-            OpenedChallenge.objects.filter(team=self.team, challenge=challenge).exists()
+            TeamChallengeAccess.objects.filter(team=self.team, challenge=challenge).exists()
         )
 
         detail = self.client.get(f"/api/v1/challenges/{challenge_id}")

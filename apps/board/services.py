@@ -40,7 +40,7 @@ from .exceptions import (
     RouletteAlreadySpun,
     TimerRunning,
 )
-from apps.challenge.models import Challenge, OpenedChallenge
+from apps.challenge.models import Challenge
 
 from .models import (
     Cell,
@@ -632,14 +632,6 @@ def open_current_cell_challenge(team, challenge_id):
         )
 
         now = timezone.now()
-        OpenedChallenge.objects.get_or_create(
-            team=team,
-            challenge=candidate.challenge,
-            defaults={
-                "cell_index": cell.cell_index,
-                "solve_deadline_at": now + timedelta(seconds=SOLVE_LIMIT_SECONDS),
-            },
-        )
         candidate.status = TeamCellCandidate.Status.SELECTED
         candidate.selected_at = now
         candidate.save(update_fields=["status", "selected_at"])
@@ -647,7 +639,7 @@ def open_current_cell_challenge(team, challenge_id):
         state.active_challenge_access = access
         state.save(update_fields=["active_challenge_access", "updated_at"])
 
-    return access, now + timedelta(seconds=SOLVE_LIMIT_SECONDS)
+    return access, challenge_solve_deadline(access)
 
 
 def complete_challenge_from_submission(team, challenge, is_extra_dice_granted):

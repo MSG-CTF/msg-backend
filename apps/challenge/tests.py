@@ -8,7 +8,8 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.accounts.models import Team, User
-from apps.challenge.models import Challenge, FlagSubmissionLock, OpenedChallenge, Solve
+from apps.board.models import Cell, TeamChallengeAccess
+from apps.challenge.models import Challenge, FlagSubmissionLock, Solve
 from apps.challenge.services import hash_flag
 from apps.teams.models import MileageHistory, MileageType
 
@@ -40,11 +41,16 @@ class ChallengeSubmitTests(TestCase):
             flag_hash=hash_flag("MSG{correct_flag}"),
             is_published=True,
         )
-        OpenedChallenge.objects.create(
+        self.cell = Cell.objects.create(
+            cell_index=1,
+            type=Cell.CellType.CHALLENGE,
+            difficulty=Cell.Difficulty.EASY,
+            name="challenge-cell-1",
+        )
+        TeamChallengeAccess.objects.create(
             team=self.team,
             challenge=self.challenge,
-            cell_index=1,
-            solve_deadline_at=timezone.now() + datetime.timedelta(minutes=15),
+            source_cell=self.cell,
         )
         self.auth()
 
@@ -62,6 +68,31 @@ class ChallengeSubmitTests(TestCase):
             {"flag": flag},
             format="json",
         )
+
+    def test_detail_and_submit_require_team_challenge_access(self):
+        TeamChallengeAccess.objects.filter(
+            team=self.team,
+            challenge=self.challenge,
+        ).delete()
+
+        detail = self.client.get(f"/api/v1/challenges/{self.challenge.challenge_id}")
+        submit = self.submit("MSG{correct_flag}")
+
+        self.assertEqual(detail.status_code, 403)
+        self.assertEqual(detail.data["code"], "CHALLENGE_LOCKED")
+        self.assertEqual(submit.status_code, 403)
+        self.assertEqual(submit.data["code"], "CHALLENGE_LOCKED")
+
+    def test_submission_deadline_is_derived_from_access_opened_at(self):
+        TeamChallengeAccess.objects.filter(
+            team=self.team,
+            challenge=self.challenge,
+        ).update(opened_at=timezone.now() - datetime.timedelta(minutes=16))
+
+        response = self.submit("MSG{correct_flag}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.data["data"]["is_extra_dice_granted"])
 
     def test_three_wrong_flags_lock_submission(self):
         # 같은 팀이 같은 문제에 3회 연속 오답을 내면 제출 제한이 걸린다
@@ -153,11 +184,16 @@ class ChallengeSubmitTests(TestCase):
             nickname="second-user",
             team=other_team,
         )
-        OpenedChallenge.objects.create(
+        second_cell = Cell.objects.create(
+            cell_index=2,
+            type=Cell.CellType.CHALLENGE,
+            difficulty=Cell.Difficulty.EASY,
+            name="challenge-cell-2",
+        )
+        TeamChallengeAccess.objects.create(
             team=other_team,
             challenge=self.challenge,
-            cell_index=2,
-            solve_deadline_at=timezone.now() + datetime.timedelta(minutes=15),
+            source_cell=second_cell,
         )
         second_client = APIClient()
         login = second_client.post(
@@ -215,11 +251,16 @@ class ChallengeSubmitTests(TestCase):
                 flag_hash=hash_flag(f"MSG{{{difficulty.lower()}_flag}}"),
                 is_published=True,
             )
-            OpenedChallenge.objects.create(
+            cell = Cell.objects.create(
+                cell_index=len(extra_challenges) + 2,
+                type=Cell.CellType.CHALLENGE,
+                difficulty=difficulty,
+                name=f"challenge-cell-{len(extra_challenges) + 2}",
+            )
+            TeamChallengeAccess.objects.create(
                 team=self.team,
                 challenge=challenge,
-                cell_index=len(extra_challenges) + 2,
-                solve_deadline_at=timezone.now() + datetime.timedelta(minutes=15),
+                source_cell=cell,
             )
             extra_challenges.append((challenge, reward, f"MSG{{{difficulty.lower()}_flag}}"))
 
