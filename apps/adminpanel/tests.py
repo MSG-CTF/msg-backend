@@ -549,6 +549,9 @@ class AdminInstanceTests(TestCase):
         new_inst = Instance.objects.get(pk=new_id)
         self.assertEqual(new_inst.replaced_instance_id, old.instance_id)
         self.assertEqual(new_inst.release_id, self.release.release_id)
+        old.refresh_from_db()
+        self.assertEqual(old.status, InstanceStatus.STOPPING)
+        self.assertEqual(old.delete_reason, DeleteReason.REPLACED_BY_NEW_INSTANCE)
 
     def test_force_reset_not_restartable(self):
         inst = self._instance(status=InstanceStatus.STOPPED)

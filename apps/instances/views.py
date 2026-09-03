@@ -17,6 +17,7 @@ from apps.instances.services import (
     call_scheduler_reset,
     create_instance_from_scheduler,
     get_challenge_runtime_config,
+    mark_instance_replaced,
     scheduler_auth_header,
     serialize_instance,
     update_instance_from_scheduler,
@@ -88,6 +89,7 @@ class InstanceCreateView(APIView):
                 replaced_instance=replaced_instance,
                 release=release,
             )
+            mark_instance_replaced(replaced_instance)
 
         message = "인스턴스 생성 요청이 접수되었습니다."
         if replaced_instance is not None:
@@ -172,6 +174,7 @@ class InstanceResetView(APIView):
                 replaced_instance=instance,
                 release=instance.release,
             )
+            mark_instance_replaced(instance)
             response_data = serialize_instance(new_instance, include_replaced=True)
 
         return ok(

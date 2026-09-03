@@ -13,7 +13,10 @@ from apps.challenge.services import hash_flag
 from apps.instances.models import (
     ChallengeRelease,
     ChallengeRuntimeConfig,
+    DeleteReason,
+    Instance,
     InstanceLock,
+    InstanceStatus,
     ReleaseContainer,
 )
 
@@ -41,7 +44,7 @@ class InstanceLockTests(TestCase):
             flag_hash=hash_flag("MSG{flag}"),
             is_published=True,
         )
-        release = ChallengeRelease.objects.create(
+        self.release = ChallengeRelease.objects.create(
             challenge=self.challenge,
             version=1,
             registry_revision=1,
@@ -52,7 +55,7 @@ class InstanceLockTests(TestCase):
             source_ref="refs/heads/main",
         )
         ReleaseContainer.objects.create(
-            release=release,
+            release=self.release,
             name="app",
             image_ref=(
                 "ghcr.io/msg-ctf/challenges/web-basic/app@sha256:"
@@ -62,7 +65,7 @@ class InstanceLockTests(TestCase):
         )
         ChallengeRuntimeConfig.objects.create(
             challenge=self.challenge,
-            current_release=release,
+            current_release=self.release,
         )
         self.auth()
 
@@ -99,3 +102,74 @@ class InstanceLockTests(TestCase):
         self.assertEqual(res.status_code, 202)
         self.assertEqual(res.data["code"], "SUCCESS")
         self.assertTrue(InstanceLock.objects.filter(user=self.user).exists())
+
+    @patch("apps.instances.views.call_scheduler_create")
+    def test_instance_create_marks_replaced_instance_stopping(self, call_scheduler_create):
+        old_instance = Instance.objects.create(
+            user=self.user,
+            team=self.team,
+            challenge=self.challenge,
+            status=InstanceStatus.RUNNING,
+            release=self.release,
+        )
+        instance_id = uuid.uuid4()
+        call_scheduler_create.return_value = {
+            "instance_id": str(instance_id),
+            "team_id": str(self.team.team_id),
+            "user_id": str(self.user.user_id),
+            "challenge_id": str(self.challenge.challenge_id),
+            "status": "REQUESTED",
+            "service_url": None,
+            "expires_at": (timezone.now() + datetime.timedelta(minutes=120)).isoformat(),
+            "hard_expires_at": (timezone.now() + datetime.timedelta(minutes=180)).isoformat(),
+            "replaced_instance_id": str(old_instance.instance_id),
+        }
+
+        res = self.client.post(
+            "/api/v1/instances",
+            {"challenge_id": str(self.challenge.challenge_id)},
+            format="json",
+        )
+
+        self.assertEqual(res.status_code, 202)
+        old_instance.refresh_from_db()
+        self.assertEqual(old_instance.status, InstanceStatus.STOPPING)
+        self.assertEqual(
+            old_instance.delete_reason,
+            DeleteReason.REPLACED_BY_NEW_INSTANCE,
+        )
+
+    @patch("apps.instances.views.call_scheduler_reset")
+    def test_instance_reset_marks_replaced_instance_stopping(self, call_scheduler_reset):
+        old_instance = Instance.objects.create(
+            user=self.user,
+            team=self.team,
+            challenge=self.challenge,
+            status=InstanceStatus.RUNNING,
+            release=self.release,
+        )
+        instance_id = uuid.uuid4()
+        call_scheduler_reset.return_value = {
+            "instance_id": str(instance_id),
+            "team_id": str(self.team.team_id),
+            "user_id": str(self.user.user_id),
+            "challenge_id": str(self.challenge.challenge_id),
+            "status": "REQUESTED",
+            "service_url": None,
+            "expires_at": (timezone.now() + datetime.timedelta(minutes=120)).isoformat(),
+            "hard_expires_at": (timezone.now() + datetime.timedelta(minutes=180)).isoformat(),
+            "replaced_instance_id": str(old_instance.instance_id),
+        }
+
+        res = self.client.post(
+            f"/api/v1/instances/{old_instance.instance_id}/reset",
+            format="json",
+        )
+
+        self.assertEqual(res.status_code, 202)
+        old_instance.refresh_from_db()
+        self.assertEqual(old_instance.status, InstanceStatus.STOPPING)
+        self.assertEqual(
+            old_instance.delete_reason,
+            DeleteReason.REPLACED_BY_NEW_INSTANCE,
+        )
