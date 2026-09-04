@@ -244,6 +244,9 @@ def public_container(release):
 
 def is_deployable(release):
     # Scheduler 계약에 맞게 공개 포트가 하나뿐인 릴리스만 활성화한다
+    if release.registry_revision <= 0:
+        return False
+
     containers = list(release.containers.all())
     if not 1 <= len(containers) <= 8:
         return False
