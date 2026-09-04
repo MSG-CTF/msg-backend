@@ -1,13 +1,15 @@
+import threading
 import uuid
 
 from datetime import timedelta
+from django.db import connections
 from django.utils import timezone
 from django.core.cache import cache
-from django.test import TestCase, override_settings
+from django.test import TestCase, TransactionTestCase, override_settings
 
 from rest_framework.test import APIClient
 
-from apps.common.jwt import hash_token
+from apps.common.jwt import hash_token, issue_access_token
 from apps.accounts.models import (
     Role,
     Team,
@@ -44,6 +46,76 @@ class AdminTests(TestCase):
         res = self.client.post("/api/v1/auth/login",
                                {"login_id": login_id, "password": "pw1234"}, format="json")
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {res.data['data']['access_token']}")
+
+    def mileage(self, body, key=None):
+        return self.client.post(
+            f"/api/v1/admin/teams/{self.team.team_id}/mileage",
+            body, format="json",
+            HTTP_IDEMPOTENCY_KEY=key or uuid.uuid4().hex,
+        )
+
+    def test_mileage_idempotent_retry_applies_once(self):
+        self.auth("root")
+        k = "grant-1"
+        first = self.mileage({"amount": 100, "reason": "보상"}, key=k)
+        second = self.mileage({"amount": 100, "reason": "보상"}, key=k)
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.data["data"]["current_mileage"],
+                         first.data["data"]["current_mileage"])
+        self.team.refresh_from_db()
+        self.assertEqual(self.team.mileage, 100)
+        self.assertEqual(MileageHistory.objects.filter(team=self.team).count(), 1)
+
+    def test_mileage_same_key_different_body_conflict(self):
+        self.auth("root")
+        k = "grant-2"
+        self.mileage({"amount": 100, "reason": "보상"}, key=k)
+        res = self.mileage({"amount": 50, "reason": "보상"}, key=k)
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.data["code"], "IDEMPOTENCY_KEY_CONFLICT")
+        self.team.refresh_from_db()
+        self.assertEqual(self.team.mileage, 100)
+
+    def test_mileage_requires_idempotency_key(self):
+        self.auth("root")
+        res = self.client.post(
+            f"/api/v1/admin/teams/{self.team.team_id}/mileage",
+            {"amount": 100, "reason": "보상"}, format="json",
+        )
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data["code"], "IDEMPOTENCY_KEY_REQUIRED")
+
+    def test_mileage_key_too_long_rejected(self):
+        self.auth("root")
+        res = self.client.post(
+            f"/api/v1/admin/teams/{self.team.team_id}/mileage",
+            {"amount": 100, "reason": "보상"}, format="json",
+            HTTP_IDEMPOTENCY_KEY="x" * 201,
+        )
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data["code"], "INVALID_REQUEST")
+
+    def test_mileage_failed_request_still_binds_key(self):
+        from apps.accounts.models import Team
+        Team.objects.filter(pk=self.team.pk).update(mileage=20)
+        self.auth("root")
+        k = "deduct-fail-1"
+
+        first = self.mileage({"amount": -50, "reason": "회수"}, key=k)
+        self.assertEqual(first.status_code, 400)
+        self.assertEqual(first.data["code"], "INSUFFICIENT_MILEAGE")
+
+        replay = self.mileage({"amount": -50, "reason": "회수"}, key=k)
+        self.assertEqual(replay.status_code, 400)
+        self.assertEqual(replay.data["code"], "INSUFFICIENT_MILEAGE")
+
+        conflict = self.mileage({"amount": 10, "reason": "회수"}, key=k)
+        self.assertEqual(conflict.status_code, 409)
+        self.assertEqual(conflict.data["code"], "IDEMPOTENCY_KEY_CONFLICT")
+
+        self.team.refresh_from_db()
+        self.assertEqual(self.team.mileage, 20)
 
     def test_participant_blocked(self):
         self.auth("player")
@@ -101,7 +173,7 @@ class AdminTests(TestCase):
         url = f"/api/v1/admin/teams/{self.team.team_id}/mileage"
         before = self.team.mileage
 
-        res = self.client.post(url, {"amount": 50, "reason": "보상"}, format="json")
+        res = self.mileage({"amount": 50, "reason": "보상"})
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.data["data"]["previous_mileage"], before)
         self.assertEqual(res.data["data"]["current_mileage"], before + 50)
@@ -121,7 +193,7 @@ class AdminTests(TestCase):
         self.auth("root")
         url = f"/api/v1/admin/teams/{self.team.team_id}/mileage"
 
-        res = self.client.post(url, {"amount": -30, "reason": "회수"}, format="json")
+        res = self.mileage({"amount": -30, "reason": "회수"})
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.data["data"]["current_mileage"], 70)
 
@@ -138,9 +210,9 @@ class AdminTests(TestCase):
         self.auth("root")
         url = f"/api/v1/admin/teams/{self.team.team_id}/mileage"
 
-        self.client.post(url, {"amount": 100, "reason": "a"}, format="json")
-        self.client.post(url, {"amount": -30, "reason": "b"}, format="json")
-        self.client.post(url, {"amount": 50, "reason": "c"}, format="json")
+        self.mileage({"amount": 100, "reason": "a"})
+        self.mileage({"amount": -30, "reason": "b"})
+        self.mileage({"amount": 50, "reason": "c"})
 
         self.team.refresh_from_db()
         total = MileageHistory.objects.filter(team=self.team).aggregate(s=Sum("amount"))["s"]
@@ -161,7 +233,7 @@ class AdminTests(TestCase):
         self.auth("root")
         url = f"/api/v1/admin/teams/{self.team.team_id}/mileage"
 
-        res = self.client.post(url, {"amount": -50, "reason": "x"}, format="json")
+        res = self.mileage({"amount": -50, "reason": "x"})
         self.assertEqual(res.status_code, 400)
         self.assertEqual(res.data["code"], "INSUFFICIENT_MILEAGE")
         self.assertEqual(res.data["data"]["current_mileage"], 20)
@@ -187,6 +259,7 @@ class AdminTests(TestCase):
         res = self.client.post(
             "/api/v1/admin/teams/00000000-0000-0000-0000-000000000000/mileage",
             {"amount": 50, "reason": "x"}, format="json",
+            HTTP_IDEMPOTENCY_KEY=uuid.uuid4().hex,
         )
         self.assertEqual(res.data["code"], "TEAM_NOT_FOUND")
 
@@ -753,3 +826,48 @@ class AdminInstanceTests(TestCase):
     def test_list_summary_optout(self):
         res = self.client.get("/api/v1/admin/instances?summary=false")
         self.assertIsNone(res.data["data"]["summary"])
+
+
+class MileageIdempotencyRaceTest(TransactionTestCase):
+    def setUp(self):
+        self.team = Team.objects.create(team_name="레이스팀", mileage=0)
+        self.admin = User.objects.create_user(
+            login_id="root2", password="pw1234", nickname="운영자2",
+            team=None, role=Role.ADMIN,
+        )
+
+    def test_concurrent_same_key_applies_once(self):
+        token = issue_access_token(self.admin)
+        url = f"/api/v1/admin/teams/{self.team.team_id}/mileage"
+        results = {}
+        errors = []
+        start = threading.Barrier(2)
+
+        def send(tag):
+            client = APIClient()
+            client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+            start.wait()
+            try:
+                res = client.post(
+                    url, {"amount": 100, "reason": "보상"},
+                    format="json", HTTP_IDEMPOTENCY_KEY="race-1",
+                )
+                results[tag] = res.status_code
+            except Exception as exc:  # noqa: BLE001
+                errors.append(repr(exc))
+            finally:
+                connections.close_all()
+
+        threads = [threading.Thread(target=send, args=(i,)) for i in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 2)
+        self.team.refresh_from_db()
+        self.assertEqual(self.team.mileage, 100)
+        self.assertEqual(MileageHistory.objects.filter(team=self.team).count(), 1)
+        # 한 요청이 반영하고 나머지는 저장된 응답을 재생하므로 둘 다 200.
+        self.assertEqual(sorted(results.values()), [200, 200])
