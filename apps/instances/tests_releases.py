@@ -9,7 +9,13 @@ from apps.accounts.models import Role, Team, User
 from apps.board.models import Cell, TeamChallengeAccess
 from apps.challenge.models import Challenge
 from apps.challenge.services import hash_flag
-from apps.instances.models import ChallengeRelease, ChallengeRuntimeConfig, Instance, InstanceStatus
+from apps.instances.models import (
+    ChallengeRelease,
+    ChallengeRuntimeConfig,
+    Instance,
+    InstanceStatus,
+    ReleaseContainer,
+)
 
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 
@@ -103,6 +109,26 @@ class ReleaseTestBase(TestCase):
 
     def activate(self, release_id):
         return self.client.post(f"{self.base_url}/{release_id}/activate")
+
+    def create_legacy_release(self):
+        release = ChallengeRelease.objects.create(
+            challenge=self.challenge,
+            version=1,
+            registry_revision=0,
+            challenge_slug="",
+            cpu_millicores=500,
+            memory_mib=512,
+            ephemeral_storage_mib=1024,
+            isolation_profile="WEB",
+            source_ref="backfill",
+        )
+        ReleaseContainer.objects.create(
+            release=release,
+            name="app",
+            image_ref=f"ghcr.io/msg-ctf/challenges/web-basic/app@sha256:{DIGEST_A}",
+            ports=[{"port": 8080, "public": True}],
+        )
+        return release
 
 
 class ReleaseRegisterTests(ReleaseTestBase):
@@ -356,6 +382,15 @@ class ReleaseActivateTests(ReleaseTestBase):
         self.assertEqual(res.status_code, 404)
         self.assertEqual(res.data["code"], "RELEASE_NOT_FOUND")
 
+    def test_activate_rejects_legacy_registry_revision(self):
+        release = self.create_legacy_release()
+
+        self.auth("root")
+        res = self.activate(release.release_id)
+
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data["code"], "RELEASE_NOT_DEPLOYABLE")
+
 
 class ReleaseListTests(ReleaseTestBase):
     def test_list_returns_versions_desc_with_current(self):
@@ -411,6 +446,25 @@ class ReleaseInstanceCreateTests(ReleaseTestBase):
         )
         self.assertEqual(res.status_code, 404)
         self.assertEqual(res.data["code"], "RUNTIME_CONFIG_NOT_FOUND")
+
+    @patch("apps.instances.services.scheduler_request")
+    def test_create_rejects_legacy_current_release_before_scheduler(self, scheduler_request):
+        legacy_release = self.create_legacy_release()
+        ChallengeRuntimeConfig.objects.create(
+            challenge=self.challenge,
+            current_release=legacy_release,
+        )
+
+        self.auth("player")
+        res = self.client.post(
+            self.player_url,
+            {"challenge_id": str(self.challenge.challenge_id)},
+            format="json",
+        )
+
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data["code"], "RELEASE_NOT_DEPLOYABLE")
+        scheduler_request.assert_not_called()
 
     @patch("apps.instances.services.scheduler_request")
     def test_create_uses_current_release_and_saves_snapshot(self, scheduler_request):
