@@ -64,12 +64,16 @@ def parse_scheduler_datetime(value):
     return parse_datetime(value)
 
 
-def scheduler_auth_header(request):
-    # 사용자의 Authorization 헤더를 Scheduler 호출에 그대로 전달한다
-    if request is None:
-        return None
+def scheduler_auth_header(request=None):
+    # Scheduler 호출에 사용할 내부 API 토큰 헤더를 만든다
+    if not settings.SCHEDULER_API_TOKEN:
+        raise SchedulerError(
+            "SCHEDULER_UNAVAILABLE",
+            "인스턴스 서버 설정이 올바르지 않습니다.",
+            503,
+        )
 
-    return request.headers.get("Authorization")
+    return f"Bearer {settings.SCHEDULER_API_TOKEN}"
 
 
 def get_active_instance(user):
@@ -177,19 +181,71 @@ def scheduler_error_from_response(error):
     )
 
 
+def release_registry_revision(release):
+    # PR #26 registry_revision과 기존 revision 필드를 모두 지원한다
+    revision = getattr(release, "registry_revision", None)
+    if revision is None:
+        revision = getattr(release, "revision", None)
+
+    if not isinstance(revision, int) or revision <= 0:
+        raise SchedulerError("INVALID_REQUEST", "릴리즈 revision 설정을 확인해주세요.", 400)
+
+    return revision
+
+
+def release_container_image(container):
+    # Registry 내부 image_ref를 Scheduler의 image 필드로 변환한다
+    return getattr(container, "image_ref", getattr(container, "image", None))
+
+
+def release_container_ports(container):
+    # PR #26 포트 객체 배열과 기존 정수 배열을 Scheduler 포트 배열로 변환한다
+    ports = []
+    for entry in container.ports:
+        if isinstance(entry, dict):
+            ports.append(entry.get("port"))
+        else:
+            ports.append(entry)
+
+    return ports
+
+
+def release_container_expose(container):
+    # PR #26 public 포트 정보를 Scheduler의 expose 값으로 변환한다
+    if hasattr(container, "expose"):
+        return container.expose
+
+    return any(entry.get("public") for entry in container.ports if isinstance(entry, dict))
+
+
+def serialize_release_container(container):
+    # Scheduler create 요청에 들어갈 컨테이너 정보를 생성한다
+    return {
+        "name": container.name,
+        "image": release_container_image(container),
+        "ports": release_container_ports(container),
+        "expose": release_container_expose(container),
+    }
+
+
 def build_scheduler_create_body(user, team, challenge, runtime_config):
     # Scheduler 인스턴스 생성 요청 body를 만든다
+    release = runtime_config.current_release
+    validate_release_for_scheduler(release)
+    containers = release.containers.order_by("name")
+
     return {
         "team_id": str(team.team_id),
         "user_id": str(user.user_id),
         "challenge_id": str(challenge.challenge_id),
-        "container_image": runtime_config.container_image,
-        "container_port": runtime_config.container_port,
-        "architecture": runtime_config.architecture,
+        "containers": [serialize_release_container(container) for container in containers],
+        "registry_revision": release_registry_revision(release),
+        "isolation_profile": getattr(release, "isolation_profile", "WEB"),
+        "architecture": release.architecture,
         "resource_profile": {
-            "cpu_millicores": runtime_config.cpu_millicores,
-            "memory_mib": runtime_config.memory_mib,
-            "ephemeral_storage_mib": runtime_config.ephemeral_storage_mib,
+            "cpu_millicores": release.cpu_millicores,
+            "memory_mib": release.memory_mib,
+            "ephemeral_storage_mib": release.ephemeral_storage_mib,
         },
         "ttl_minutes": runtime_config.ttl_minutes,
         "hard_timeout_minutes": runtime_config.hard_timeout_minutes,
@@ -282,7 +338,7 @@ def update_instance_from_scheduler(instance, scheduler_data):
     return instance
 
 
-def create_instance_from_scheduler(scheduler_data, user, team, challenge=None, replaced_instance=None):
+def create_instance_from_scheduler(scheduler_data, user, team, challenge=None, release=None, replaced_instance=None):
     # Scheduler가 발급한 instance_id로 백엔드 인스턴스 row를 만든다
     if challenge is None:
         challenge = Challenge.objects.filter(challenge_id=scheduler_data.get("challenge_id")).first()
@@ -299,6 +355,7 @@ def create_instance_from_scheduler(scheduler_data, user, team, challenge=None, r
             "expires_at": parse_scheduler_datetime(scheduler_data.get("expires_at")),
             "hard_expires_at": parse_scheduler_datetime(scheduler_data.get("hard_expires_at")),
             "replaced_instance": replaced_instance,
+            "release": release,
         },
     )
     return instance
@@ -311,3 +368,29 @@ def sync_instance_from_scheduler(instance, auth_header=None):
 
     scheduler_data = call_scheduler_detail(instance, auth_header)
     return update_instance_from_scheduler(instance, scheduler_data)
+
+
+def validate_release_for_scheduler(release):
+    # Scheduler create 요청 전에 릴리즈 컨테이너 조건을 확인한다
+    if release is None:
+        raise SchedulerError("ACTIVE_RELEASE_NOT_FOUND", "활성화된 문제 릴리즈가 없습니다.", 404)
+
+    containers = list(release.containers.all())
+    exposed = [container for container in containers if release_container_expose(container)]
+
+    if not 1 <= len(containers) <= 8:
+        raise SchedulerError("INVALID_REQUEST", "컨테이너 설정을 확인해주세요.", 400)
+
+    if len(exposed) != 1:
+        raise SchedulerError("INVALID_REQUEST", "공개 컨테이너 설정을 확인해주세요.", 400)
+
+    if len(release_container_ports(exposed[0])) != 1:
+        raise SchedulerError("INVALID_REQUEST", "공개 컨테이너 포트 설정을 확인해주세요.", 400)
+
+    for container in containers:
+        image = release_container_image(container)
+        ports = release_container_ports(container)
+        if not str(image).startswith("ghcr.io/") or "@sha256:" not in str(image):
+            raise SchedulerError("INVALID_REQUEST", "컨테이너 이미지 설정을 확인해주세요.", 400)
+        if not ports or any(not isinstance(port, int) for port in ports):
+            raise SchedulerError("INVALID_REQUEST", "컨테이너 포트 설정을 확인해주세요.", 400)

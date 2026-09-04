@@ -121,6 +121,8 @@ common_error_codes:
   - {http: 404, code: INSTANCE_NOT_FOUND}
   - {http: 400, code: INVALID_STATE_TRANSITION}
   - {http: 404, code: RUNTIME_CONFIG_NOT_FOUND}
+  - {http: 404, code: ACTIVE_RELEASE_NOT_FOUND}
+  - {http: 404, code: RELEASE_CONTAINER_NOT_FOUND}
   - {http: 400, code: HARD_TIMEOUT_EXCEEDED}
   # 관리자 인스턴스 강제 조작 (adminpanel, PR #22)
   - {http: 409, code: INSTANCE_ALREADY_TERMINATED}

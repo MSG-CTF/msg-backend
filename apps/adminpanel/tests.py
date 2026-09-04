@@ -20,7 +20,16 @@ from apps.teams.models import (
     PaymentTokenStatus,
 )
 from apps.challenge.models import Challenge
-from apps.instances.models import DeleteReason, Instance, InstanceStatus
+from apps.instances.models import (
+    ArchitectureType,
+    ChallengeRelease,
+    ChallengeRuntimeConfig,
+    DeleteReason,
+    Instance,
+    InstanceStatus,
+    IsolationProfile,
+    ReleaseContainer,
+)
 from unittest.mock import patch
 
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
@@ -629,6 +638,8 @@ class PaymentTests(TestCase):
         self.assertEqual(res.status_code, 400)
         self.assertEqual(res.data["code"], "INVALID_REQUEST")
 
+
+@override_settings(SCHEDULER_API_TOKEN="test-scheduler-token")
 class AdminInstanceTests(TestCase):
     def setUp(self):
         cache.clear()
@@ -645,6 +656,27 @@ class AdminInstanceTests(TestCase):
             title="웹 문제", category="WEB", difficulty="EASY",
             score=500, flag_hash="x", is_published=True,
         )
+        self.release = ChallengeRelease.objects.create(
+            challenge=self.challenge,
+            revision=1,
+            architecture=ArchitectureType.AMD64,
+            isolation_profile=IsolationProfile.WEB,
+            cpu_millicores=500,
+            memory_mib=512,
+            ephemeral_storage_mib=1024,
+            is_active=True,
+        )
+        ReleaseContainer.objects.create(
+            release=self.release,
+            name="web",
+            image="ghcr.io/msg-ctf/challenges/admin-reset/web@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            ports=[8080],
+            expose=True,
+        )
+        ChallengeRuntimeConfig.objects.create(
+            challenge=self.challenge,
+            current_release=self.release,
+        )
         self.auth("root")
 
     def auth(self, login_id):
@@ -657,7 +689,7 @@ class AdminInstanceTests(TestCase):
     def _instance(self, status=InstanceStatus.RUNNING, user=None):
         return Instance.objects.create(
             user=user or self.player, team=self.team, challenge=self.challenge,
-            status=status,
+            status=status, release=self.release,
         )
 
     def test_list_returns_instances_and_summary(self):
@@ -732,6 +764,7 @@ class AdminInstanceTests(TestCase):
         self.assertEqual(res.data["data"]["forced_by"], "root")
         new_inst = Instance.objects.get(pk=new_id)
         self.assertEqual(new_inst.replaced_instance_id, old.instance_id)
+        self.assertEqual(new_inst.release_id, self.release.release_id)
 
     def test_force_reset_not_restartable(self):
         inst = self._instance(status=InstanceStatus.STOPPED)

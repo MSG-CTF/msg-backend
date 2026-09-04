@@ -52,6 +52,13 @@ class InstanceCreateView(APIView):
         if runtime_config is None:
             return fail("RUNTIME_CONFIG_NOT_FOUND", "문제 실행 설정이 없습니다.", 404)
 
+        release = runtime_config.current_release
+        if release is None:
+            return fail("ACTIVE_RELEASE_NOT_FOUND", "활성화된 문제 릴리즈가 없습니다.", 404)
+
+        if not release.containers.exists():
+            return fail("RELEASE_CONTAINER_NOT_FOUND", "문제 실행 컨테이너 정보가 없습니다.", 404)
+
         with transaction.atomic():
             lock_instance_user(user)
 
@@ -81,6 +88,7 @@ class InstanceCreateView(APIView):
                 user=user,
                 team=team,
                 challenge=challenge,
+                release=release,
                 replaced_instance=replaced_instance,
             )
 
@@ -164,6 +172,7 @@ class InstanceResetView(APIView):
                 user=instance.user,
                 team=instance.team,
                 challenge=instance.challenge,
+                release=instance.release,
                 replaced_instance=instance,
             )
             response_data = serialize_instance(new_instance, include_replaced=True)
@@ -246,11 +255,14 @@ class MyInstanceView(APIView):
             if challenge is None:
                 return fail("CHALLENGE_NOT_FOUND", "존재하지 않는 문제 ID입니다.", 404)
 
+            runtime_config = get_challenge_runtime_config(challenge)
+            release = runtime_config.current_release if runtime_config else None
             instance = create_instance_from_scheduler(
                 scheduler_data,
                 user=request.user,
                 team=team,
                 challenge=challenge,
+                release=release,
             )
         else:
             update_instance_from_scheduler(instance, scheduler_data)

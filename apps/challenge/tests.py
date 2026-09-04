@@ -12,7 +12,7 @@ from apps.challenge.services import hash_flag
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 
 
-@override_settings(CACHES=LOCMEM)
+@override_settings(CACHES=LOCMEM, SECURE_SSL_REDIRECT=False)
 class ChallengeSubmitTests(TestCase):
     def setUp(self):
         cache.clear()
