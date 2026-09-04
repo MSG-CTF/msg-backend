@@ -5,6 +5,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from django.conf import settings
+from django.db import transaction
 from django.utils.dateparse import parse_datetime
 
 from apps.challenge.models import Challenge
@@ -389,6 +390,22 @@ def update_instance_from_scheduler(instance, scheduler_data):
     return instance
 
 
+def validate_scheduler_instance_scope(instance, user, team, challenge):
+    if instance is None:
+        return
+
+    if (
+        instance.user_id != user.user_id
+        or instance.team_id != team.team_id
+        or instance.challenge_id != challenge.challenge_id
+    ):
+        raise SchedulerError(
+            "SCHEDULER_UNAVAILABLE",
+            "Scheduler 응답의 instance_id가 기존 인스턴스 소유 정보와 일치하지 않습니다.",
+            503,
+        )
+
+
 def create_instance_from_scheduler(
     scheduler_data, user, team, challenge=None, replaced_instance=None, release=None
 ):
@@ -398,22 +415,31 @@ def create_instance_from_scheduler(
     if release is None and challenge is not None:
         release = get_release_from_scheduler_data(challenge, scheduler_data)
 
-    instance, _ = Instance.objects.update_or_create(
-        instance_id=scheduler_data["instance_id"],
-        defaults={
-            "user": user,
-            "team": team,
-            "challenge": challenge,
-            "status": scheduler_data.get("status", InstanceStatus.REQUESTED),
-            "host": scheduler_data.get("service_url"),
-            "ports": [],
-            "expires_at": parse_scheduler_datetime(scheduler_data.get("expires_at")),
-            "hard_expires_at": parse_scheduler_datetime(scheduler_data.get("hard_expires_at")),
-            "replaced_instance": replaced_instance,
-            # 어떤 릴리스로 떴는지 추적하기 위한 생성 시점 스냅샷
-            "release": release,
-        },
-    )
+    with transaction.atomic():
+        existing_instance = (
+            Instance.objects
+            .select_for_update()
+            .filter(instance_id=scheduler_data["instance_id"])
+            .first()
+        )
+        validate_scheduler_instance_scope(existing_instance, user, team, challenge)
+
+        instance, _ = Instance.objects.update_or_create(
+            instance_id=scheduler_data["instance_id"],
+            defaults={
+                "user": user,
+                "team": team,
+                "challenge": challenge,
+                "status": scheduler_data.get("status", InstanceStatus.REQUESTED),
+                "host": scheduler_data.get("service_url"),
+                "ports": [],
+                "expires_at": parse_scheduler_datetime(scheduler_data.get("expires_at")),
+                "hard_expires_at": parse_scheduler_datetime(scheduler_data.get("hard_expires_at")),
+                "replaced_instance": replaced_instance,
+                # 어떤 릴리스로 떴는지 추적하기 위한 생성 시점 스냅샷
+                "release": release,
+            },
+        )
     return instance
 
 
