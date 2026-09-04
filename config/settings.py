@@ -235,3 +235,10 @@ if (
 
 SCHEDULER_TIMEOUT_SECONDS = int(os.getenv("SCHEDULER_TIMEOUT_SECONDS", "5"))
 INSTANCE_EXTEND_MINUTES = int(os.getenv("INSTANCE_EXTEND_MINUTES", "30"))
+
+# 공급망 publish bundle 자동 수집 (manage.py poll_releases)
+RELEASE_POLL_API_BASE = os.getenv("RELEASE_POLL_API_BASE", "https://api.github.com")
+RELEASE_POLL_REPO = os.getenv("RELEASE_POLL_REPO", "MSG-CTF/2026_MSG_CTF")
+# Actions artifact 다운로드는 공개 저장소여도 토큰이 필요하다 (actions:read)
+RELEASE_POLL_GITHUB_TOKEN = os.getenv("RELEASE_POLL_GITHUB_TOKEN", "")
+RELEASE_POLL_LIMIT = int(os.getenv("RELEASE_POLL_LIMIT", "30"))

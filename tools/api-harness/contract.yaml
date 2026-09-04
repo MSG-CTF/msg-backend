@@ -130,3 +130,8 @@ common_error_codes:
   - {http: 400, code: HARD_TIMEOUT_LIMIT_EXCEEDED}
   - {http: 409, code: ACTIVE_INSTANCE_EXISTS}
   - {http: 409, code: TEAM_INSTANCE_LIMIT_EXCEEDED}
+  # 문제 릴리스 관리 (/admin/challenges/{id}/releases)
+  - {http: 400, code: RELEASE_INVALID}
+  - {http: 400, code: RELEASE_NOT_DEPLOYABLE}
+  - {http: 404, code: RELEASE_NOT_FOUND}
+  - {http: 409, code: RELEASE_DUPLICATED}
