@@ -9,7 +9,7 @@ from apps.accounts.models import Role, Team, User
 from apps.board.models import Cell, TeamChallengeAccess
 from apps.challenge.models import Challenge
 from apps.challenge.services import hash_flag
-from apps.instances.models import ChallengeRelease, ChallengeRuntimeConfig
+from apps.instances.models import ChallengeRelease, ChallengeRuntimeConfig, Instance, InstanceStatus
 
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 
@@ -567,6 +567,79 @@ class ReleaseInstanceCreateTests(ReleaseTestBase):
             )
 
         self.assertEqual(caught.exception.code, "SCHEDULER_UNAVAILABLE")
+
+    def test_create_from_scheduler_rejects_existing_instance_scope_mismatch(self):
+        self.auth("root")
+        release_id = self.register(revision=1).data["data"]["release_id"]
+        release = ChallengeRelease.objects.get(release_id=release_id)
+        other_user = User.objects.create_user(
+            login_id="other-player",
+            password="pw1234",
+            nickname="다른 참가자",
+            team=self.team,
+        )
+        other_team = Team.objects.create(team_name="다른 팀")
+        other_challenge = Challenge.objects.create(
+            title="Other Basic",
+            category=Challenge.CategoryType.WEB,
+            difficulty=Challenge.DifficultyType.EASY,
+            score=500,
+            description="다른 문제",
+            flag_hash=hash_flag("MSG{other}"),
+            is_published=True,
+        )
+        ChallengeRelease.objects.create(
+            challenge=other_challenge,
+            version=1,
+            registry_revision=1,
+            challenge_slug="other-basic",
+            cpu_millicores=500,
+            memory_mib=512,
+            ephemeral_storage_mib=1024,
+            isolation_profile="WEB",
+            source_ref="refs/heads/main",
+        )
+
+        from apps.instances.services import SchedulerError, create_instance_from_scheduler
+
+        cases = [
+            ("user", other_user, self.team, self.challenge),
+            ("team", self.player, other_team, self.challenge),
+            ("challenge", self.player, self.team, other_challenge),
+        ]
+        for field_name, user, team, challenge in cases:
+            with self.subTest(field_name=field_name):
+                instance_id = uuid.uuid4()
+                existing = Instance.objects.create(
+                    instance_id=instance_id,
+                    user=self.player,
+                    team=self.team,
+                    challenge=self.challenge,
+                    status=InstanceStatus.RUNNING,
+                    release=release,
+                )
+
+                with self.assertRaises(SchedulerError) as caught:
+                    create_instance_from_scheduler(
+                        {
+                            "instance_id": str(instance_id),
+                            "challenge_id": str(challenge.challenge_id),
+                            "registry_revision": 1,
+                            "status": "RUNNING",
+                            "service_url": "https://instance.example",
+                            "expires_at": "2026-11-08T10:00:00Z",
+                            "hard_expires_at": "2026-11-08T11:00:00Z",
+                        },
+                        user=user,
+                        team=team,
+                        challenge=challenge,
+                    )
+
+                self.assertEqual(caught.exception.code, "SCHEDULER_UNAVAILABLE")
+                existing.refresh_from_db()
+                self.assertEqual(existing.user_id, self.player.user_id)
+                self.assertEqual(existing.team_id, self.team.team_id)
+                self.assertEqual(existing.challenge_id, self.challenge.challenge_id)
 
     @patch("apps.instances.views.call_scheduler_active")
     def test_my_instance_recovery_rejects_missing_registry_revision(self, scheduler_active):
