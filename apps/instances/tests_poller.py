@@ -26,6 +26,7 @@ def bundle(revision=1, slug="web-basic", name="Web Basic", digest=DIGEST_A, scan
         "category": "web",
         "runtime_type": "KUBERNETES",
         "architecture": "AMD64",
+        "isolation_profile": "WEB",
         "workload": {
             "containers": [
                 {

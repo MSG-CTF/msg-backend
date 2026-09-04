@@ -33,6 +33,7 @@ def make_bundle(challenge, revision):
         "category": challenge["category"].lower(),
         "runtime_type": challenge.get("runtime_type") or "KUBERNETES",
         "architecture": challenge.get("architecture") or "AMD64",
+        "isolation_profile": challenge["isolation_profile"],
         "workload": {
             "containers": [
                 {

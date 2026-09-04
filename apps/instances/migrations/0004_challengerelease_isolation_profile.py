@@ -3,6 +3,13 @@
 from django.db import migrations, models
 
 
+def backfill_isolation_profile(apps, schema_editor):
+    ChallengeRelease = apps.get_model("instances", "ChallengeRelease")
+    ChallengeRelease.objects.filter(challenge__category="PWN").update(
+        isolation_profile="PWN"
+    )
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -16,6 +23,15 @@ class Migration(migrations.Migration):
             field=models.CharField(
                 choices=[("WEB", "Web"), ("PWN", "Pwn")],
                 default="WEB",
+                max_length=20,
+            ),
+        ),
+        migrations.RunPython(backfill_isolation_profile, migrations.RunPython.noop),
+        migrations.AlterField(
+            model_name="challengerelease",
+            name="isolation_profile",
+            field=models.CharField(
+                choices=[("WEB", "Web"), ("PWN", "Pwn")],
                 max_length=20,
             ),
         ),

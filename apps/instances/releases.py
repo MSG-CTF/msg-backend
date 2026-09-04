@@ -36,10 +36,11 @@ def _require_positive_int(value, field):
     return value
 
 
-def _isolation_profile_from_category(category):
-    if isinstance(category, str) and category.lower() == "pwn":
-        return IsolationProfile.PWN
-    return IsolationProfile.WEB
+def _validate_isolation_profile(value):
+    profile = _require_string(value, "isolation_profile")
+    if profile not in IsolationProfile.values:
+        raise ReleaseValidationError("isolation_profile 값이 올바르지 않습니다")
+    return profile
 
 
 def _validate_ports(raw_ports, container_name):
@@ -157,7 +158,9 @@ def validate_release_payload(body):
         "registry_revision": _require_positive_int(artifact.get("revision"), "revision"),
         "runtime_type": runtime_type,
         "architecture": architecture,
-        "isolation_profile": _isolation_profile_from_category(artifact.get("category")),
+        "isolation_profile": _validate_isolation_profile(
+            artifact.get("isolation_profile")
+        ),
         "cpu_millicores": _require_positive_int(
             resource_profile.get("cpu_millicores"), "resource_profile.cpu_millicores"
         ),
