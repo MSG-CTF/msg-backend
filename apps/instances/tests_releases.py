@@ -519,3 +519,71 @@ class ReleaseInstanceCreateTests(ReleaseTestBase):
         )
 
         self.assertEqual(str(instance.release_id), release_id)
+
+    def test_create_from_scheduler_rejects_missing_registry_revision(self):
+        self.auth("root")
+        release_id = self.register(revision=1).data["data"]["release_id"]
+        self.activate(release_id)
+
+        from apps.instances.services import SchedulerError, create_instance_from_scheduler
+
+        with self.assertRaises(SchedulerError) as caught:
+            create_instance_from_scheduler(
+                {
+                    "instance_id": str(uuid.uuid4()),
+                    "challenge_id": str(self.challenge.challenge_id),
+                    "status": "RUNNING",
+                    "service_url": "https://instance.example",
+                    "expires_at": "2026-11-08T10:00:00Z",
+                    "hard_expires_at": "2026-11-08T11:00:00Z",
+                },
+                user=self.player,
+                team=self.team,
+                challenge=self.challenge,
+            )
+
+        self.assertEqual(caught.exception.code, "SCHEDULER_UNAVAILABLE")
+
+    def test_create_from_scheduler_rejects_unknown_registry_revision(self):
+        self.auth("root")
+        self.register(revision=1)
+
+        from apps.instances.services import SchedulerError, create_instance_from_scheduler
+
+        with self.assertRaises(SchedulerError) as caught:
+            create_instance_from_scheduler(
+                {
+                    "instance_id": str(uuid.uuid4()),
+                    "challenge_id": str(self.challenge.challenge_id),
+                    "registry_revision": 9,
+                    "status": "RUNNING",
+                    "service_url": "https://instance.example",
+                    "expires_at": "2026-11-08T10:00:00Z",
+                    "hard_expires_at": "2026-11-08T11:00:00Z",
+                },
+                user=self.player,
+                team=self.team,
+                challenge=self.challenge,
+            )
+
+        self.assertEqual(caught.exception.code, "SCHEDULER_UNAVAILABLE")
+
+    @patch("apps.instances.views.call_scheduler_active")
+    def test_my_instance_recovery_rejects_missing_registry_revision(self, scheduler_active):
+        self.auth("root")
+        release_id = self.register(revision=1).data["data"]["release_id"]
+        self.activate(release_id)
+        scheduler_active.return_value = {
+            "instance_id": str(uuid.uuid4()),
+            "challenge_id": str(self.challenge.challenge_id),
+            "status": "RUNNING",
+            "service_url": "https://instance.example",
+            "expires_at": "2026-11-08T10:00:00Z",
+            "hard_expires_at": "2026-11-08T11:00:00Z",
+        }
+
+        self.auth("player")
+        res = self.client.get("/api/v1/teams/me/instance")
+
+        self.assertEqual(res.status_code, 503)
+        self.assertEqual(res.data["code"], "SCHEDULER_UNAVAILABLE")
