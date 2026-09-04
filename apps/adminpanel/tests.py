@@ -86,6 +86,37 @@ class AdminTests(TestCase):
         self.assertEqual(res.status_code, 400)
         self.assertEqual(res.data["code"], "IDEMPOTENCY_KEY_REQUIRED")
 
+    def test_mileage_key_too_long_rejected(self):
+        self.auth("root")
+        res = self.client.post(
+            f"/api/v1/admin/teams/{self.team.team_id}/mileage",
+            {"amount": 100, "reason": "보상"}, format="json",
+            HTTP_IDEMPOTENCY_KEY="x" * 201,
+        )
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data["code"], "INVALID_REQUEST")
+
+    def test_mileage_failed_request_still_binds_key(self):
+        from apps.accounts.models import Team
+        Team.objects.filter(pk=self.team.pk).update(mileage=20)
+        self.auth("root")
+        k = "deduct-fail-1"
+
+        first = self.mileage({"amount": -50, "reason": "회수"}, key=k)
+        self.assertEqual(first.status_code, 400)
+        self.assertEqual(first.data["code"], "INSUFFICIENT_MILEAGE")
+
+        replay = self.mileage({"amount": -50, "reason": "회수"}, key=k)
+        self.assertEqual(replay.status_code, 400)
+        self.assertEqual(replay.data["code"], "INSUFFICIENT_MILEAGE")
+
+        conflict = self.mileage({"amount": 10, "reason": "회수"}, key=k)
+        self.assertEqual(conflict.status_code, 409)
+        self.assertEqual(conflict.data["code"], "IDEMPOTENCY_KEY_CONFLICT")
+
+        self.team.refresh_from_db()
+        self.assertEqual(self.team.mileage, 20)
+
     def test_participant_blocked(self):
         self.auth("player")
         res = self.client.get("/api/v1/admin/teams")
@@ -809,6 +840,7 @@ class MileageIdempotencyRaceTest(TransactionTestCase):
         token = issue_access_token(self.admin)
         url = f"/api/v1/admin/teams/{self.team.team_id}/mileage"
         results = {}
+        errors = []
         start = threading.Barrier(2)
 
         def send(tag):
@@ -821,6 +853,8 @@ class MileageIdempotencyRaceTest(TransactionTestCase):
                     format="json", HTTP_IDEMPOTENCY_KEY="race-1",
                 )
                 results[tag] = res.status_code
+            except Exception as exc:  # noqa: BLE001
+                errors.append(repr(exc))
             finally:
                 connections.close_all()
 
@@ -830,7 +864,10 @@ class MileageIdempotencyRaceTest(TransactionTestCase):
         for t in threads:
             t.join()
 
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 2)
         self.team.refresh_from_db()
         self.assertEqual(self.team.mileage, 100)
         self.assertEqual(MileageHistory.objects.filter(team=self.team).count(), 1)
-        self.assertTrue(all(s in (200, 409) for s in results.values()))
+        # 한 요청이 반영하고 나머지는 저장된 응답을 재생하므로 둘 다 200.
+        self.assertEqual(sorted(results.values()), [200, 200])
