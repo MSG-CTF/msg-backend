@@ -180,14 +180,17 @@ class InstanceResetView(APIView):
             except SchedulerError as error:
                 return fail(error.code, error.message, error.status_code)
 
-            new_instance = create_instance_from_scheduler(
-                scheduler_data,
-                user=instance.user,
-                team=instance.team,
-                challenge=instance.challenge,
-                replaced_instance=instance,
-                release=instance.release,
-            )
+            try:
+                new_instance = create_instance_from_scheduler(
+                    scheduler_data,
+                    user=instance.user,
+                    team=instance.team,
+                    challenge=instance.challenge,
+                    replaced_instance=instance,
+                    release=instance.release,
+                )
+            except SchedulerError as error:
+                return fail(error.code, error.message, error.status_code)
             mark_instance_replaced(instance)
             response_data = serialize_instance(new_instance, include_replaced=True)
 
@@ -269,12 +272,15 @@ class MyInstanceView(APIView):
             if challenge is None:
                 return fail("CHALLENGE_NOT_FOUND", "존재하지 않는 문제 ID입니다.", 404)
 
-            instance = create_instance_from_scheduler(
-                scheduler_data,
-                user=request.user,
-                team=team,
-                challenge=challenge,
-            )
+            try:
+                instance = create_instance_from_scheduler(
+                    scheduler_data,
+                    user=request.user,
+                    team=team,
+                    challenge=challenge,
+                )
+            except SchedulerError as error:
+                return fail(error.code, error.message, error.status_code)
         else:
             update_instance_from_scheduler(instance, scheduler_data)
 

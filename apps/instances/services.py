@@ -105,18 +105,29 @@ def get_challenge_runtime_config(challenge):
 
 def get_release_from_scheduler_data(challenge, scheduler_data):
     registry_revision = scheduler_data.get("registry_revision")
-    if registry_revision is not None:
-        release = ChallengeRelease.objects.filter(
-            challenge=challenge,
-            registry_revision=registry_revision,
-        ).first()
-        if release is not None:
-            return release
+    if (
+        isinstance(registry_revision, bool)
+        or not isinstance(registry_revision, int)
+        or registry_revision <= 0
+    ):
+        raise SchedulerError(
+            "SCHEDULER_UNAVAILABLE",
+            "Scheduler 응답의 registry_revision을 확인할 수 없습니다.",
+            503,
+        )
 
-    runtime_config = get_challenge_runtime_config(challenge)
-    if runtime_config is None:
-        return None
-    return runtime_config.current_release
+    release = ChallengeRelease.objects.filter(
+        challenge=challenge,
+        registry_revision=registry_revision,
+    ).first()
+    if release is None:
+        raise SchedulerError(
+            "SCHEDULER_UNAVAILABLE",
+            "Scheduler 응답의 registry_revision에 해당하는 릴리스를 찾을 수 없습니다.",
+            503,
+        )
+
+    return release
 
 
 def release_container_ports(container):
