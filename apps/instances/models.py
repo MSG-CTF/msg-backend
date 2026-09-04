@@ -159,7 +159,6 @@ class ChallengeRelease(models.Model):
     isolation_profile = models.CharField(
         max_length=20,
         choices=IsolationProfile.choices,
-        default=IsolationProfile.WEB,
     )
     cpu_millicores = models.IntegerField()
     memory_mib = models.IntegerField()

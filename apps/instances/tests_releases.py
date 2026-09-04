@@ -36,6 +36,7 @@ def artifact_payload(revision=1, slug="web-basic", containers=None, note=None, *
         "category": "web",
         "runtime_type": "KUBERNETES",
         "architecture": "AMD64",
+        "isolation_profile": "WEB",
         "workload": {"containers": containers},
         "resource_profile": {
             "cpu_millicores": 500,
@@ -136,15 +137,32 @@ class ReleaseRegisterTests(ReleaseTestBase):
         )
         self.assertEqual(res.data["data"]["version"], 2)
 
-    def test_register_pwn_release_sets_isolation_profile(self):
+    def test_register_uses_artifact_isolation_profile(self):
         self.auth("root")
-        res = self.register(category="pwn")
+        res = self.register(category="pwn", isolation_profile="PWN")
 
         self.assertEqual(res.status_code, 200)
         release = ChallengeRelease.objects.get(
             release_id=res.data["data"]["release_id"]
         )
         self.assertEqual(release.isolation_profile, "PWN")
+
+    def test_register_rejects_missing_isolation_profile(self):
+        self.auth("root")
+        body = artifact_payload()
+        del body["artifact"]["isolation_profile"]
+
+        res = self.client.post(self.base_url, body, format="json")
+
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data["code"], "RELEASE_INVALID")
+
+    def test_register_rejects_invalid_isolation_profile(self):
+        self.auth("root")
+        res = self.register(isolation_profile="LINUX")
+
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data["code"], "RELEASE_INVALID")
 
     def test_register_multi_container_is_deployable(self):
         # 공개 포트가 하나인 멀티 컨테이너 릴리스는 Scheduler 계약으로 배포할 수 있다

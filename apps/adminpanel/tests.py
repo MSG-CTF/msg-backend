@@ -446,6 +446,7 @@ class AdminInstanceTests(TestCase):
             cpu_millicores=500,
             memory_mib=512,
             ephemeral_storage_mib=1024,
+            isolation_profile="WEB",
             source_ref="refs/heads/main",
         )
         ReleaseContainer.objects.create(
