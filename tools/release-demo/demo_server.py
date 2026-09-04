@@ -25,8 +25,10 @@ def load_catalog():
 
 
 def make_bundle(challenge, revision):
+    source_sha = secrets.token_hex(20)
     return {
         "schema_version": "2.0",
+        "challenge_id": challenge["challenge_id"],
         "challenge_slug": challenge["slug"],
         "revision": revision,
         "name": challenge["title"],
@@ -50,6 +52,7 @@ def make_bundle(challenge, revision):
         },
         "resource_profile": challenge["resource_profile"],
         "source_ref": "refs/heads/main",
+        "source_sha": source_sha,
         "scan_result": "PASS",
     }
 
@@ -101,11 +104,39 @@ class Handler(BaseHTTPRequestHandler):
     def _fake_artifact_list(self):
         with BUNDLE_LOCK:
             artifacts = [
-                {"id": index, "name": entry["name"], "expired": False}
+                {
+                    "id": index,
+                    "name": entry["name"],
+                    "expired": False,
+                    "workflow_run": {
+                        "id": entry["workflow_run_id"],
+                        "head_branch": "main",
+                        "head_sha": entry["artifact"]["source_sha"],
+                    },
+                }
                 for index, entry in enumerate(BUNDLES)
             ]
         artifacts.reverse()
         self._send(200, json.dumps({"artifacts": artifacts}).encode("utf-8"))
+
+    def _fake_workflow_run(self, run_id):
+        with BUNDLE_LOCK:
+            for entry in BUNDLES:
+                if entry["workflow_run_id"] == run_id:
+                    self._send(
+                        200,
+                        json.dumps(
+                            {
+                                "id": run_id,
+                                "status": "completed",
+                                "conclusion": "success",
+                                "head_branch": "main",
+                                "head_sha": entry["artifact"]["source_sha"],
+                            }
+                        ).encode("utf-8"),
+                    )
+                    return
+        self._send(404, b"{}")
 
     def _fake_artifact_zip(self, artifact_id):
         with BUNDLE_LOCK:
@@ -131,11 +162,13 @@ class Handler(BaseHTTPRequestHandler):
         revision = int(body.get("revision", 1))
         artifact_data = make_bundle(challenge, revision)
         with BUNDLE_LOCK:
+            workflow_run_id = len(BUNDLES) + 1000
             BUNDLES.append(
                 {
                     "name": challenge["slug"] + "-" + str(len(BUNDLES) + 100)
                     + "-1-demo-publish-bundle",
                     "artifact": artifact_data,
+                    "workflow_run_id": workflow_run_id,
                 }
             )
         self._send(200, json.dumps({"revision": revision}).encode("utf-8"))
@@ -148,6 +181,8 @@ class Handler(BaseHTTPRequestHandler):
             self._demo_info()
         elif self.path == "/scheduler-log":
             self._scheduler_log()
+        elif self.path.startswith("/repos/") and "/actions/runs/" in self.path:
+            self._fake_workflow_run(int(self.path.rstrip("/").split("/")[-1]))
         elif self.path.startswith("/repos/") and self.path.endswith("/zip"):
             self._fake_artifact_zip(int(self.path.rstrip("/zip").split("/")[-1].rstrip("/")))
         elif self.path.startswith("/repos/") and "/actions/artifacts" in self.path:
