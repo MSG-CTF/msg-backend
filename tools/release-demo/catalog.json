@@ -8,6 +8,7 @@
     "has_deployment": true,
     "runtime_type": "KUBERNETES",
     "architecture": "AMD64",
+    "isolation_profile": "WEB",
     "containers": [
       {
         "name": "web",
@@ -39,6 +40,7 @@
     "has_deployment": true,
     "runtime_type": "KUBERNETES",
     "architecture": "AMD64",
+    "isolation_profile": "WEB",
     "containers": [
       {
         "name": "chall",
@@ -63,6 +65,7 @@
     "has_deployment": true,
     "runtime_type": "DOCKER",
     "architecture": "AMD64",
+    "isolation_profile": "PWN",
     "containers": [
       {
         "name": "random6",
@@ -87,6 +90,7 @@
     "has_deployment": true,
     "runtime_type": "KUBERNETES",
     "architecture": "AMD64",
+    "isolation_profile": "WEB",
     "containers": [
       {
         "name": "service",
@@ -133,6 +137,7 @@
     "has_deployment": false,
     "runtime_type": null,
     "architecture": null,
+    "isolation_profile": "WEB",
     "containers": [],
     "resource_profile": {
       "cpu_millicores": 500,

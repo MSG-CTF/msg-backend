@@ -6,9 +6,16 @@ from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
 from apps.accounts.models import Role, Team, User
+from apps.board.models import Cell, TeamChallengeAccess
 from apps.challenge.models import Challenge
 from apps.challenge.services import hash_flag
-from apps.instances.models import ChallengeRelease, ChallengeRuntimeConfig
+from apps.instances.models import (
+    ChallengeRelease,
+    ChallengeRuntimeConfig,
+    Instance,
+    InstanceStatus,
+    ReleaseContainer,
+)
 
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 
@@ -35,6 +42,7 @@ def artifact_payload(revision=1, slug="web-basic", containers=None, note=None, *
         "category": "web",
         "runtime_type": "KUBERNETES",
         "architecture": "AMD64",
+        "isolation_profile": "WEB",
         "workload": {"containers": containers},
         "resource_profile": {
             "cpu_millicores": 500,
@@ -73,6 +81,17 @@ class ReleaseTestBase(TestCase):
             flag_hash=hash_flag("MSG{flag}"),
             is_published=True,
         )
+        self.cell = Cell.objects.create(
+            cell_index=2,
+            type=Cell.CellType.CHALLENGE,
+            difficulty=Cell.Difficulty.EASY,
+            name="Web Basic",
+        )
+        TeamChallengeAccess.objects.create(
+            team=self.team,
+            challenge=self.challenge,
+            source_cell=self.cell,
+        )
         self.base_url = f"/api/v1/admin/challenges/{self.challenge.challenge_id}/releases"
 
     def auth(self, login_id):
@@ -90,6 +109,26 @@ class ReleaseTestBase(TestCase):
 
     def activate(self, release_id):
         return self.client.post(f"{self.base_url}/{release_id}/activate")
+
+    def create_legacy_release(self):
+        release = ChallengeRelease.objects.create(
+            challenge=self.challenge,
+            version=1,
+            registry_revision=0,
+            challenge_slug="",
+            cpu_millicores=500,
+            memory_mib=512,
+            ephemeral_storage_mib=1024,
+            isolation_profile="WEB",
+            source_ref="backfill",
+        )
+        ReleaseContainer.objects.create(
+            release=release,
+            name="app",
+            image_ref=f"ghcr.io/msg-ctf/challenges/web-basic/app@sha256:{DIGEST_A}",
+            ports=[{"port": 8080, "public": True}],
+        )
+        return release
 
 
 class ReleaseRegisterTests(ReleaseTestBase):
@@ -124,8 +163,35 @@ class ReleaseRegisterTests(ReleaseTestBase):
         )
         self.assertEqual(res.data["data"]["version"], 2)
 
-    def test_register_multi_container_is_not_deployable(self):
-        # 멀티 컨테이너 릴리스는 등록되지만 현 Scheduler 계약으로는 배포 불가로 표시된다
+    def test_register_uses_artifact_isolation_profile(self):
+        self.auth("root")
+        res = self.register(category="pwn", isolation_profile="PWN")
+
+        self.assertEqual(res.status_code, 200)
+        release = ChallengeRelease.objects.get(
+            release_id=res.data["data"]["release_id"]
+        )
+        self.assertEqual(release.isolation_profile, "PWN")
+
+    def test_register_rejects_missing_isolation_profile(self):
+        self.auth("root")
+        body = artifact_payload()
+        del body["artifact"]["isolation_profile"]
+
+        res = self.client.post(self.base_url, body, format="json")
+
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data["code"], "RELEASE_INVALID")
+
+    def test_register_rejects_invalid_isolation_profile(self):
+        self.auth("root")
+        res = self.register(isolation_profile="LINUX")
+
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data["code"], "RELEASE_INVALID")
+
+    def test_register_multi_container_is_deployable(self):
+        # 공개 포트가 하나인 멀티 컨테이너 릴리스는 Scheduler 계약으로 배포할 수 있다
         self.auth("root")
         res = self.register(
             containers=[
@@ -142,7 +208,7 @@ class ReleaseRegisterTests(ReleaseTestBase):
             ]
         )
         self.assertEqual(res.status_code, 200)
-        self.assertFalse(res.data["data"]["is_deployable"])
+        self.assertTrue(res.data["data"]["is_deployable"])
 
     def test_register_rejects_tag_reference(self):
         # digest가 아닌 태그 참조는 거절한다
@@ -288,8 +354,8 @@ class ReleaseActivateTests(ReleaseTestBase):
         self.assertEqual(res.status_code, 200)
         self.assertIsNone(res.data["data"]["previous_release_id"])
 
-    def test_activate_rejects_multi_container_release(self):
-        # 현 Scheduler 계약으로 배포할 수 없는 릴리스는 전환을 거절한다
+    def test_activate_accepts_multi_container_release(self):
+        # 공개 포트가 하나인 멀티 컨테이너 릴리스도 현재 릴리스로 전환할 수 있다
         self.auth("root")
         release_id = self.register(
             containers=[
@@ -307,14 +373,23 @@ class ReleaseActivateTests(ReleaseTestBase):
         ).data["data"]["release_id"]
 
         res = self.activate(release_id)
-        self.assertEqual(res.status_code, 400)
-        self.assertEqual(res.data["code"], "RELEASE_NOT_DEPLOYABLE")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data["data"]["release_id"], release_id)
 
     def test_activate_unknown_release(self):
         self.auth("root")
         res = self.activate(uuid.uuid4())
         self.assertEqual(res.status_code, 404)
         self.assertEqual(res.data["code"], "RELEASE_NOT_FOUND")
+
+    def test_activate_rejects_legacy_registry_revision(self):
+        release = self.create_legacy_release()
+
+        self.auth("root")
+        res = self.activate(release.release_id)
+
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data["code"], "RELEASE_NOT_DEPLOYABLE")
 
 
 class ReleaseListTests(ReleaseTestBase):
@@ -352,7 +427,7 @@ class ReleaseListTests(ReleaseTestBase):
         self.assertEqual(res.data["data"]["total_count"], 0)
 
 
-@override_settings(CACHES=LOCMEM)
+@override_settings(CACHES=LOCMEM, SCHEDULER_API_TOKEN="test-scheduler-token")
 class ReleaseInstanceCreateTests(ReleaseTestBase):
     def setUp(self):
         super().setUp()
@@ -373,10 +448,112 @@ class ReleaseInstanceCreateTests(ReleaseTestBase):
         self.assertEqual(res.data["code"], "RUNTIME_CONFIG_NOT_FOUND")
 
     @patch("apps.instances.services.scheduler_request")
-    def test_create_uses_current_release_and_saves_snapshot(self, scheduler_request):
-        # 생성 요청은 현재 릴리스의 이미지로 나가고 인스턴스에 릴리스가 스냅샷된다
+    def test_create_rejects_legacy_current_release_before_scheduler(self, scheduler_request):
+        legacy_release = self.create_legacy_release()
+        ChallengeRuntimeConfig.objects.create(
+            challenge=self.challenge,
+            current_release=legacy_release,
+        )
+
+        self.auth("player")
+        res = self.client.post(
+            self.player_url,
+            {"challenge_id": str(self.challenge.challenge_id)},
+            format="json",
+        )
+
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data["code"], "RELEASE_NOT_DEPLOYABLE")
+        scheduler_request.assert_not_called()
+
+    @patch("apps.instances.services.scheduler_request")
+    def test_legacy_transition_requires_registration_and_activation(self, scheduler_request):
+        legacy = self.create_legacy_release()
+        config = ChallengeRuntimeConfig.objects.create(
+            challenge=self.challenge, current_release=legacy,
+            ttl_minutes=45, hard_timeout_minutes=90,
+        )
+        payload = {"challenge_id": str(self.challenge.pk)}
+        self.auth("player")
+        response = self.client.post(self.player_url, payload, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["code"], "RELEASE_NOT_DEPLOYABLE")
+        scheduler_request.assert_not_called()
+
         self.auth("root")
-        release_id = self.register(revision=1).data["data"]["release_id"]
+        image = f"ghcr.io/msg-ctf/challenges/web-basic/app@sha256:{DIGEST_B}"
+        response = self.register(
+            revision=7, isolation_profile="PWN", architecture="ARM64",
+            containers=[{"name": "app", "image": image,
+                         "ports": [{"port": 31337, "public": True}]}],
+        )
+        self.assertEqual(response.status_code, 200)
+        release_id = response.data["data"]["release_id"]
+        self.assertEqual(response.data["data"]["version"], 2)
+        config.refresh_from_db()
+        self.assertEqual(config.current_release_id, legacy.pk)
+
+        self.auth("player")
+        response = self.client.post(self.player_url, payload, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["code"], "RELEASE_NOT_DEPLOYABLE")
+        scheduler_request.assert_not_called()
+
+        self.auth("root")
+        response = self.activate(release_id)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["data"]["previous_release_id"], str(legacy.pk))
+        config.refresh_from_db()
+        self.assertEqual(str(config.current_release_id), release_id)
+        self.assertEqual((config.ttl_minutes, config.hard_timeout_minutes), (45, 90))
+
+        instance_id = uuid.uuid4()
+        scheduler_request.return_value = {
+            "instance_id": str(instance_id), "team_id": str(self.team.pk),
+            "user_id": str(self.player.pk), "challenge_id": str(self.challenge.pk),
+            "registry_revision": 7, "status": "REQUESTED",
+            "expires_at": "2026-11-08T10:00:00Z",
+            "hard_expires_at": "2026-11-08T11:00:00Z",
+        }
+        self.auth("player")
+        response = self.client.post(self.player_url, payload, format="json")
+        self.assertEqual(response.status_code, 202)
+        scheduler_request.assert_called_once()
+        body = scheduler_request.call_args.kwargs.get("body")
+        if body is None:
+            body = scheduler_request.call_args.args[2]
+        self.assertEqual(body["registry_revision"], 7)
+        self.assertEqual(body["isolation_profile"], "PWN")
+        self.assertEqual(body["architecture"], "ARM64")
+        self.assertEqual(body["containers"], [
+            {"name": "app", "image": image, "ports": [31337], "expose": True}
+        ])
+        self.assertEqual((body["ttl_minutes"], body["hard_timeout_minutes"]), (45, 90))
+        self.assertEqual(str(Instance.objects.get(pk=instance_id).release_id), release_id)
+        legacy.refresh_from_db()
+        self.assertEqual(legacy.registry_revision, 0)
+        self.assertEqual(legacy.containers.get().image_ref,
+                         f"ghcr.io/msg-ctf/challenges/web-basic/app@sha256:{DIGEST_A}")
+
+    @patch("apps.instances.services.scheduler_request")
+    def test_create_uses_current_release_and_saves_snapshot(self, scheduler_request):
+        # 생성 요청은 현재 릴리스의 멀티 컨테이너 값으로 나가고 인스턴스에 릴리스가 스냅샷된다
+        self.auth("root")
+        release_id = self.register(
+            revision=1,
+            containers=[
+                {
+                    "name": "web",
+                    "image": f"ghcr.io/msg-ctf/challenges/web-basic/web@sha256:{DIGEST_A}",
+                    "ports": [{"port": 8080, "public": True}],
+                },
+                {
+                    "name": "db",
+                    "image": f"ghcr.io/msg-ctf/challenges/web-basic/db@sha256:{DIGEST_B}",
+                    "ports": [{"port": 5432, "public": False}],
+                },
+            ],
+        ).data["data"]["release_id"]
         self.activate(release_id)
 
         instance_id = uuid.uuid4()
@@ -401,13 +578,208 @@ class ReleaseInstanceCreateTests(ReleaseTestBase):
         body = scheduler_request.call_args.kwargs.get("body")
         if body is None:
             body = scheduler_request.call_args.args[2]
+        self.assertEqual(
+            scheduler_request.call_args.kwargs["auth_header"],
+            "Bearer test-scheduler-token",
+        )
         release = ChallengeRelease.objects.get(release_id=release_id)
-        container = release.containers.first()
-        self.assertEqual(body["container_image"], container.image_ref)
-        self.assertEqual(body["container_port"], 8080)
+        self.assertEqual(body["registry_revision"], release.registry_revision)
+        self.assertEqual(body["isolation_profile"], "WEB")
         self.assertEqual(body["architecture"], "AMD64")
+        self.assertEqual(
+            body["containers"],
+            [
+                {
+                    "name": "db",
+                    "image": f"ghcr.io/msg-ctf/challenges/web-basic/db@sha256:{DIGEST_B}",
+                    "ports": [5432],
+                    "expose": False,
+                },
+                {
+                    "name": "web",
+                    "image": f"ghcr.io/msg-ctf/challenges/web-basic/web@sha256:{DIGEST_A}",
+                    "ports": [8080],
+                    "expose": True,
+                },
+            ],
+        )
 
         from apps.instances.models import Instance
 
         instance = Instance.objects.get(instance_id=instance_id)
         self.assertEqual(instance.release_id, release.release_id)
+
+    def test_create_from_scheduler_restores_release_by_registry_revision(self):
+        self.auth("root")
+        release_id = self.register(revision=1).data["data"]["release_id"]
+        self.register(
+            revision=2,
+            containers=[
+                {
+                    "name": "app",
+                    "image": f"ghcr.io/msg-ctf/challenges/web-basic/app@sha256:{DIGEST_B}",
+                    "ports": [{"port": 8080, "public": True}],
+                }
+            ],
+        )
+
+        from apps.instances.services import create_instance_from_scheduler
+
+        instance_id = uuid.uuid4()
+        instance = create_instance_from_scheduler(
+            {
+                "instance_id": str(instance_id),
+                "challenge_id": str(self.challenge.challenge_id),
+                "registry_revision": 1,
+                "status": "RUNNING",
+                "service_url": "https://instance.example",
+                "expires_at": "2026-11-08T10:00:00Z",
+                "hard_expires_at": "2026-11-08T11:00:00Z",
+            },
+            user=self.player,
+            team=self.team,
+            challenge=self.challenge,
+        )
+
+        self.assertEqual(str(instance.release_id), release_id)
+
+    def test_create_from_scheduler_rejects_missing_registry_revision(self):
+        self.auth("root")
+        release_id = self.register(revision=1).data["data"]["release_id"]
+        self.activate(release_id)
+
+        from apps.instances.services import SchedulerError, create_instance_from_scheduler
+
+        with self.assertRaises(SchedulerError) as caught:
+            create_instance_from_scheduler(
+                {
+                    "instance_id": str(uuid.uuid4()),
+                    "challenge_id": str(self.challenge.challenge_id),
+                    "status": "RUNNING",
+                    "service_url": "https://instance.example",
+                    "expires_at": "2026-11-08T10:00:00Z",
+                    "hard_expires_at": "2026-11-08T11:00:00Z",
+                },
+                user=self.player,
+                team=self.team,
+                challenge=self.challenge,
+            )
+
+        self.assertEqual(caught.exception.code, "SCHEDULER_UNAVAILABLE")
+
+    def test_create_from_scheduler_rejects_unknown_registry_revision(self):
+        self.auth("root")
+        self.register(revision=1)
+
+        from apps.instances.services import SchedulerError, create_instance_from_scheduler
+
+        with self.assertRaises(SchedulerError) as caught:
+            create_instance_from_scheduler(
+                {
+                    "instance_id": str(uuid.uuid4()),
+                    "challenge_id": str(self.challenge.challenge_id),
+                    "registry_revision": 9,
+                    "status": "RUNNING",
+                    "service_url": "https://instance.example",
+                    "expires_at": "2026-11-08T10:00:00Z",
+                    "hard_expires_at": "2026-11-08T11:00:00Z",
+                },
+                user=self.player,
+                team=self.team,
+                challenge=self.challenge,
+            )
+
+        self.assertEqual(caught.exception.code, "SCHEDULER_UNAVAILABLE")
+
+    def test_create_from_scheduler_rejects_existing_instance_scope_mismatch(self):
+        self.auth("root")
+        release_id = self.register(revision=1).data["data"]["release_id"]
+        release = ChallengeRelease.objects.get(release_id=release_id)
+        other_user = User.objects.create_user(
+            login_id="other-player",
+            password="pw1234",
+            nickname="다른 참가자",
+            team=self.team,
+        )
+        other_team = Team.objects.create(team_name="다른 팀")
+        other_challenge = Challenge.objects.create(
+            title="Other Basic",
+            category=Challenge.CategoryType.WEB,
+            difficulty=Challenge.DifficultyType.EASY,
+            score=500,
+            description="다른 문제",
+            flag_hash=hash_flag("MSG{other}"),
+            is_published=True,
+        )
+        ChallengeRelease.objects.create(
+            challenge=other_challenge,
+            version=1,
+            registry_revision=1,
+            challenge_slug="other-basic",
+            cpu_millicores=500,
+            memory_mib=512,
+            ephemeral_storage_mib=1024,
+            isolation_profile="WEB",
+            source_ref="refs/heads/main",
+        )
+
+        from apps.instances.services import SchedulerError, create_instance_from_scheduler
+
+        cases = [
+            ("user", other_user, self.team, self.challenge),
+            ("team", self.player, other_team, self.challenge),
+            ("challenge", self.player, self.team, other_challenge),
+        ]
+        for field_name, user, team, challenge in cases:
+            with self.subTest(field_name=field_name):
+                instance_id = uuid.uuid4()
+                existing = Instance.objects.create(
+                    instance_id=instance_id,
+                    user=self.player,
+                    team=self.team,
+                    challenge=self.challenge,
+                    status=InstanceStatus.RUNNING,
+                    release=release,
+                )
+
+                with self.assertRaises(SchedulerError) as caught:
+                    create_instance_from_scheduler(
+                        {
+                            "instance_id": str(instance_id),
+                            "challenge_id": str(challenge.challenge_id),
+                            "registry_revision": 1,
+                            "status": "RUNNING",
+                            "service_url": "https://instance.example",
+                            "expires_at": "2026-11-08T10:00:00Z",
+                            "hard_expires_at": "2026-11-08T11:00:00Z",
+                        },
+                        user=user,
+                        team=team,
+                        challenge=challenge,
+                    )
+
+                self.assertEqual(caught.exception.code, "SCHEDULER_UNAVAILABLE")
+                existing.refresh_from_db()
+                self.assertEqual(existing.user_id, self.player.user_id)
+                self.assertEqual(existing.team_id, self.team.team_id)
+                self.assertEqual(existing.challenge_id, self.challenge.challenge_id)
+
+    @patch("apps.instances.views.call_scheduler_active")
+    def test_my_instance_recovery_rejects_missing_registry_revision(self, scheduler_active):
+        self.auth("root")
+        release_id = self.register(revision=1).data["data"]["release_id"]
+        self.activate(release_id)
+        scheduler_active.return_value = {
+            "instance_id": str(uuid.uuid4()),
+            "challenge_id": str(self.challenge.challenge_id),
+            "status": "RUNNING",
+            "service_url": "https://instance.example",
+            "expires_at": "2026-11-08T10:00:00Z",
+            "hard_expires_at": "2026-11-08T11:00:00Z",
+        }
+
+        self.auth("player")
+        res = self.client.get("/api/v1/teams/me/instance")
+
+        self.assertEqual(res.status_code, 503)
+        self.assertEqual(res.data["code"], "SCHEDULER_UNAVAILABLE")
