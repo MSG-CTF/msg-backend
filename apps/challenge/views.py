@@ -29,8 +29,8 @@ from apps.instances.services import (
 )
 from apps.common.permissions import IsAuthenticated
 from apps.accounts.models import Team
-from apps.board.models import TeamChallengeAccess
-from apps.board.services import challenge_solve_deadline, complete_challenge_from_submission
+from apps.board.models import TeamBoardState, TeamChallengeAccess
+from apps.board.services import complete_challenge_from_submission
 from apps.teams.models import MileageHistory, MileageType
 
 
@@ -124,7 +124,20 @@ class ChallengeSubmitView(APIView):
         submitted_flag_hash = hash_flag(flag)
 
         with transaction.atomic():
+            # Match board mutations: state precedes access and team locks.
+            TeamBoardState.objects.select_for_update().filter(team=team).first()
             challenge = Challenge.objects.select_for_update().get(pk=challenge.pk)
+            # Lock all affected teams in UUID order before any mileage/score writes
+            # or FK inserts. NO KEY UPDATE allows unrelated FK references on PG.
+            affected_team_ids = set(
+                Solve.objects.filter(challenge=challenge).values_list("team_id", flat=True)
+            )
+            affected_team_ids.add(team.pk)
+            list(
+                Team.objects.select_for_update(no_key=True)
+                .filter(pk__in=affected_team_ids)
+                .order_by("pk")
+            )
             flag_lock, _ = FlagSubmissionLock.objects.select_for_update().get_or_create(
                 team=team,
                 challenge=challenge,
@@ -181,7 +194,9 @@ class ChallengeSubmitView(APIView):
                 )
                 return fail(code, message, status_code, data)
 
-            is_extra_dice_granted = challenge_solve_deadline(challenge_access) >= now
+            is_extra_dice_granted = complete_challenge_from_submission(
+                team, challenge, now
+            )
             earned_score = challenge.current_score
             earned_mileage = CHALLENGE_MILEAGE_REWARDS[challenge.difficulty]
 
@@ -218,7 +233,6 @@ class ChallengeSubmitView(APIView):
                 result=FlagSubmission.SubmissionResult.CORRECT,
             )
 
-            complete_challenge_from_submission(team, challenge, is_extra_dice_granted)
             update_dynamic_score_and_team_scores(challenge)
             team_score = get_team_total_score(team.pk)
             team.refresh_from_db(fields=["mileage"])

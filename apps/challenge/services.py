@@ -40,7 +40,7 @@ def update_dynamic_score_and_team_scores(challenge):
     challenge.current_score = current_score
     challenge.save(update_fields=["current_score"])
 
-    affected_team_ids = Solve.objects.filter(challenge=challenge).values_list(
+    affected_team_ids = Solve.objects.filter(challenge=challenge).order_by("team_id").values_list(
         "team_id", flat=True
     )
     for team_id in affected_team_ids:

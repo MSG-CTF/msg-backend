@@ -1,14 +1,18 @@
 import datetime
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+from unittest import skipUnless
 from decimal import Decimal
 from unittest.mock import patch
 
 from django.core.cache import cache
-from django.test import TestCase, override_settings
+from django.db import connection, connections, close_old_connections
+from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.accounts.models import Team, User
-from apps.board.models import Cell, TeamChallengeAccess
+from apps.board.models import Cell, TeamBoardState, TeamChallengeAccess
 from apps.challenge.models import Challenge, FlagSubmissionLock, Solve
 from apps.challenge.services import hash_flag
 from apps.teams.models import MileageHistory, MileageType
@@ -96,6 +100,48 @@ class ChallengeSubmitTests(TestCase):
         self.assertEqual(response.data["data"]["earned_mileage"], 30)
         self.team.refresh_from_db()
         self.assertEqual(self.team.mileage, 30)
+
+    def test_extra_dice_requires_current_cell_and_active_access(self):
+        access = TeamChallengeAccess.objects.get(team=self.team, challenge=self.challenge)
+        other_cell = Cell.objects.create(cell_index=2, type=Cell.CellType.START, name="other")
+        for case in ("current", "moved", "inactive", "cleared", "expired", "missing"):
+            with self.subTest(case=case):
+                Solve.objects.filter(team=self.team).delete()
+                TeamBoardState.objects.filter(team=self.team).delete()
+                access.status = (
+                    TeamChallengeAccess.Status.CLEARED if case == "cleared"
+                    else TeamChallengeAccess.Status.OPENED
+                )
+                access.opened_at = timezone.now() - datetime.timedelta(
+                    minutes=16 if case == "expired" else 1
+                )
+                access.save(update_fields=["status", "opened_at"])
+                state = None
+                if case != "missing":
+                    state = TeamBoardState.objects.create(
+                        team=self.team,
+                        position=other_cell if case == "moved" else self.cell,
+                        active_challenge_access=None if case == "inactive" else access,
+                        dice_rolls_left=0,
+                        next_dice_reset_at=timezone.now() + datetime.timedelta(minutes=10),
+                    )
+                response = self.submit("MSG{correct_flag}")
+                self.assertEqual(response.status_code, 200)
+                granted = case == "current"
+                self.assertEqual(response.data["data"]["is_extra_dice_granted"], granted)
+                solve = Solve.objects.get(team=self.team, challenge=self.challenge)
+                self.assertEqual(solve.is_extra_dice_granted, granted)
+                access.refresh_from_db()
+                self.assertEqual(access.status, TeamChallengeAccess.Status.CLEARED)
+                if state:
+                    state.refresh_from_db()
+                    self.assertEqual(state.dice_rolls_left, int(granted))
+                    self.assertEqual(state.next_dice_reset_at is None, granted)
+                if granted:
+                    duplicate = self.submit("MSG{correct_flag}")
+                    self.assertEqual(duplicate.status_code, 409)
+                    state.refresh_from_db()
+                    self.assertEqual(state.dice_rolls_left, 1)
 
     def test_three_wrong_flags_lock_submission(self):
         # 같은 팀이 같은 문제에 3회 연속 오답을 내면 제출 제한이 걸린다
@@ -325,3 +371,75 @@ class ChallengeSubmitTests(TestCase):
             ),
             [30, 60, 120],
         )
+
+
+@skipUnless(connection.vendor == "postgresql", "Requires PostgreSQL row locking")
+@override_settings(CACHES=LOCMEM, SECURE_SSL_REDIRECT=False)
+class ConcurrentChallengeSubmitTests(TransactionTestCase):
+    def test_cross_team_solves_on_different_challenges_finish_with_consistent_scores(self):
+        teams = [Team.objects.create(team_name=f"concurrent-{i}") for i in range(3)]
+        users = [
+            User.objects.create_user(login_id=f"concurrent-{i}", nickname=f"user-{i}", team=team)
+            for i, team in enumerate(teams)
+        ]
+        challenges = [
+            Challenge.objects.create(
+                title=f"concurrent-{i}", category=Challenge.CategoryType.WEB,
+                difficulty=Challenge.DifficultyType.EASY, score=1000,
+                initial_score=1000, minimum_score=100, decay=20, current_score=991,
+                flag_hash=hash_flag("MSG{concurrent}"), is_published=True,
+            ) for i in range(3)
+        ]
+        # Every new solve affects all teams, with a different submitting team.
+        for i, challenge in enumerate(challenges):
+            cell = Cell.objects.create(cell_index=i + 1, type=Cell.CellType.CHALLENGE, name=str(i))
+            access = TeamChallengeAccess.objects.create(team=teams[i], challenge=challenge, source_cell=cell)
+            TeamBoardState.objects.create(
+                team=teams[i], position=cell, active_challenge_access=access, dice_rolls_left=0,
+            )
+            for j, team in enumerate(teams):
+                if i != j:
+                    Solve.objects.create(team=team, challenge=challenge, solved_by_user=users[j],
+                                         earned_score=1000, earned_mileage=30)
+        barrier = Barrier(3)
+
+        def submit(i):
+            close_old_connections()
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute("SET lock_timeout = '5s'")
+                    cursor.execute("SET statement_timeout = '10s'")
+                client = APIClient()
+                client.force_authenticate(user=User.objects.get(pk=users[i].pk))
+                # Rendezvous after each distinct challenge lock is acquired, before
+                # any team lock: all three scoring transactions truly overlap.
+                def synchronize(execute, sql, params, many, context):
+                    result = execute(sql, params, many, context)
+                    if 'FROM "challenges"' in sql and 'FOR UPDATE' in sql:
+                        barrier.wait(timeout=10)
+                    return result
+                with connection.execute_wrapper(synchronize):
+                    response = client.post(
+                        f"/api/v1/challenges/{challenges[i].pk}/submit",
+                        {"flag": "MSG{concurrent}"}, format="json",
+                    )
+                return response.status_code, response.data
+            finally:
+                connections.close_all()
+
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            results = list(pool.map(submit, range(3)))
+        for status, body in results:
+            self.assertEqual(status, 200, body)
+            self.assertEqual(body["data"]["mileage"], 30)
+            self.assertTrue(body["data"]["is_extra_dice_granted"])
+        self.assertEqual(Solve.objects.count(), 9)
+        self.assertEqual(MileageHistory.objects.count(), 3)
+        for challenge in challenges:
+            challenge.refresh_from_db()
+            self.assertEqual(challenge.current_score, Decimal("980"))
+        for team in teams:
+            team.refresh_from_db()
+            self.assertEqual(team.team_score, Decimal("2940"))
+            self.assertEqual(team.mileage, 30)
+            self.assertEqual(team.board_state.dice_rolls_left, 1)

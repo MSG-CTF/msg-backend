@@ -642,26 +642,34 @@ def open_current_cell_challenge(team, challenge_id):
     return access, challenge_solve_deadline(access)
 
 
-def complete_challenge_from_submission(team, challenge, is_extra_dice_granted):
+def complete_challenge_from_submission(team, challenge, submitted_at):
     """Challenge API 정답 제출을 보드의 활성 문제 완료 상태와 동기화한다."""
     with transaction.atomic():
+        # Board operations also lock state before access.
+        state = TeamBoardState.objects.select_for_update().filter(team=team).first()
         access = (
             TeamChallengeAccess.objects.select_for_update()
             .filter(team=team, challenge=challenge)
             .first()
         )
         if access is None:
-            return
+            return False
 
-        state = TeamBoardState.objects.select_for_update().filter(team=team).first()
         was_cleared = access.status == TeamChallengeAccess.Status.CLEARED
+        is_extra_dice_granted = bool(
+            state is not None
+            and not was_cleared
+            and state.position_id == access.source_cell_id
+            and state.active_challenge_access_id == access.pk
+            and submitted_at <= challenge_solve_deadline(access)
+        )
         if not was_cleared:
             access.status = TeamChallengeAccess.Status.CLEARED
             access.cleared_at = timezone.now()
             access.save(update_fields=["status", "cleared_at"])
 
         if state is None:
-            return
+            return False
 
         update_fields = ["updated_at"]
         if state.active_challenge_access_id == access.id:
@@ -671,6 +679,7 @@ def complete_challenge_from_submission(team, challenge, is_extra_dice_granted):
             grant_dice_roll(state, 1)
             update_fields.extend(["dice_rolls_left", "next_dice_reset_at"])
         state.save(update_fields=update_fields)
+        return is_extra_dice_granted
 
 
 def solve_active_challenge(team):
