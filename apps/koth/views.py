@@ -93,7 +93,7 @@ def me(request):
         solve = solves.get(challenge.koth_challenge_id)
         score = solve.earned_score if solve else Decimal("0")
         rank = None
-        if score > 0:
+        if score > 0 and not team.is_banned:
             rank = 1 + KothSolve.objects.filter(
                 challenge=challenge,
                 earned_score__gt=score,

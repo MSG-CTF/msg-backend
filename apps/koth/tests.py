@@ -31,6 +31,12 @@ class KothApiTests(TestCase):
         self.banned = Team.objects.create(team_name="차단팀", is_banned=True)
         self.user = User.objects.create_user(login_id="me", password="pw1234", nickname="나", team=self.team)
         self.other_user = User.objects.create_user(login_id="other", password="pw1234", nickname="상대", team=self.other)
+        self.banned_user = User.objects.create_user(
+            login_id="banned",
+            password="pw1234",
+            nickname="차단",
+            team=self.banned,
+        )
         self.no_team_user = User.objects.create_user(login_id="none", password="pw1234", nickname="무소속")
         self.clubs = [
             KothClub.objects.create(name=name)
@@ -124,6 +130,21 @@ class KothApiTests(TestCase):
         self.assertEqual(first, second)
         self.assertEqual(KothTeamToken.objects.count(), 1)
         self.assertEqual(KothTeamToken.objects.get().token_hash, hash_token(first))
+
+    def test_me_does_not_assign_rank_to_banned_team(self):
+        KothSolve.objects.create(
+            team=self.banned,
+            challenge=self.challenge,
+            earned_score=Decimal("60"),
+            solved_at=timezone.now(),
+        )
+        self.auth("banned")
+
+        response = self.client.get("/api/v1/koth/me")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["data"]["challenges"][0]["earned_score"], 60)
+        self.assertIsNone(response.data["data"]["challenges"][0]["rank"])
 
     def test_leaderboard_requires_auth_and_valid_challenge_id(self):
         url = "/api/v1/koth/leaderboard"
