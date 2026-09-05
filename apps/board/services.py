@@ -639,7 +639,47 @@ def open_current_cell_challenge(team, challenge_id):
         state.active_challenge_access = access
         state.save(update_fields=["active_challenge_access", "updated_at"])
 
-    return access, now + timedelta(seconds=SOLVE_LIMIT_SECONDS)
+    return access, challenge_solve_deadline(access)
+
+
+def complete_challenge_from_submission(team, challenge, submitted_at):
+    """Challenge API 정답 제출을 보드의 활성 문제 완료 상태와 동기화한다."""
+    with transaction.atomic():
+        # Board operations also lock state before access.
+        state = TeamBoardState.objects.select_for_update().filter(team=team).first()
+        access = (
+            TeamChallengeAccess.objects.select_for_update()
+            .filter(team=team, challenge=challenge)
+            .first()
+        )
+        if access is None:
+            return False
+
+        was_cleared = access.status == TeamChallengeAccess.Status.CLEARED
+        is_extra_dice_granted = bool(
+            state is not None
+            and not was_cleared
+            and state.position_id == access.source_cell_id
+            and state.active_challenge_access_id == access.pk
+            and submitted_at <= challenge_solve_deadline(access)
+        )
+        if not was_cleared:
+            access.status = TeamChallengeAccess.Status.CLEARED
+            access.cleared_at = timezone.now()
+            access.save(update_fields=["status", "cleared_at"])
+
+        if state is None:
+            return False
+
+        update_fields = ["updated_at"]
+        if state.active_challenge_access_id == access.id:
+            state.active_challenge_access = None
+            update_fields.append("active_challenge_access")
+        if not was_cleared and is_extra_dice_granted:
+            grant_dice_roll(state, 1)
+            update_fields.extend(["dice_rolls_left", "next_dice_reset_at"])
+        state.save(update_fields=update_fields)
+        return is_extra_dice_granted
 
 
 def solve_active_challenge(team):
@@ -681,7 +721,7 @@ def get_opened_challenges_summary(team):
                 "title": access.challenge.title,
                 "category": access.challenge.category,
                 "club_name": access.challenge.board_meta.club_name,
-                "score": access.challenge.score,
+                "score": access.challenge.current_score,
                 "is_solved": access.status == TeamChallengeAccess.Status.CLEARED,
                 "solved_at": access.cleared_at,
                 "opened_at": access.opened_at,
@@ -690,7 +730,7 @@ def get_opened_challenges_summary(team):
         ],
         "total_count": len(accesses),
         "solved_count": len(solved_accesses),
-        "total_score": sum(access.challenge.score for access in solved_accesses),
+        "total_score": sum(access.challenge.current_score for access in solved_accesses),
     }
 
 
@@ -725,7 +765,7 @@ def get_challenges_progress_summary(team):
                 "title": challenge.title,
                 "category": challenge.category,
                 "difficulty": challenge.difficulty,
-                "score": challenge.score,
+                "score": challenge.current_score,
                 "is_opened": is_opened,
                 "is_solved": is_solved,
                 "cell_index": access.source_cell_id if access is not None else None,
@@ -1127,7 +1167,9 @@ def use_chance_card(team, card_id, payload):
     if not card_id:
         raise CardIdRequired()
 
-    existing_draw = TeamChanceCard.objects.filter(team=team, card_id=card_id).first()
+    existing_draw = _held_cards_queryset(team).filter(card_id=card_id).first()
+    if existing_draw is None:
+        existing_draw = TeamChanceCard.objects.filter(team=team, card_id=card_id).first()
     if existing_draw is None:
         raise ChanceCardNotFound()
     if existing_draw.used_at is not None:
@@ -1139,10 +1181,19 @@ def use_chance_card(team, card_id, payload):
     with transaction.atomic():
         state = TeamBoardState.objects.select_for_update().get(team=team)
         draw = (
-            TeamChanceCard.objects.select_related("card")
-            .filter(team=team, card_id=card_id)
+            _held_cards_queryset(team)
+            .select_for_update()
+            .select_related("card")
+            .filter(card_id=card_id)
             .first()
         )
+        if draw is None:
+            draw = (
+                TeamChanceCard.objects.select_for_update()
+                .select_related("card")
+                .filter(team=team, card_id=card_id)
+                .first()
+            )
         if draw is None:
             raise ChanceCardNotFound()
         if draw.used_at is not None:

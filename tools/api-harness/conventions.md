@@ -49,6 +49,16 @@
 `challenge_id`는 2026-08-08 규약 개정으로 이미 UUID 문자열이었으나 이 표에는 반영되지 않고 있었다. `/api/v1/board/opened_challenges` 명세가 근거다.
 `user_id`, `history_id`도 UUID 문자열이다 (강지원 확인, 2026-08-16).
 
+## Idempotency-Key
+
+- 보드 쓰기 API는 `Idempotency-Key` 헤더가 필수다.
+- 멱등 범위는 `(user_id, HTTP method, path, Idempotency-Key)` 조합이다.
+- 서버는 요청 본문 해시, 처리 상태, 최초 HTTP 상태와 응답 본문을 DB에 영속 저장한다.
+- 같은 키와 같은 본문의 재요청은 Redis 초기화나 서버 재시작 이후에도 최초 응답을 반환한다.
+- 같은 키에 다른 본문을 보내면 `409 IDEMPOTENCY_KEY_CONFLICT`를 반환한다.
+- Redis의 5분 TTL 응답은 조회 가속용일 뿐이며 DB 기록이 원본이다.
+- DB 멱등 기록은 대회 데이터 보관 기간 동안 자동 만료하지 않는다.
+
 ## 시간 포맷
 
 전부 ISO-8601 UTC, 끝에 `Z` (`"2026-11-08T04:00:00Z"`). 표시용 KST 변환은 프론트 책임.
@@ -185,6 +195,27 @@ STOPPED / FAILED / EXPIRED → CLEANUP_PENDING → CLEANED
 | `REFUND` | 결제 환불 | + |
 | `PURCHASE` | QR 결제 (부스 구매) | − |
 | `ADMIN_DEDUCT` | 관리자 수동 차감 | − |
+
+문제 해결 마일리지는 PR #29의 `apps/challenge/views.py::CHALLENGE_MILEAGE_REWARDS`를 기준으로 확정한다.
+API 공통, 제출 명세, 마이페이지, 마일리지 내역은 아래 지급표를 함께 적용한다.
+
+| 난이도 | 문제 수 | 문제당 지급 | 전체 획득 가능 |
+| --- | ---: | ---: | ---: |
+| `HARD` | 6 | 120 | 720 |
+| `MEDIUM` | 12 | 60 | 720 |
+| `EASY` | 12 | 30 | 360 |
+| 합계 | 30 |  | 1,800 |
+
+- 정답을 맞힌 팀에 문제당 1회 지급한다. 오답·제출 제한·이미 푼 문제 재제출은 지급하지 않는다.
+- 15분 제한과 추가 주사위 지급 여부는 문제 풀이 마일리지 금액에 영향을 주지 않는다.
+- 추가 주사위는 개방 후 15분 이내 제출이며 현재 보드 위치가 해당 문제의 개방 칸이고 활성 문제도 일치할 때만 1회 지급한다. 보드 상태가 없거나 이미 완료된 접근이면 지급하지 않는다.
+- 응답과 Solve의 `is_extra_dice_granted`는 보드 상태를 잠근 뒤 판단한 실제 지급 결과를 기록한다.
+- 제출 응답의 `earned_mileage`, 풀이 기록의 `earned_mileage`, `CHALLENGE_SOLVE` 내역의 `amount`는 동일한 지급액이다.
+- 제출 응답과 `GET /teams/me`, `GET /teams/me/mileage_history`의 `mileage`는 지급 후 잔액이다. 프론트는 이 값을 그대로 표시한다.
+- 예: 잔액 0에서 EASY → MEDIUM → HARD를 풀면 지급액은 30 → 60 → 120, 잔액은 30 → 90 → 210이다.
+- KOTH 풀이 기록의 `earned_mileage`는 0이다. START 보너스·룰렛·관리자 조정 금액은 별도 규칙을 따른다.
+- 회귀 검증: `apps.challenge.tests.ChallengeSubmitTests.test_successful_solve_awards_mileage_by_difficulty`에서 제출·풀이 저장·마이페이지·내역·잔액 합계를 함께 확인한다.
+- Notion 원문: [API공통/참고](https://www.notion.so/3aa0f19c72be80b4b5f0f32c4cae4581), [제출](https://www.notion.so/5200f19c72be83f6b897818e10554027), [풀이 기록](https://www.notion.so/1db0f19c72be8309824b01afed38cb21), [마일리지 내역](https://www.notion.so/cde0f19c72be8255a20901fe69473a2b).
 
 **규칙**
 - 부호는 `amount` 필드가 가진다. `type`은 그 이유를 나타낼 뿐이다.
