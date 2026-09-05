@@ -79,7 +79,19 @@ class KothSolve(models.Model):
 
     class Meta:
         db_table = "koth_solves"
-        constraints = [models.UniqueConstraint(fields=["team", "challenge"], name="uq_koth_solve_team_challenge")]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["team", "challenge"],
+                name="uq_koth_solve_team_challenge",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(earned_score__lte=0)
+                    | models.Q(solved_at__isnull=False)
+                ),
+                name="ck_koth_positive_score_has_solved_at",
+            ),
+        ]
         indexes = [models.Index(fields=["challenge", "-earned_score"])]
 
 
