@@ -467,6 +467,75 @@ class ReleaseInstanceCreateTests(ReleaseTestBase):
         scheduler_request.assert_not_called()
 
     @patch("apps.instances.services.scheduler_request")
+    def test_legacy_transition_requires_registration_and_activation(self, scheduler_request):
+        legacy = self.create_legacy_release()
+        config = ChallengeRuntimeConfig.objects.create(
+            challenge=self.challenge, current_release=legacy,
+            ttl_minutes=45, hard_timeout_minutes=90,
+        )
+        payload = {"challenge_id": str(self.challenge.pk)}
+        self.auth("player")
+        response = self.client.post(self.player_url, payload, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["code"], "RELEASE_NOT_DEPLOYABLE")
+        scheduler_request.assert_not_called()
+
+        self.auth("root")
+        image = f"ghcr.io/msg-ctf/challenges/web-basic/app@sha256:{DIGEST_B}"
+        response = self.register(
+            revision=7, isolation_profile="PWN", architecture="ARM64",
+            containers=[{"name": "app", "image": image,
+                         "ports": [{"port": 31337, "public": True}]}],
+        )
+        self.assertEqual(response.status_code, 200)
+        release_id = response.data["data"]["release_id"]
+        self.assertEqual(response.data["data"]["version"], 2)
+        config.refresh_from_db()
+        self.assertEqual(config.current_release_id, legacy.pk)
+
+        self.auth("player")
+        response = self.client.post(self.player_url, payload, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["code"], "RELEASE_NOT_DEPLOYABLE")
+        scheduler_request.assert_not_called()
+
+        self.auth("root")
+        response = self.activate(release_id)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["data"]["previous_release_id"], str(legacy.pk))
+        config.refresh_from_db()
+        self.assertEqual(str(config.current_release_id), release_id)
+        self.assertEqual((config.ttl_minutes, config.hard_timeout_minutes), (45, 90))
+
+        instance_id = uuid.uuid4()
+        scheduler_request.return_value = {
+            "instance_id": str(instance_id), "team_id": str(self.team.pk),
+            "user_id": str(self.player.pk), "challenge_id": str(self.challenge.pk),
+            "registry_revision": 7, "status": "REQUESTED",
+            "expires_at": "2026-11-08T10:00:00Z",
+            "hard_expires_at": "2026-11-08T11:00:00Z",
+        }
+        self.auth("player")
+        response = self.client.post(self.player_url, payload, format="json")
+        self.assertEqual(response.status_code, 202)
+        scheduler_request.assert_called_once()
+        body = scheduler_request.call_args.kwargs.get("body")
+        if body is None:
+            body = scheduler_request.call_args.args[2]
+        self.assertEqual(body["registry_revision"], 7)
+        self.assertEqual(body["isolation_profile"], "PWN")
+        self.assertEqual(body["architecture"], "ARM64")
+        self.assertEqual(body["containers"], [
+            {"name": "app", "image": image, "ports": [31337], "expose": True}
+        ])
+        self.assertEqual((body["ttl_minutes"], body["hard_timeout_minutes"]), (45, 90))
+        self.assertEqual(str(Instance.objects.get(pk=instance_id).release_id), release_id)
+        legacy.refresh_from_db()
+        self.assertEqual(legacy.registry_revision, 0)
+        self.assertEqual(legacy.containers.get().image_ref,
+                         f"ghcr.io/msg-ctf/challenges/web-basic/app@sha256:{DIGEST_A}")
+
+    @patch("apps.instances.services.scheduler_request")
     def test_create_uses_current_release_and_saves_snapshot(self, scheduler_request):
         # 생성 요청은 현재 릴리스의 멀티 컨테이너 값으로 나가고 인스턴스에 릴리스가 스냅샷된다
         self.auth("root")
