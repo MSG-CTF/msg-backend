@@ -1,9 +1,9 @@
 from django.test import TestCase
-from datetime import timedelta
 from django.utils import timezone
 from rest_framework.test import APITestCase
 from apps.timer.models import Contest
 from django.db import IntegrityError
+from datetime import datetime, timedelta, timezone as datetime_timezone
 
 
 class TimerAPITest(APITestCase):
@@ -76,6 +76,7 @@ class TimerAPITest(APITestCase):
                 "remaining_seconds",
                 "remaining_display",
                 "time_until_start",
+                "server_time",
             },
         )
 
@@ -146,3 +147,25 @@ class TimerAPITest(APITestCase):
         self.assertEqual(data["remaining_seconds"], 43200)
         self.assertEqual(data["remaining_display"], "12:00:00")
         self.assertAlmostEqual(data["time_until_start"], 3600, delta=5)
+
+
+    def test_server_time_matches_remaining(self):
+        now = timezone.now()
+        Contest.objects.create(
+            name="test",
+            start_time=now - timedelta(hours=1),
+            end_time=now + timedelta(hours=2),
+            is_active=True,
+        )
+        data = self.client.get("/api/v1/timer").data["data"]
+
+        self.assertRegex(data["server_time"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+
+        server_time = datetime.strptime(data["server_time"], "%Y-%m-%dT%H:%M:%SZ")
+        server_time = server_time.replace(tzinfo=datetime_timezone.utc)
+        expected_end = server_time + timedelta(seconds=data["remaining_seconds"])
+        self.assertAlmostEqual(
+            expected_end.timestamp(),
+            (now + timedelta(hours=2)).timestamp(),
+            delta=5,
+        )
