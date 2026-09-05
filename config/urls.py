@@ -7,8 +7,10 @@ from apps.board.views import (
     DebugReleaseQuarantineView,
     DebugSolveActiveChallengeView,
 )
+from apps.common.health import healthz
 
 urlpatterns = [
+    path("healthz", healthz),
     path("admin/", admin.site.urls),
     path("api/v1/", include("apps.timer.urls")),
     path("api/v1/", include("apps.accounts.urls")),
