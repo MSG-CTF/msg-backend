@@ -93,6 +93,9 @@ class ChallengeSubmitTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.data["data"]["is_extra_dice_granted"])
+        self.assertEqual(response.data["data"]["earned_mileage"], 30)
+        self.team.refresh_from_db()
+        self.assertEqual(self.team.mileage, 30)
 
     def test_three_wrong_flags_lock_submission(self):
         # 같은 팀이 같은 문제에 3회 연속 오답을 내면 제출 제한이 걸린다
@@ -108,6 +111,9 @@ class ChallengeSubmitTests(TestCase):
         flag_lock = FlagSubmissionLock.objects.get(team=self.team, challenge=self.challenge)
         self.assertEqual(flag_lock.failed_count, 3)
         self.assertIsNotNone(flag_lock.locked_until)
+        self.team.refresh_from_db()
+        self.assertEqual(self.team.mileage, 0)
+        self.assertFalse(MileageHistory.objects.filter(team=self.team).exists())
 
     def test_locked_submission_is_rejected_without_scoring(self):
         # 락 상태에서는 정답을 제출해도 채점하지 않고 429를 반환한다
@@ -132,6 +138,12 @@ class ChallengeSubmitTests(TestCase):
         self.assertEqual(first.data["code"], "SUCCESS")
         self.assertEqual(second.status_code, 409)
         self.assertEqual(second.data["code"], "ALREADY_SOLVED")
+        self.team.refresh_from_db()
+        self.assertEqual(self.team.mileage, 30)
+        self.assertEqual(
+            list(MileageHistory.objects.filter(team=self.team).values_list("amount", flat=True)),
+            [30],
+        )
         self.assertEqual(
             Solve.objects.filter(team=self.team, challenge=self.challenge).count(),
             1,
@@ -265,6 +277,8 @@ class ChallengeSubmitTests(TestCase):
             extra_challenges.append((challenge, reward, f"MSG{{{difficulty.lower()}_flag}}"))
 
         cases = [(self.challenge, 30, "MSG{correct_flag}"), *extra_challenges]
+        total_mileage = 0
+        expected_solves = {}
         for challenge, reward, flag in cases:
             with self.subTest(difficulty=challenge.difficulty):
                 response = self.client.post(
@@ -274,6 +288,32 @@ class ChallengeSubmitTests(TestCase):
                 )
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(response.data["data"]["earned_mileage"], reward)
+                total_mileage += reward
+                expected_solves[str(challenge.challenge_id)] = reward
+                self.assertEqual(response.data["data"]["mileage"], total_mileage)
+                solve = Solve.objects.get(team=self.team, challenge=challenge)
+                self.assertEqual(solve.earned_mileage, reward)
+
+                profile = self.client.get("/api/v1/teams/me")
+                self.assertEqual(profile.status_code, 200)
+                self.assertEqual(profile.data["data"]["mileage"], total_mileage)
+                solves = self.client.get("/api/v1/teams/me/solves")
+                self.assertEqual(solves.status_code, 200)
+                self.assertEqual(
+                    {row["challenge_id"]: row["earned_mileage"]
+                     for row in solves.data["data"]["solves"]},
+                    expected_solves,
+                )
+                history = self.client.get("/api/v1/teams/me/mileage_history")
+                self.assertEqual(history.status_code, 200)
+                self.assertEqual(history.data["data"]["mileage"], total_mileage)
+                rows = history.data["data"]["history"]
+                self.assertEqual(len(rows), len(expected_solves))
+                self.assertTrue(all(row["type"] == MileageType.CHALLENGE_SOLVE for row in rows))
+                self.assertCountEqual(
+                    [row["amount"] for row in rows], list(expected_solves.values())
+                )
+                self.assertEqual(sum(row["amount"] for row in rows), total_mileage)
 
         self.team.refresh_from_db()
         self.assertEqual(self.team.mileage, 210)
