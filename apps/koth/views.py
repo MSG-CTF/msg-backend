@@ -21,7 +21,12 @@ from .tokens import build_team_token, matches_token
 
 
 def _challenge_payload(challenge, include_times=True):
-    leader = challenge.solves.order_by("-earned_score", "solved_at", "team__team_name").select_related("team").first()
+    leader = (
+        challenge.solves.filter(earned_score__gt=0, team__is_banned=False)
+        .order_by("-earned_score", "solved_at", "team__team_name", "team_id")
+        .select_related("team")
+        .first()
+    )
     data = {
         "koth_challenge_id": str(challenge.koth_challenge_id),
         "title": challenge.title,
@@ -89,7 +94,11 @@ def me(request):
         score = solve.earned_score if solve else Decimal("0")
         rank = None
         if score > 0:
-            rank = 1 + KothSolve.objects.filter(challenge=challenge, earned_score__gt=score).count()
+            rank = 1 + KothSolve.objects.filter(
+                challenge=challenge,
+                earned_score__gt=score,
+                team__is_banned=False,
+            ).count()
         challenge_data.append({
             "koth_challenge_id": str(challenge.koth_challenge_id),
             "club_id": str(challenge.club_id),

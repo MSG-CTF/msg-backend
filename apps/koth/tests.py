@@ -6,6 +6,7 @@ from unittest.mock import patch
 from django.core.cache import cache
 from django.db import IntegrityError, transaction
 from django.test import TestCase, override_settings
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.accounts.models import Team, User
@@ -52,7 +53,19 @@ class KothApiTests(TestCase):
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {response.data['data']['access_token']}")
 
     def test_clubs_and_detail_expose_current_owner(self):
-        KothSolve.objects.create(team=self.team, challenge=self.challenge, earned_score=Decimal("40"))
+        solved_at = timezone.now()
+        KothSolve.objects.create(
+            team=self.team,
+            challenge=self.challenge,
+            earned_score=Decimal("40"),
+            solved_at=solved_at,
+        )
+        KothSolve.objects.create(
+            team=self.banned,
+            challenge=self.challenge,
+            earned_score=Decimal("100"),
+            solved_at=solved_at,
+        )
         response = self.client.get("/api/v1/koth/clubs")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["data"]["total_count"], 6)
@@ -79,8 +92,25 @@ class KothApiTests(TestCase):
                 )
 
     def test_me_reports_all_challenges_and_team_token_is_shared(self):
-        KothSolve.objects.create(team=self.team, challenge=self.challenge, earned_score=Decimal("40"))
-        KothSolve.objects.create(team=self.other, challenge=self.challenge, earned_score=Decimal("50"))
+        solved_at = timezone.now()
+        KothSolve.objects.create(
+            team=self.team,
+            challenge=self.challenge,
+            earned_score=Decimal("40"),
+            solved_at=solved_at,
+        )
+        KothSolve.objects.create(
+            team=self.other,
+            challenge=self.challenge,
+            earned_score=Decimal("50"),
+            solved_at=solved_at,
+        )
+        KothSolve.objects.create(
+            team=self.banned,
+            challenge=self.challenge,
+            earned_score=Decimal("60"),
+            solved_at=solved_at,
+        )
         self.auth()
         response = self.client.get("/api/v1/koth/me")
         self.assertEqual(response.data["data"]["total_koth_score"], 40)
@@ -148,6 +178,7 @@ class KothApiTests(TestCase):
         )
         self.assertEqual([row["rank"] for row in data["leaderboard"]], [1, 1, 3])
         self.assertEqual([row["earned_score"] for row in data["leaderboard"]], [100, 100, 40])
+        self.assertTrue(all(row["solved_at"] is not None for row in data["leaderboard"]))
 
     def test_team_token_requires_team(self):
         self.auth("none")
