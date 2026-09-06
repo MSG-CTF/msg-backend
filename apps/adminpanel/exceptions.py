@@ -60,3 +60,8 @@ class NotRefundable(APIError):
     status_code = status.HTTP_409_CONFLICT
     code = "NOT_REFUNDABLE"
     message = "환불할 수 없는 내역입니다"
+
+class LoginIdTaken(APIError):
+    status_code = status.HTTP_409_CONFLICT
+    code = "LOGIN_ID_TAKEN"
+    message = "이미 사용 중인 아이디입니다"

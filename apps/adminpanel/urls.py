@@ -16,4 +16,5 @@ urlpatterns = [
     path("admin/instances/<uuid:instance_id>", views.instance_force_delete),
     path("admin/instances/<uuid:instance_id>/reset", views.instance_force_reset),
     path("admin/mileage_history", views.mileage_history),
+    path("admin/accounts", views.account_create),
 ]

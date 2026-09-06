@@ -368,6 +368,95 @@ class AdminTests(TestCase):
         res = self.client.get("/api/v1/admin/mileage_history")
         self.assertEqual(res.status_code, 403)
 
+    def test_account_create_success(self):
+        self.auth("root")
+        res = self.client.post(
+            "/api/v1/admin/accounts",
+            {"login_id": "newbie", "password": "pw12345678", "nickname": "새사람",
+             "team_id": str(self.team.team_id), "is_leader": True},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 200)
+        d = res.data["data"]
+        self.assertEqual(
+            set(d),
+            {"user_id", "login_id", "nickname", "role", "is_leader",
+             "team_id", "team_name", "created_at"},
+        )
+        self.assertNotIn("password", d)
+        self.assertEqual(d["team_id"], str(self.team.team_id))
+        u = User.objects.get(login_id="newbie")
+        self.assertTrue(u.check_password("pw12345678"))
+
+    def test_account_create_without_team(self):
+        self.auth("root")
+        res = self.client.post(
+            "/api/v1/admin/accounts",
+            {"login_id": "solo", "password": "pw12345678", "nickname": "혼자"},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertIsNone(res.data["data"]["team_id"])
+        self.assertEqual(res.data["data"]["role"], "PARTICIPANT")
+
+    def test_account_create_admin_role(self):
+        self.auth("root")
+        res = self.client.post(
+            "/api/v1/admin/accounts",
+            {"login_id": "op2", "password": "pw12345678", "nickname": "운영2", "role": "ADMIN"},
+            format="json",
+        )
+        self.assertEqual(res.data["data"]["role"], "ADMIN")
+
+    def test_account_create_duplicate_login_id(self):
+        self.auth("root")
+        res = self.client.post(
+            "/api/v1/admin/accounts",
+            {"login_id": "player", "password": "pw12345678", "nickname": "중복"},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.data["code"], "LOGIN_ID_TAKEN")
+
+    def test_account_create_missing_or_bad_fields(self):
+        self.auth("root")
+        for body in [
+            {},
+            {"login_id": "a"},
+            {"login_id": "a", "password": "pw12345678"},
+            {"login_id": "a", "password": "short", "nickname": "x"},
+        ]:
+            self.assertEqual(
+                self.client.post("/api/v1/admin/accounts", body, format="json").status_code, 400)
+
+    def test_account_create_invalid_role(self):
+        self.auth("root")
+        res = self.client.post(
+            "/api/v1/admin/accounts",
+            {"login_id": "b", "password": "pw12345678", "nickname": "x", "role": "SUPER"},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 400)
+
+    def test_account_create_invalid_team(self):
+        self.auth("root")
+        res = self.client.post(
+            "/api/v1/admin/accounts",
+            {"login_id": "c", "password": "pw12345678", "nickname": "x",
+             "team_id": str(uuid.uuid4())},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.data["code"], "TEAM_NOT_FOUND")
+
+    def test_account_create_participant_blocked(self):
+        self.auth("player")
+        res = self.client.post(
+            "/api/v1/admin/accounts",
+            {"login_id": "d", "password": "pw12345678", "nickname": "x"},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 403)
 
 @override_settings(CACHES=LOCMEM)
 class AdminDashboardTests(TestCase):

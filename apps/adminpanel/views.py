@@ -1,13 +1,13 @@
 import uuid
 
 from django.core.exceptions import ValidationError
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Count, Prefetch, Q, Sum
 from django.utils import timezone
 
 from rest_framework.decorators import api_view, permission_classes
 
-from apps.accounts.models import Team, User
+from apps.accounts.models import Role, Team, User
 from apps.common.exceptions import InvalidRequest, TeamBanned
 from apps.common.permissions import IsAdmin
 from apps.common.response import fail, ok
@@ -30,6 +30,7 @@ from .exceptions import (
     AlreadyRefunded,
     InsufficientMileage,
     InvalidAmount,
+    LoginIdTaken,
     NotBanned,
     NotRefundable,
     PaymentNotFound,
@@ -139,6 +140,72 @@ def _get_team_for_update(team_id):
     except (Team.DoesNotExist, ValidationError, ValueError):
         raise TeamNotFound()
 
+@api_view(["POST"])
+@permission_classes([IsAdmin])
+def account_create(request):
+    login_id = request.data.get("login_id")
+    if not isinstance(login_id, str) or not login_id.strip():
+        raise InvalidRequest("필수 항목이 누락되었습니다: login_id")
+    login_id = login_id.strip()
+    if len(login_id) > 50:
+        raise InvalidRequest("login_id 는 50자 이하여야 합니다")
+
+    password = request.data.get("password")
+    if not isinstance(password, str) or len(password) < 8:
+        raise InvalidRequest("password 는 8자 이상이어야 합니다")
+
+    nickname = request.data.get("nickname")
+    if not isinstance(nickname, str) or not nickname.strip():
+        raise InvalidRequest("필수 항목이 누락되었습니다: nickname")
+    nickname = nickname.strip()
+    if len(nickname) > 50:
+        raise InvalidRequest("nickname 은 50자 이하여야 합니다")
+
+    role = request.data.get("role", Role.PARTICIPANT)
+    if role not in Role.values:
+        raise InvalidRequest("role 이 올바르지 않습니다")
+
+    is_leader = request.data.get("is_leader", False)
+    if not isinstance(is_leader, bool):
+        raise InvalidRequest("is_leader 는 boolean 이어야 합니다")
+
+    team = None
+    team_id = request.data.get("team_id")
+    if team_id:
+        try:
+            team = Team.objects.get(pk=team_id)
+        except (Team.DoesNotExist, ValidationError, ValueError):
+            raise TeamNotFound()
+
+    if User.objects.filter(login_id=login_id).exists():
+        raise LoginIdTaken()
+
+    try:
+        with transaction.atomic():
+            user = User.objects.create_user(
+                login_id=login_id,
+                password=password,
+                nickname=nickname,
+                role=role,
+                team=team,
+                is_leader=is_leader,
+            )
+    except IntegrityError:
+        raise LoginIdTaken()
+
+    return ok(
+        {
+            "user_id": str(user.user_id),
+            "login_id": user.login_id,
+            "nickname": user.nickname,
+            "role": user.role,
+            "is_leader": user.is_leader,
+            "team_id": str(user.team_id) if user.team_id else None,
+            "team_name": team.team_name if team else None,
+            "created_at": user.created_at,
+        },
+        message="계정이 등록되었습니다",
+    )
 
 @api_view(["POST", "DELETE"])
 @permission_classes([IsAdmin])

@@ -133,3 +133,5 @@ common_error_codes:
   # 관리자 조정 멱등성 (adminpanel)
   - {http: 400, code: IDEMPOTENCY_KEY_REQUIRED}
   - {http: 409, code: IDEMPOTENCY_KEY_CONFLICT}
+  # 관리자 계정 등록 (adminpanel)
+  - {http: 409, code: LOGIN_ID_TAKEN}
