@@ -75,6 +75,17 @@ class ClubNotFound(APIError):
 class InvalidRequest(APIError):
     pass
 
+class IdempotencyKeyRequired(APIError):
+    status_code = status.HTTP_400_BAD_REQUEST
+    code = "IDEMPOTENCY_KEY_REQUIRED"
+    message = "Idempotency-Key 헤더가 필요합니다"
+
+
+class IdempotencyKeyConflict(APIError):
+    status_code = status.HTTP_409_CONFLICT
+    code = "IDEMPOTENCY_KEY_CONFLICT"
+    message = "같은 Idempotency-Key로 다른 요청을 보낼 수 없습니다"
+
 
 class InternalError(APIError):
     status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
