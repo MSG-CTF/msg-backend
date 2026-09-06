@@ -60,3 +60,8 @@ class NotRefundable(APIError):
     status_code = status.HTTP_409_CONFLICT
     code = "NOT_REFUNDABLE"
     message = "환불할 수 없는 내역입니다"
+
+class InsufficientDice(APIError):
+    status_code = status.HTTP_400_BAD_REQUEST
+    code = "INSUFFICIENT_DICE"
+    message = "회수할 주사위 횟수가 부족합니다"

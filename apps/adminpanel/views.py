@@ -15,6 +15,7 @@ from apps.common.utils import num
 from apps.common.jwt import hash_token
 from apps.challenge.models import Challenge, Solve
 from apps.board.models import TeamBoardState
+from apps.board.services import get_or_create_board_state
 from apps.timer.models import Contest
 
 from apps.teams.models import (
@@ -27,6 +28,7 @@ from apps.teams.models import (
 from .exceptions import (
     AlreadyBanned,
     AlreadyRefunded,
+    InsufficientDice,
     InsufficientMileage,
     InvalidAmount,
     NotBanned,
@@ -63,7 +65,8 @@ DEFAULT_PAGE_SIZE = 20
 MAX_PAGE_SIZE = 100
 MAX_PAGE = 10_000
 MAX_BAN_REASON_LENGTH = 500
-
+DICE_ADJUST_MIN = -20
+DICE_ADJUST_MAX = 20
 
 def _page_number(raw, default, maximum=None):
     if raw in (None, ""):
@@ -867,4 +870,46 @@ def challenge_list(request):
 
     return ok(
         {"challenges": challenges, "total_count": total_count, "page": page, "size": size}
+    )
+
+@api_view(["POST"])
+@permission_classes([IsAdmin])
+def board_dice(request, team_id):
+    amount = request.data.get("amount")
+    if not isinstance(amount, int) or isinstance(amount, bool):
+        raise InvalidRequest("amount 는 정수여야 합니다")
+    if amount == 0:
+        raise InvalidAmount("조정할 횟수는 0이 될 수 없습니다")
+    if not (DICE_ADJUST_MIN <= amount <= DICE_ADJUST_MAX):
+        raise InvalidRequest(f"amount 는 {DICE_ADJUST_MIN} ~ {DICE_ADJUST_MAX} 범위여야 합니다")
+
+    reason = request.data.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        raise InvalidRequest("필수 항목이 누락되었습니다: reason")
+    reason = reason.strip()
+    if len(reason) > 500:
+        raise InvalidRequest("reason 은 500자 이하여야 합니다")
+
+    with transaction.atomic():
+        team = _get_team_for_update(team_id)
+        state = get_or_create_board_state(team)
+        previous = state.dice_rolls_left
+        if amount < 0 and previous + amount < 0:
+            raise InsufficientDice(
+                data={"current_dice_rolls_left": previous, "requested_amount": -amount}
+            )
+        state.dice_rolls_left = previous + amount
+        state.save(update_fields=["dice_rolls_left", "updated_at"])
+
+    return ok(
+        {
+            "team_id": str(team.team_id),
+            "previous_dice_rolls_left": previous,
+            "amount": amount,
+            "dice_rolls_left": state.dice_rolls_left,
+            "reason": reason,
+            "adjusted_at": timezone.now().replace(microsecond=0),
+            "adjusted_by": request.user.login_id,
+        },
+        message="주사위 횟수가 조정되었습니다",
     )
