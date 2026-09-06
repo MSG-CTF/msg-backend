@@ -174,6 +174,9 @@ def account_create(request):
     if not isinstance(is_leader, bool):
         raise InvalidRequest("is_leader 는 boolean 이어야 합니다")
 
+    if role == Role.ADMIN and is_leader:
+        raise InvalidRequest("관리자 계정은 팀장이 될 수 없습니다")
+
     team = None
     team_id = request.data.get("team_id")
     if team_id:

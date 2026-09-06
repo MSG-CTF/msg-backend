@@ -135,3 +135,4 @@ common_error_codes:
   - {http: 409, code: IDEMPOTENCY_KEY_CONFLICT}
   # 관리자 계정 등록 (adminpanel)
   - {http: 409, code: LOGIN_ID_TAKEN}
+  - {http: 409, code: TEAM_ALREADY_HAS_LEADER}

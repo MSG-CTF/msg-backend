@@ -9,7 +9,7 @@ from django.test import TestCase, TransactionTestCase, override_settings
 
 from rest_framework.test import APIClient
 
-from apps.common.jwt import hash_token, issue_access_token
+from apps.common.jwt import ACCESS, decode_token, hash_token, issue_access_token
 from apps.accounts.models import (
     Role,
     Team,
@@ -516,6 +516,35 @@ class AdminTests(TestCase):
         self.assertEqual(res.status_code, 409)
         self.assertEqual(res.data["code"], "TEAM_ALREADY_HAS_LEADER")
         self.assertFalse(User.objects.filter(login_id="leader2").exists())
+
+    def test_admin_account_is_never_leader(self):
+        self.auth("root")
+        rejected = self.client.post(
+            "/api/v1/admin/accounts",
+            {"login_id": "admin_leader", "password": "pw12345678", "nickname": "관리자팀장",
+             "team_id": str(self.team.team_id), "role": "ADMIN", "is_leader": True},
+            format="json",
+        )
+        self.assertEqual(rejected.status_code, 400)
+        self.assertFalse(User.objects.filter(login_id="admin_leader").exists())
+
+        created = self.client.post(
+            "/api/v1/admin/accounts",
+            {"login_id": "admin1", "password": "pw12345678", "nickname": "관리자", "role": "ADMIN"},
+            format="json",
+        )
+        self.assertEqual(created.status_code, 200)
+        self.assertFalse(created.data["data"]["is_leader"])
+
+        login = APIClient().post(
+            "/api/v1/auth/login",
+            {"login_id": "admin1", "password": "pw12345678"},
+            format="json",
+        )
+        self.assertEqual(login.status_code, 200)
+        self.assertFalse(login.data["data"]["is_leader"])
+        payload = decode_token(login.data["data"]["access_token"], ACCESS)
+        self.assertFalse(payload["is_leader"])
 
 @override_settings(CACHES=LOCMEM)
 class AdminDashboardTests(TestCase):
