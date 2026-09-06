@@ -28,7 +28,20 @@ def bundle(
     challenge_id=None,
     source_ref="refs/heads/main",
     source_sha=SHA_A,
+    containers=None,
+    internal_connections=None,
 ):
+    if containers is None:
+        containers = [
+            {
+                "name": "app",
+                "image": f"ghcr.io/msg-ctf/challenges/{slug}/app@sha256:{digest}",
+                "ports": [{"port": 8080, "public": True}],
+            }
+        ]
+    workload = {"containers": containers}
+    if internal_connections is not None:
+        workload["internal_connections"] = internal_connections
     data = {
         "schema_version": "2.0",
         "challenge_slug": slug,
@@ -38,15 +51,7 @@ def bundle(
         "runtime_type": "KUBERNETES",
         "architecture": "AMD64",
         "isolation_profile": "WEB",
-        "workload": {
-            "containers": [
-                {
-                    "name": "app",
-                    "image": f"ghcr.io/msg-ctf/challenges/{slug}/app@sha256:{digest}",
-                    "ports": [{"port": 8080, "public": True}],
-                }
-            ]
-        },
+        "workload": workload,
         "resource_profile": {
             "cpu_millicores": 500,
             "memory_mib": 512,
@@ -134,6 +139,40 @@ class PollerTestBase(TestCase):
 
 
 class RegisterBundleTests(PollerTestBase):
+    def test_registers_and_preserves_internal_connections(self):
+        containers = [
+            {
+                "name": "web",
+                "image": f"ghcr.io/msg-ctf/challenges/web-basic/web@sha256:{DIGEST_A}",
+                "ports": [{"port": 8080, "public": True}],
+            },
+            {
+                "name": "db",
+                "image": f"ghcr.io/msg-ctf/challenges/web-basic/db@sha256:{DIGEST_B}",
+                "ports": [{"port": 5432, "public": False}],
+            },
+        ]
+        connections = [
+            {
+                "source_container": "web",
+                "destination_container": "db",
+                "protocol": "TCP",
+                "port": 5432,
+            }
+        ]
+
+        status, release = register_bundle(
+            bundle(
+                challenge_id=self.challenge.challenge_id,
+                containers=containers,
+                internal_connections=connections,
+            )
+        )
+
+        self.assertEqual(status, "registered")
+        release.refresh_from_db()
+        self.assertEqual(release.internal_connections, connections)
+
     def test_registers_new_bundle_by_challenge_id_match(self):
         # slug 이력이 없으면 bundle의 문제명으로 문제를 찾아 등록한다
         status, release = register_bundle(
@@ -206,6 +245,49 @@ class PollOnceTests(PollerTestBase):
         self.assertEqual(summary["duplicate"], 1)
         self.assertEqual(summary["error"], 0)
         self.assertEqual(ChallengeRelease.objects.count(), 1)
+
+    def test_new_revision_keeps_existing_active_release(self):
+        _, first = register_bundle(
+            bundle(revision=1, challenge_id=self.challenge.challenge_id)
+        )
+        config = ChallengeRuntimeConfig.objects.create(
+            challenge=self.challenge,
+            current_release=first,
+        )
+
+        containers = [
+            {
+                "name": "web",
+                "image": f"ghcr.io/msg-ctf/challenges/web-basic/web@sha256:{DIGEST_A}",
+                "ports": [{"port": 8080, "public": True}],
+            },
+            {
+                "name": "db",
+                "image": f"ghcr.io/msg-ctf/challenges/web-basic/db@sha256:{DIGEST_B}",
+                "ports": [{"port": 5432, "public": False}],
+            },
+        ]
+        connections = [
+            {
+                "source_container": "web",
+                "destination_container": "db",
+                "protocol": "TCP",
+                "port": 5432,
+            }
+        ]
+        status, second = register_bundle(
+            bundle(
+                revision=2,
+                containers=containers,
+                internal_connections=connections,
+            )
+        )
+
+        self.assertEqual(status, "registered")
+        self.assertNotEqual(second.release_id, first.release_id)
+        self.assertEqual(second.internal_connections, connections)
+        config.refresh_from_db()
+        self.assertEqual(config.current_release_id, first.release_id)
 
     def test_poll_once_rejects_failed_workflow_run(self):
         artifacts_page = json.dumps(

@@ -165,6 +165,8 @@ class ChallengeRelease(models.Model):
     memory_mib = models.IntegerField()
     ephemeral_storage_mib = models.IntegerField()
     healthcheck = models.JSONField(null=True, blank=True)
+    # bundle workload.internal_connections 형식을 검증한 뒤 그대로 보존한다
+    internal_connections = models.JSONField(default=list, blank=True)
     source_ref = models.CharField(max_length=200, blank=True, default="")
     note = models.TextField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)

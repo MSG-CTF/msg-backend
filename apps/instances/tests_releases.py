@@ -24,7 +24,14 @@ DIGEST_B = "b" * 64
 DIGEST_C = "c" * 64
 
 
-def artifact_payload(revision=1, slug="web-basic", containers=None, note=None, **overrides):
+def artifact_payload(
+    revision=1,
+    slug="web-basic",
+    containers=None,
+    internal_connections=None,
+    note=None,
+    **overrides,
+):
     # 공급망 artifact-v2.json 형식의 등록 요청 body를 만든다
     if containers is None:
         containers = [
@@ -34,6 +41,9 @@ def artifact_payload(revision=1, slug="web-basic", containers=None, note=None, *
                 "ports": [{"port": 8080, "public": True}],
             }
         ]
+    workload = {"containers": containers}
+    if internal_connections is not None:
+        workload["internal_connections"] = internal_connections
     artifact = {
         "schema_version": "2.0",
         "challenge_slug": slug,
@@ -43,7 +53,7 @@ def artifact_payload(revision=1, slug="web-basic", containers=None, note=None, *
         "runtime_type": "KUBERNETES",
         "architecture": "AMD64",
         "isolation_profile": "WEB",
-        "workload": {"containers": containers},
+        "workload": workload,
         "resource_profile": {
             "cpu_millicores": 500,
             "memory_mib": 512,
@@ -146,6 +156,108 @@ class ReleaseRegisterTests(ReleaseTestBase):
         self.assertTrue(data["is_deployable"])
         self.assertEqual(data["note"], "첫 릴리스")
         self.assertEqual(len(data["containers"]), 1)
+        self.assertEqual(data["internal_connections"], [])
+
+    def test_register_preserves_internal_connections_in_db_and_response(self):
+        containers = [
+            {
+                "name": "web",
+                "image": f"ghcr.io/msg-ctf/challenges/web-basic/web@sha256:{DIGEST_A}",
+                "ports": [{"port": 8080, "public": True}],
+            },
+            {
+                "name": "db",
+                "image": f"ghcr.io/msg-ctf/challenges/web-basic/db@sha256:{DIGEST_B}",
+                "ports": [{"port": 5432, "public": False}],
+            },
+        ]
+        connections = [
+            {
+                "source_container": "web",
+                "destination_container": "db",
+                "protocol": "TCP",
+                "port": 5432,
+            }
+        ]
+        self.auth("root")
+
+        res = self.register(
+            containers=containers,
+            internal_connections=connections,
+        )
+
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data["data"]["internal_connections"], connections)
+        self.assertFalse(res.data["data"]["is_deployable"])
+        release = ChallengeRelease.objects.get(
+            release_id=res.data["data"]["release_id"]
+        )
+        self.assertEqual(release.internal_connections, connections)
+
+        listed = self.client.get(self.base_url)
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(
+            listed.data["data"]["releases"][0]["internal_connections"],
+            connections,
+        )
+
+    def test_register_treats_null_internal_connections_as_empty(self):
+        self.auth("root")
+        body = artifact_payload()
+        body["artifact"]["workload"]["internal_connections"] = None
+
+        res = self.client.post(self.base_url, body, format="json")
+
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data["data"]["internal_connections"], [])
+
+    def test_register_rejects_invalid_internal_connections(self):
+        containers = [
+            {
+                "name": "web",
+                "image": f"ghcr.io/msg-ctf/challenges/web-basic/web@sha256:{DIGEST_A}",
+                "ports": [{"port": 8080, "public": True}],
+            },
+            {
+                "name": "db",
+                "image": f"ghcr.io/msg-ctf/challenges/web-basic/db@sha256:{DIGEST_B}",
+                "ports": [{"port": 5432, "public": False}],
+            },
+        ]
+        valid = {
+            "source_container": "web",
+            "destination_container": "db",
+            "protocol": "TCP",
+            "port": 5432,
+        }
+        cases = {
+            "not a list": "web-to-db",
+            "entry is not an object": [None],
+            "unknown source": [{**valid, "source_container": "worker"}],
+            "unknown destination": [{**valid, "destination_container": "cache"}],
+            "same container": [
+                {
+                    **valid,
+                    "source_container": "db",
+                    "destination_container": "db",
+                }
+            ],
+            "unsupported protocol": [{**valid, "protocol": "UDP"}],
+            "boolean port": [{**valid, "port": True}],
+            "undeclared destination port": [{**valid, "port": 3306}],
+            "duplicate": [valid, valid.copy()],
+        }
+        self.auth("root")
+        for case_name, connections in cases.items():
+            with self.subTest(case=case_name):
+                res = self.register(
+                    containers=containers,
+                    internal_connections=connections,
+                )
+                self.assertEqual(res.status_code, 400)
+                self.assertEqual(res.data["code"], "RELEASE_INVALID")
+
+        self.assertEqual(ChallengeRelease.objects.count(), 0)
 
     def test_register_increments_version(self):
         # 등록할 때마다 문제별 version이 1씩 늘어난다

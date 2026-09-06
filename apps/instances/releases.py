@@ -109,6 +109,70 @@ def _validate_containers(raw_containers):
     return containers
 
 
+def _validate_internal_connections(raw_connections, containers):
+    if raw_connections is None:
+        return []
+    if not isinstance(raw_connections, list):
+        raise ReleaseValidationError(
+            "workload.internal_connections 값은 배열이어야 합니다"
+        )
+
+    containers_by_name = {container["name"]: container for container in containers}
+    connections = []
+    seen = set()
+    for raw in raw_connections:
+        if not isinstance(raw, dict):
+            raise ReleaseValidationError(
+                "workload.internal_connections 항목 형식이 올바르지 않습니다"
+            )
+
+        source = _require_string(
+            raw.get("source_container"),
+            "internal_connections.source_container",
+        )
+        destination = _require_string(
+            raw.get("destination_container"),
+            "internal_connections.destination_container",
+        )
+        if source not in containers_by_name or destination not in containers_by_name:
+            raise ReleaseValidationError(
+                "internal_connections는 선언된 컨테이너만 참조할 수 있습니다"
+            )
+        if source == destination:
+            raise ReleaseValidationError(
+                "internal_connections의 출발과 도착 컨테이너는 달라야 합니다"
+            )
+
+        protocol = raw.get("protocol")
+        if protocol != "TCP":
+            raise ReleaseValidationError(
+                "internal_connections.protocol은 TCP만 허용합니다"
+            )
+
+        port = _require_positive_int(raw.get("port"), "internal_connections.port")
+        destination_ports = {
+            entry["port"] for entry in containers_by_name[destination]["ports"]
+        }
+        if port > 65535 or port not in destination_ports:
+            raise ReleaseValidationError(
+                "internal_connections.port는 도착 컨테이너의 선언된 포트여야 합니다"
+            )
+
+        key = (source, destination, protocol, port)
+        if key in seen:
+            raise ReleaseValidationError("internal_connections 항목이 중복됩니다")
+        seen.add(key)
+        connections.append(
+            {
+                "source_container": source,
+                "destination_container": destination,
+                "protocol": protocol,
+                "port": port,
+            }
+        )
+    return connections
+
+
 def validate_release_payload(body):
     # 등록 요청 body에서 artifact 한 벌을 검증해 정제된 값으로 돌려준다
     if not isinstance(body, dict):
@@ -154,6 +218,11 @@ def validate_release_payload(body):
     workload = artifact.get("workload")
     if not isinstance(workload, dict):
         raise ReleaseValidationError("workload 값이 올바르지 않습니다")
+    containers = _validate_containers(workload.get("containers"))
+    internal_connections = _validate_internal_connections(
+        workload.get("internal_connections"),
+        containers,
+    )
 
     return {
         "challenge_slug": _require_string(artifact.get("challenge_slug"), "challenge_slug"),
@@ -175,7 +244,8 @@ def validate_release_payload(body):
         ),
         "healthcheck": healthcheck,
         "source_ref": _require_string(artifact.get("source_ref"), "source_ref"),
-        "containers": _validate_containers(workload.get("containers")),
+        "containers": containers,
+        "internal_connections": internal_connections,
         "note": note,
     }
 
@@ -217,6 +287,7 @@ def create_release(challenge, validated, created_by):
         memory_mib=validated["memory_mib"],
         ephemeral_storage_mib=validated["ephemeral_storage_mib"],
         healthcheck=validated["healthcheck"],
+        internal_connections=validated["internal_connections"],
         source_ref=validated["source_ref"],
         note=validated["note"],
         created_by=created_by,
@@ -247,6 +318,8 @@ def public_container(release):
 def is_deployable(release):
     # 포트별 공개 설정을 Scheduler의 컨테이너 단위 expose로 손실 없이 변환한다
     if release.registry_revision <= 0:
+        return False
+    if release.internal_connections:
         return False
 
     containers = list(release.containers.all())
@@ -282,6 +355,7 @@ def serialize_release(release, current_release_id=None):
             }
             for container in release.containers.all()
         ],
+        "internal_connections": release.internal_connections,
         "is_current": release.release_id == current_release_id,
         "is_deployable": is_deployable(release),
         "note": release.note,

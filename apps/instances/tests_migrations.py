@@ -50,6 +50,7 @@ class LegacyReleaseMigrationTests(TransactionTestCase):
                 self.assertEqual(release.cpu_millicores, 750)
                 self.assertEqual(release.memory_mib, 768)
                 self.assertEqual(release.ephemeral_storage_mib, 2048)
+                self.assertEqual(release.internal_connections, [])
                 self.assertEqual((config.ttl_minutes, config.hard_timeout_minutes), (45, 90))
                 container = release.containers.get()
                 self.assertEqual(container.image_ref, "legacy/service:old")
