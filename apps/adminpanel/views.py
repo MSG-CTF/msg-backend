@@ -13,7 +13,7 @@ from apps.common.permissions import IsAdmin
 from apps.common.response import fail, ok
 from apps.common.utils import num
 from apps.common.jwt import hash_token
-from apps.challenge.models import Challenge, Solve
+from apps.challenge.models import Challenge, OpenedChallenge, Solve
 from apps.board.models import TeamBoardState
 from apps.timer.models import Contest
 
@@ -187,6 +187,43 @@ def _ban(request, team_id):
         message="팀 활동이 정지되었습니다",
     )
 
+@api_view(["PATCH"])
+@permission_classes([IsAdmin])
+def challenge_visibility(request, challenge_id):
+    
+    is_published = request.data.get("is_published")
+    if not isinstance(is_published, bool):
+        raise InvalidRequest("is_published 는 boolean 이어야 합니다")
+
+    reason = request.data.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        raise InvalidRequest("필수 항목이 누락되었습니다: reason")
+    reason = reason.strip()
+    if len(reason) > 500:
+        raise InvalidRequest("reason 은 500자 이하여야 합니다")
+
+    try:
+        with transaction.atomic():
+            challenge = Challenge.objects.select_for_update().get(pk=challenge_id)
+            previous = challenge.is_published
+            challenge.is_published = is_published
+            challenge.save(update_fields=["is_published"])
+            affected_team_count = OpenedChallenge.objects.filter(challenge=challenge).count()
+    except (Challenge.DoesNotExist, ValidationError, ValueError):
+        return fail("CHALLENGE_NOT_FOUND", "존재하지 않는 문제 ID입니다.", 404)
+
+    return ok(
+        {
+            "challenge_id": str(challenge.challenge_id),
+            "title": challenge.title,
+            "previous_is_published": previous,
+            "is_published": challenge.is_published,
+            "affected_team_count": affected_team_count,
+            "changed_at": timezone.now().replace(microsecond=0),
+            "changed_by": request.user.login_id,
+        },
+        message="문제 공개 상태가 변경되었습니다",
+    )
 
 def _unban(request, team_id):
     with transaction.atomic():
