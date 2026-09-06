@@ -33,6 +33,12 @@ class ArchitectureType(models.TextChoices):
     ARM64 = "ARM64"
 
 
+class RuntimeType(models.TextChoices):
+    KUBERNETES = "KUBERNETES"
+    DOCKER = "DOCKER"
+    VM = "VM"
+
+
 class Instance(models.Model):
     instance_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(
@@ -68,6 +74,15 @@ class Instance(models.Model):
         on_delete=models.SET_NULL,
         db_column="replaced_instance_id",
         related_name="replacement_instances",
+        null=True,
+        blank=True,
+    )
+    # 생성 시점의 릴리스 스냅샷. 이후 릴리스가 전환돼도 이 값은 바뀌지 않는다
+    release = models.ForeignKey(
+        "instances.ChallengeRelease",
+        on_delete=models.PROTECT,
+        db_column="release_id",
+        related_name="instances",
         null=True,
         blank=True,
     )
@@ -110,6 +125,83 @@ class InstanceLock(models.Model):
         return str(self.user_id)
 
 
+class ChallengeRelease(models.Model):
+    """공급망 publish bundle(artifact-v2.json) 한 벌을 그대로 담는 배포 릴리스."""
+
+    release_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    challenge = models.ForeignKey(
+        "challenge.Challenge",
+        on_delete=models.CASCADE,
+        db_column="challenge_id",
+        related_name="releases",
+    )
+    # 문제별 1부터 자동 증가. registry_revision과 달리 백엔드가 부여한다
+    version = models.IntegerField()
+    # bundle의 revision. 백필 릴리스는 0을 쓴다
+    registry_revision = models.IntegerField()
+    # bundle의 challenge_slug. 백필 릴리스는 빈 문자열이라 slug 대조에서 제외한다
+    challenge_slug = models.CharField(max_length=100, blank=True, default="")
+    runtime_type = models.CharField(
+        max_length=20,
+        choices=RuntimeType.choices,
+        default=RuntimeType.KUBERNETES,
+    )
+    architecture = models.CharField(
+        max_length=20,
+        choices=ArchitectureType.choices,
+        default=ArchitectureType.AMD64,
+    )
+    cpu_millicores = models.IntegerField()
+    memory_mib = models.IntegerField()
+    ephemeral_storage_mib = models.IntegerField()
+    healthcheck = models.JSONField(null=True, blank=True)
+    source_ref = models.CharField(max_length=200, blank=True, default="")
+    note = models.TextField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.CharField(max_length=50, blank=True, default="")
+
+    class Meta:
+        db_table = "challenge_releases"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["challenge", "version"], name="uq_release_challenge_version"
+            ),
+            models.UniqueConstraint(
+                fields=["challenge", "registry_revision"],
+                name="uq_release_challenge_revision",
+            ),
+        ]
+        indexes = [models.Index(fields=["challenge", "-version"])]
+
+    def __str__(self):
+        return f"{self.challenge_id} v{self.version}"
+
+
+class ReleaseContainer(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    release = models.ForeignKey(
+        ChallengeRelease,
+        on_delete=models.CASCADE,
+        db_column="release_id",
+        related_name="containers",
+    )
+    name = models.CharField(max_length=100)
+    image_ref = models.TextField()
+    # bundle workload.containers[].ports 형식 그대로: [{"port": int, "public": bool}]
+    ports = models.JSONField(default=list)
+
+    class Meta:
+        db_table = "challenge_release_containers"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["release", "name"], name="uq_release_container_name"
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.release_id} {self.name}"
+
+
 class ChallengeRuntimeConfig(models.Model):
     challenge = models.OneToOneField(
         "challenge.Challenge",
@@ -118,16 +210,15 @@ class ChallengeRuntimeConfig(models.Model):
         primary_key=True,
         related_name="runtime_config",
     )
-    container_image = models.CharField(max_length=255)
-    container_port = models.IntegerField()
-    architecture = models.CharField(
-        max_length=20,
-        choices=ArchitectureType.choices,
-        default=ArchitectureType.AMD64,
+    # 실행 이미지와 자원 설정은 릴리스가 담고, 여기는 시간 정책과 현재 릴리스 포인터만 남긴다
+    current_release = models.ForeignKey(
+        ChallengeRelease,
+        on_delete=models.PROTECT,
+        db_column="current_release_id",
+        related_name="+",
+        null=True,
+        blank=True,
     )
-    cpu_millicores = models.IntegerField(default=500)
-    memory_mib = models.IntegerField(default=512)
-    ephemeral_storage_mib = models.IntegerField(default=1024)
     ttl_minutes = models.IntegerField(default=120)
     hard_timeout_minutes = models.IntegerField(default=180)
     created_at = models.DateTimeField(auto_now_add=True)
