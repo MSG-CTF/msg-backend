@@ -12,6 +12,8 @@ class PositiveScoreSolvedAtMigrationTests(TransactionTestCase):
     def setUp(self):
         super().setUp()
         executor = MigrationExecutor(connection)
+        latest_migrations = executor.loader.graph.leaf_nodes()
+        self.addCleanup(self._restore_migrations, latest_migrations)
         executor.migrate([self.migrate_from])
         old_apps = executor.loader.project_state([self.migrate_from]).apps
 
@@ -39,6 +41,9 @@ class PositiveScoreSolvedAtMigrationTests(TransactionTestCase):
         executor = MigrationExecutor(connection)
         executor.migrate([self.migrate_to])
         self.apps = executor.loader.project_state([self.migrate_to]).apps
+
+    def _restore_migrations(self, targets):
+        MigrationExecutor(connection).migrate(targets)
 
     def test_backfills_existing_rows_and_rejects_new_invalid_rows(self):
         KothSolve = self.apps.get_model("koth", "KothSolve")
