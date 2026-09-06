@@ -152,10 +152,6 @@ def account_create(request):
         raise InvalidRequest("login_id 는 50자 이하여야 합니다")
 
     password = request.data.get("password")
-    if not isinstance(password, str) or len(password) < 8:
-        raise InvalidRequest("password 는 8자 이상이어야 합니다")
-
-    password = request.data.get("password")
     if not isinstance(password, str) or not (8 <= len(password) <= 128):
         raise InvalidRequest("password 는 8자 이상 128자 이하여야 합니다")
 
