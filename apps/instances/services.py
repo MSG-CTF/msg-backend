@@ -154,10 +154,6 @@ def serialize_release_container(container):
 
 def validate_release_for_scheduler(release):
     containers = list(release.containers.all())
-    exposed = [
-        container for container in containers
-        if release_container_expose(container)
-    ]
 
     if release.registry_revision <= 0:
         raise SchedulerError(
@@ -173,21 +169,86 @@ def validate_release_for_scheduler(release):
             400,
         )
 
-    if len(exposed) != 1:
+    exposed_port_count = 0
+    for container in containers:
+        ports = release_container_ports(container)
+        public_ports = release_container_public_ports(container)
+        if not 1 <= len(ports) <= 8:
+            raise SchedulerError(
+                "RELEASE_NOT_DEPLOYABLE",
+                "컨테이너 포트 설정을 확인해주세요.",
+                400,
+            )
+        if public_ports and len(public_ports) != len(ports):
+            raise SchedulerError(
+                "RELEASE_NOT_DEPLOYABLE",
+                "한 컨테이너의 공개·비공개 포트를 함께 사용할 수 없습니다.",
+                400,
+            )
+        exposed_port_count += len(public_ports)
+
+    if not 1 <= exposed_port_count <= 8:
         raise SchedulerError(
             "RELEASE_NOT_DEPLOYABLE",
-            "공개 컨테이너 설정을 확인해주세요.",
+            "공개 포트 수는 1개 이상 8개 이하여야 합니다.",
             400,
         )
 
-    if len(release_container_public_ports(exposed[0])) != 1 or len(
-        release_container_ports(exposed[0])
-    ) != 1:
+
+def normalize_scheduler_endpoints(raw_endpoints):
+    if raw_endpoints is None:
+        return []
+    if not isinstance(raw_endpoints, list):
         raise SchedulerError(
-            "RELEASE_NOT_DEPLOYABLE",
-            "공개 컨테이너 포트 설정을 확인해주세요.",
-            400,
+            "SCHEDULER_UNAVAILABLE",
+            "Scheduler 응답의 endpoints 형식이 올바르지 않습니다.",
+            503,
         )
+
+    endpoints = []
+    for raw in raw_endpoints:
+        if not isinstance(raw, dict):
+            raise SchedulerError(
+                "SCHEDULER_UNAVAILABLE",
+                "Scheduler 응답의 endpoint 형식이 올바르지 않습니다.",
+                503,
+            )
+        container_name = raw.get("container_name")
+        port = raw.get("port")
+        protocol = raw.get("protocol")
+        service_url = raw.get("service_url")
+        if (
+            not isinstance(container_name, str)
+            or not container_name
+            or isinstance(port, bool)
+            or not isinstance(port, int)
+            or not 1 <= port <= 65535
+            or protocol not in {"HTTP", "TCP"}
+            or not isinstance(service_url, str)
+            or not service_url
+        ):
+            raise SchedulerError(
+                "SCHEDULER_UNAVAILABLE",
+                "Scheduler 응답의 endpoint 값이 올바르지 않습니다.",
+                503,
+            )
+        endpoints.append(
+            {
+                "container_name": container_name,
+                "port": port,
+                "protocol": protocol,
+                "service_url": service_url,
+            }
+        )
+    return endpoints
+
+
+def scheduler_network_values(scheduler_data):
+    endpoints = normalize_scheduler_endpoints(scheduler_data.get("endpoints", []))
+    service_url = scheduler_data.get("service_url")
+    if not service_url and endpoints:
+        service_url = endpoints[0]["service_url"]
+    return service_url, endpoints
 
 
 def serialize_instance(instance, include_title=False, include_replaced=False):
@@ -201,6 +262,7 @@ def serialize_instance(instance, include_title=False, include_replaced=False):
         "challenge_id": str(instance.challenge_id),
         "host": instance.host if is_running else None,
         "ports": instance.ports if is_running else [],
+        "endpoints": instance.endpoints if is_running else [],
         "status": instance.status,
         "expires_at": isoformat_z(instance.expires_at),
         "hard_expires_at": isoformat_z(instance.hard_expires_at),
@@ -373,8 +435,19 @@ def update_instance_from_scheduler(instance, scheduler_data):
     instance.status = scheduler_data.get("status", instance.status)
     update_fields.append("status")
 
-    if "service_url" in scheduler_data:
-        instance.host = scheduler_data.get("service_url")
+    has_service_url = "service_url" in scheduler_data
+    has_endpoints = "endpoints" in scheduler_data
+    endpoints = None
+    if has_endpoints:
+        endpoints = normalize_scheduler_endpoints(scheduler_data.get("endpoints"))
+        instance.endpoints = endpoints
+        update_fields.append("endpoints")
+
+    if has_service_url or (has_endpoints and endpoints):
+        service_url = scheduler_data.get("service_url")
+        if not service_url and endpoints:
+            service_url = endpoints[0]["service_url"]
+        instance.host = service_url
         instance.ports = []
         update_fields.extend(["host", "ports"])
 
@@ -414,6 +487,7 @@ def create_instance_from_scheduler(
         challenge = Challenge.objects.filter(challenge_id=scheduler_data.get("challenge_id")).first()
     if release is None and challenge is not None:
         release = get_release_from_scheduler_data(challenge, scheduler_data)
+    service_url, endpoints = scheduler_network_values(scheduler_data)
 
     with transaction.atomic():
         existing_instance = (
@@ -431,8 +505,9 @@ def create_instance_from_scheduler(
                 "team": team,
                 "challenge": challenge,
                 "status": scheduler_data.get("status", InstanceStatus.REQUESTED),
-                "host": scheduler_data.get("service_url"),
+                "host": service_url,
                 "ports": [],
+                "endpoints": endpoints,
                 "expires_at": parse_scheduler_datetime(scheduler_data.get("expires_at")),
                 "hard_expires_at": parse_scheduler_datetime(scheduler_data.get("hard_expires_at")),
                 "replaced_instance": replaced_instance,
