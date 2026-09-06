@@ -72,6 +72,22 @@ class ClubNotFound(APIError):
     message = "존재하지 않는 동아리입니다."
 
 
+class KothChallengeIdRequired(APIError):
+    code = "KOTH_CHALLENGE_ID_REQUIRED"
+    message = "koth_challenge_id가 필요합니다."
+
+
+class InvalidKothChallengeId(APIError):
+    code = "INVALID_KOTH_CHALLENGE_ID"
+    message = "koth_challenge_id 형식이 올바르지 않습니다."
+
+
+class KothChallengeNotFound(APIError):
+    status_code = status.HTTP_404_NOT_FOUND
+    code = "KOTH_CHALLENGE_NOT_FOUND"
+    message = "KOTH 문제를 찾을 수 없습니다."
+
+
 class InvalidRequest(APIError):
     pass
 
