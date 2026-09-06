@@ -63,6 +63,7 @@ DEFAULT_PAGE_SIZE = 20
 MAX_PAGE_SIZE = 100
 MAX_PAGE = 10_000
 MAX_BAN_REASON_LENGTH = 500
+MILEAGE_TYPES = set(MileageType.values)
 
 
 def _page_number(raw, default, maximum=None):
@@ -273,6 +274,48 @@ def team_mileage(request, team_id):
         },
         message="마일리지가 조정되었습니다",
     )
+
+@api_view(["GET"])
+@permission_classes([IsAdmin])
+def mileage_history(request):
+    queryset = MileageHistory.objects.select_related("team")
+
+    team_id = request.query_params.get("team_id")
+    if team_id:
+        try:
+            uuid.UUID(str(team_id))
+        except (ValueError, TypeError, AttributeError):
+            raise InvalidRequest("team_id 형식이 올바르지 않습니다")
+        queryset = queryset.filter(team_id=team_id)
+
+    mtype = request.query_params.get("type")
+    if mtype:
+        if mtype not in MILEAGE_TYPES:
+            raise InvalidRequest("type 이 올바르지 않습니다")
+        queryset = queryset.filter(type=mtype)
+
+    page = _page_number(request.query_params.get("page"), 1, MAX_PAGE)
+    size = min(_page_number(request.query_params.get("size"), DEFAULT_PAGE_SIZE), MAX_PAGE_SIZE)
+
+    total_count = queryset.count()
+    offset = (page - 1) * size
+    rows = queryset.order_by("-created_at", "-history_id")[offset : offset + size]
+
+    history = [
+        {
+            "history_id": str(r.history_id),
+            "team_id": str(r.team_id),
+            "team_name": r.team.team_name,
+            "type": r.type,
+            "amount": r.amount,
+            "reason": r.reason,
+            "processed_by": r.processed_by,
+            "created_at": r.created_at,
+        }
+        for r in rows
+    ]
+
+    return ok({"history": history, "total_count": total_count, "page": page, "size": size})
 
 
 @api_view(["POST"])
