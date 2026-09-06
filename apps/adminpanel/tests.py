@@ -316,6 +316,57 @@ class AdminTests(TestCase):
         self.auth("root")
         res = self.client.get(f"/api/v1/admin/teams/{self.team.team_id}")
         self.assertIsNone(res.data["data"]["board_position_states"])
+    def test_mileage_history_lists_all(self):
+        self.auth("root")
+        MileageHistory.objects.create(team=self.team, type=MileageType.ADMIN_GRANT,
+                                      amount=100, reason="a", processed_by="root")
+        MileageHistory.objects.create(team=self.team, type=MileageType.PURCHASE,
+                                      amount=-30, reason="b", processed_by="root")
+        res = self.client.get("/api/v1/admin/mileage_history")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data["data"]["total_count"], 2)
+        row = res.data["data"]["history"][0]
+        self.assertEqual(
+            set(row),
+            {"history_id", "team_id", "team_name", "type", "amount",
+             "reason", "processed_by", "created_at"},
+        )
+
+    def test_mileage_history_filter_by_type(self):
+        self.auth("root")
+        MileageHistory.objects.create(team=self.team, type=MileageType.ADMIN_GRANT,
+                                      amount=100, reason="a", processed_by="root")
+        MileageHistory.objects.create(team=self.team, type=MileageType.PURCHASE,
+                                      amount=-30, reason="b", processed_by="root")
+        res = self.client.get("/api/v1/admin/mileage_history?type=PURCHASE")
+        self.assertEqual(res.data["data"]["total_count"], 1)
+        self.assertEqual(res.data["data"]["history"][0]["type"], "PURCHASE")
+
+    def test_mileage_history_filter_by_team(self):
+        other = Team.objects.create(team_name="다른팀")
+        MileageHistory.objects.create(team=self.team, type=MileageType.ADMIN_GRANT,
+                                      amount=100, reason="a", processed_by="root")
+        MileageHistory.objects.create(team=other, type=MileageType.ADMIN_GRANT,
+                                      amount=50, reason="c", processed_by="root")
+        self.auth("root")
+        res = self.client.get(f"/api/v1/admin/mileage_history?team_id={self.team.team_id}")
+        self.assertEqual(res.data["data"]["total_count"], 1)
+
+    def test_mileage_history_invalid_type(self):
+        self.auth("root")
+        res = self.client.get("/api/v1/admin/mileage_history?type=NOPE")
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data["code"], "INVALID_REQUEST")
+
+    def test_mileage_history_invalid_team_id(self):
+        self.auth("root")
+        res = self.client.get("/api/v1/admin/mileage_history?team_id=not-a-uuid")
+        self.assertEqual(res.status_code, 400)
+
+    def test_mileage_history_participant_blocked(self):
+        self.auth("player")
+        res = self.client.get("/api/v1/admin/mileage_history")
+        self.assertEqual(res.status_code, 403)
 
 
 @override_settings(CACHES=LOCMEM)
