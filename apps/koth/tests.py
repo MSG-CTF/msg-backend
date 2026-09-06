@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from django.core.cache import cache
 from django.db import IntegrityError, transaction
+from django.forms import modelform_factory
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -96,6 +97,59 @@ class KothApiTests(TestCase):
                     club=self.club, title="Duplicate", status=KothChallengeStatus.SCHEDULED,
                     open_group=7, inbound_internal_token_hash=hash_token("duplicate-secret"),
                 )
+
+    def test_challenge_url_is_available_on_all_challenge_responses_and_can_be_cleared(self):
+        # The score endpoint is configured, but it must not be used as a public URL.
+        self.assertEqual(self.challenge.challenge_url, "")
+        for challenge_url in (
+            "",
+            "http://192.0.2.10:8080/",
+            "https://challenge.example/play?mode=koth",
+            "",
+        ):
+            with self.subTest(challenge_url=challenge_url):
+                self.challenge.challenge_url = challenge_url
+                self.challenge.save(update_fields=["challenge_url"])
+                self.client.credentials()
+                clubs = self.client.get("/api/v1/koth/clubs")
+                detail = self.client.get(f"/api/v1/koth/clubs/{self.club.club_id}")
+                self.auth()
+                progress = self.client.get("/api/v1/koth/me")
+                for response in (clubs, detail, progress):
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.data["code"], "SUCCESS")
+
+                club = next(
+                    row for row in clubs.data["data"]["clubs"]
+                    if row["club_id"] == str(self.club.club_id)
+                )
+                own_challenge = next(
+                    row for row in progress.data["data"]["challenges"]
+                    if row["koth_challenge_id"] == str(self.challenge.pk)
+                )
+                for row in (club["challenges"][0], detail.data["data"]["challenges"][0], own_challenge):
+                    self.assertEqual(row["challenge_url"], challenge_url or None)
+                    for internal_field in ("score_api_url", "score_api_token_env", "inbound_internal_token_hash"):
+                        self.assertNotIn(internal_field, row)
+
+                for row in progress.data["data"]["challenges"]:
+                    if row["koth_challenge_id"] != str(self.challenge.pk):
+                        self.assertIsNone(row["challenge_url"])
+
+    def test_challenge_url_form_accepts_blank_or_http_urls(self):
+        form_class = modelform_factory(KothChallenge, fields=["challenge_url"])
+        for challenge_url in ("", "http://192.0.2.10:8080/", "https://challenge.example/play"):
+            with self.subTest(challenge_url=challenge_url):
+                form = form_class(data={"challenge_url": challenge_url}, instance=self.challenge)
+                self.assertTrue(form.is_valid(), form.errors)
+                form.save()
+                self.challenge.refresh_from_db()
+                self.assertEqual(self.challenge.challenge_url, challenge_url)
+        for challenge_url in ("ftp://challenge.example/", "javascript:alert(1)", "/play"):
+            with self.subTest(challenge_url=challenge_url):
+                form = form_class(data={"challenge_url": challenge_url}, instance=self.challenge)
+                self.assertFalse(form.is_valid())
+                self.assertIn("challenge_url", form.errors)
 
     def test_me_reports_all_challenges_and_team_token_is_shared(self):
         solved_at = timezone.now()

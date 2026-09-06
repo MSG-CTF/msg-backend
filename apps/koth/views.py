@@ -30,6 +30,7 @@ def _challenge_payload(challenge, include_times=True):
     data = {
         "koth_challenge_id": str(challenge.koth_challenge_id),
         "title": challenge.title,
+        "challenge_url": challenge.challenge_url or None,
         "status": challenge.status,
         "open_group": challenge.open_group,
         "current_owner_team_id": str(leader.team_id) if leader and leader.earned_score > 0 else None,
@@ -103,6 +104,7 @@ def me(request):
             "koth_challenge_id": str(challenge.koth_challenge_id),
             "club_id": str(challenge.club_id),
             "title": challenge.title,
+            "challenge_url": challenge.challenge_url or None,
             "status": challenge.status,
             "earned_score": num(score),
             "rank": rank,
