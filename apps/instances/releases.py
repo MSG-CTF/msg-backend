@@ -15,6 +15,8 @@ IMAGE_REF_PATTERN = re.compile(
 
 SUPPORTED_SCHEMA_VERSION = "2.0"
 MAX_CONTAINERS = 8
+MAX_PORTS_PER_CONTAINER = 8
+MAX_EXPOSED_PORTS = 8
 MAX_NOTE_LENGTH = 500
 
 
@@ -243,7 +245,7 @@ def public_container(release):
 
 
 def is_deployable(release):
-    # Scheduler 계약에 맞게 공개 포트가 하나뿐인 릴리스만 활성화한다
+    # 포트별 공개 설정을 Scheduler의 컨테이너 단위 expose로 손실 없이 변환한다
     if release.registry_revision <= 0:
         return False
 
@@ -251,17 +253,16 @@ def is_deployable(release):
     if not 1 <= len(containers) <= 8:
         return False
 
-    public_container_count = 0
+    exposed_port_count = 0
     for container in containers:
-        public_ports = [entry["port"] for entry in container.ports if entry.get("public")]
-        if len(public_ports) > 1:
+        if not 1 <= len(container.ports) <= MAX_PORTS_PER_CONTAINER:
             return False
-        if public_ports:
-            if len(container.ports) != 1:
-                return False
-            public_container_count += 1
+        public_ports = [entry["port"] for entry in container.ports if entry.get("public")]
+        if public_ports and len(public_ports) != len(container.ports):
+            return False
+        exposed_port_count += len(public_ports)
 
-    return public_container_count == 1
+    return 1 <= exposed_port_count <= MAX_EXPOSED_PORTS
 
 
 def serialize_release(release, current_release_id=None):

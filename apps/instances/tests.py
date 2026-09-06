@@ -23,6 +23,21 @@ from apps.instances.models import (
 
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 
+ENDPOINTS = [
+    {
+        "container_name": "web",
+        "port": 8080,
+        "protocol": "HTTP",
+        "service_url": "https://web.instance.example",
+    },
+    {
+        "container_name": "pwn",
+        "port": 31337,
+        "protocol": "TCP",
+        "service_url": "tcp://pwn.instance.example:31337",
+    },
+]
+
 
 @override_settings(CACHES=LOCMEM, SCHEDULER_API_TOKEN="test-scheduler-token")
 class InstanceLockTests(TestCase):
@@ -136,6 +151,84 @@ class InstanceLockTests(TestCase):
         self.assertTrue(InstanceLock.objects.filter(user=self.user).exists())
 
     @patch("apps.instances.views.call_scheduler_create")
+    def test_instance_create_stores_and_returns_endpoints(self, call_scheduler_create):
+        instance_id = uuid.uuid4()
+        call_scheduler_create.return_value = {
+            "instance_id": str(instance_id),
+            "team_id": str(self.team.team_id),
+            "user_id": str(self.user.user_id),
+            "challenge_id": str(self.challenge.challenge_id),
+            "status": "RUNNING",
+            "endpoints": ENDPOINTS,
+            "expires_at": (timezone.now() + datetime.timedelta(minutes=120)).isoformat(),
+            "hard_expires_at": (timezone.now() + datetime.timedelta(minutes=180)).isoformat(),
+            "replaced_instance_id": None,
+        }
+
+        res = self.client.post(
+            "/api/v1/instances",
+            {"challenge_id": str(self.challenge.challenge_id)},
+            format="json",
+        )
+
+        self.assertEqual(res.status_code, 202)
+        self.assertEqual(res.data["data"]["host"], ENDPOINTS[0]["service_url"])
+        self.assertEqual(res.data["data"]["endpoints"], ENDPOINTS)
+        instance = Instance.objects.get(instance_id=instance_id)
+        self.assertEqual(instance.host, ENDPOINTS[0]["service_url"])
+        self.assertEqual(instance.endpoints, ENDPOINTS)
+
+    @patch("apps.instances.services.call_scheduler_detail")
+    def test_detail_sync_stores_endpoints(self, call_scheduler_detail):
+        instance = Instance.objects.create(
+            user=self.user,
+            team=self.team,
+            challenge=self.challenge,
+            status=InstanceStatus.REQUESTED,
+            release=self.release,
+        )
+        call_scheduler_detail.return_value = {
+            "instance_id": str(instance.instance_id),
+            "status": "RUNNING",
+            "service_url": ENDPOINTS[0]["service_url"],
+            "endpoints": ENDPOINTS,
+        }
+
+        from apps.instances.services import sync_instance_from_scheduler
+
+        sync_instance_from_scheduler(instance, "Bearer test-scheduler-token")
+
+        instance.refresh_from_db()
+        self.assertEqual(instance.host, ENDPOINTS[0]["service_url"])
+        self.assertEqual(instance.endpoints, ENDPOINTS)
+
+    @patch("apps.instances.views.call_scheduler_active")
+    def test_active_lookup_returns_endpoints(self, call_scheduler_active):
+        instance = Instance.objects.create(
+            user=self.user,
+            team=self.team,
+            challenge=self.challenge,
+            status=InstanceStatus.REQUESTED,
+            release=self.release,
+        )
+        call_scheduler_active.return_value = {
+            "instance_id": str(instance.instance_id),
+            "team_id": str(self.team.team_id),
+            "challenge_id": str(self.challenge.challenge_id),
+            "status": "RUNNING",
+            "service_url": ENDPOINTS[0]["service_url"],
+            "endpoints": ENDPOINTS,
+        }
+
+        res = self.client.get("/api/v1/teams/me/instance")
+
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data["data"]["host"], ENDPOINTS[0]["service_url"])
+        self.assertEqual(res.data["data"]["endpoints"], ENDPOINTS)
+        instance.refresh_from_db()
+        self.assertEqual(instance.endpoints, ENDPOINTS)
+
+    @patch("apps.instances.views.call_scheduler_create")
     def test_instance_create_rejects_unpublished_challenge(self, call_scheduler_create):
         challenge = self.create_challenge("Private Web", is_published=False)
         TeamChallengeAccess.objects.create(
@@ -232,6 +325,7 @@ class InstanceLockTests(TestCase):
             challenge=self.challenge,
             status=InstanceStatus.RUNNING,
             release=self.release,
+            endpoints=ENDPOINTS,
         )
         instance_id = uuid.uuid4()
         call_scheduler_reset.return_value = {
@@ -252,7 +346,11 @@ class InstanceLockTests(TestCase):
         )
 
         self.assertEqual(res.status_code, 202)
+        self.assertEqual(res.data["data"]["endpoints"], [])
+        new_instance = Instance.objects.get(instance_id=instance_id)
+        self.assertEqual(new_instance.endpoints, [])
         old_instance.refresh_from_db()
+        self.assertEqual(old_instance.endpoints, ENDPOINTS)
         self.assertEqual(old_instance.status, InstanceStatus.STOPPING)
         self.assertEqual(
             old_instance.delete_reason,

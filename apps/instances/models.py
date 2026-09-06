@@ -71,6 +71,7 @@ class Instance(models.Model):
     )
     host = models.CharField(max_length=255, null=True, blank=True)
     ports = models.JSONField(default=list, blank=True)
+    endpoints = models.JSONField(default=list, blank=True)
     expires_at = models.DateTimeField(null=True, blank=True)
     hard_expires_at = models.DateTimeField(null=True, blank=True)
     extend_count = models.IntegerField(default=0)

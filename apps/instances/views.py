@@ -95,14 +95,17 @@ class InstanceCreateView(APIView):
                     .first()
                 )
 
-            instance = create_instance_from_scheduler(
-                scheduler_data,
-                user=user,
-                team=team,
-                challenge=challenge,
-                replaced_instance=replaced_instance,
-                release=release,
-            )
+            try:
+                instance = create_instance_from_scheduler(
+                    scheduler_data,
+                    user=user,
+                    team=team,
+                    challenge=challenge,
+                    replaced_instance=replaced_instance,
+                    release=release,
+                )
+            except SchedulerError as error:
+                return fail(error.code, error.message, error.status_code)
             mark_instance_replaced(replaced_instance)
 
         message = "인스턴스 생성 요청이 접수되었습니다."
@@ -233,7 +236,10 @@ class InstanceExtendView(APIView):
             except SchedulerError as error:
                 return fail(error.code, error.message, error.status_code)
 
-            update_instance_from_scheduler(instance, scheduler_data)
+            try:
+                update_instance_from_scheduler(instance, scheduler_data)
+            except SchedulerError as error:
+                return fail(error.code, error.message, error.status_code)
             instance.extend_count += 1
             instance.save(update_fields=["extend_count", "updated_at"])
             response_data = serialize_instance(instance)
@@ -282,7 +288,10 @@ class MyInstanceView(APIView):
             except SchedulerError as error:
                 return fail(error.code, error.message, error.status_code)
         else:
-            update_instance_from_scheduler(instance, scheduler_data)
+            try:
+                update_instance_from_scheduler(instance, scheduler_data)
+            except SchedulerError as error:
+                return fail(error.code, error.message, error.status_code)
 
         return ok(
             serialize_instance(instance, include_title=True),

@@ -376,6 +376,76 @@ class ReleaseActivateTests(ReleaseTestBase):
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.data["data"]["release_id"], release_id)
 
+    def test_activate_accepts_multiple_exposed_containers_and_ports(self):
+        self.auth("root")
+        registered = self.register(
+            containers=[
+                {
+                    "name": "web",
+                    "image": f"ghcr.io/msg-ctf/challenges/web-basic/web@sha256:{DIGEST_A}",
+                    "ports": [
+                        {"port": 8080, "public": True},
+                        {"port": 8443, "public": True},
+                    ],
+                },
+                {
+                    "name": "pwn",
+                    "image": f"ghcr.io/msg-ctf/challenges/web-basic/pwn@sha256:{DIGEST_B}",
+                    "ports": [{"port": 31337, "public": True}],
+                },
+            ]
+        )
+        self.assertEqual(registered.status_code, 200)
+        self.assertTrue(registered.data["data"]["is_deployable"])
+
+        res = self.activate(registered.data["data"]["release_id"])
+
+        self.assertEqual(res.status_code, 200)
+
+    def test_activate_rejects_mixed_public_and_private_ports(self):
+        self.auth("root")
+        registered = self.register(
+            containers=[
+                {
+                    "name": "web",
+                    "image": f"ghcr.io/msg-ctf/challenges/web-basic/web@sha256:{DIGEST_A}",
+                    "ports": [
+                        {"port": 8080, "public": True},
+                        {"port": 9090, "public": False},
+                    ],
+                }
+            ]
+        )
+        self.assertEqual(registered.status_code, 200)
+        self.assertFalse(registered.data["data"]["is_deployable"])
+
+        res = self.activate(registered.data["data"]["release_id"])
+
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data["code"], "RELEASE_NOT_DEPLOYABLE")
+
+    def test_activate_rejects_more_than_eight_public_ports(self):
+        self.auth("root")
+        registered = self.register(
+            containers=[
+                {
+                    "name": "web",
+                    "image": f"ghcr.io/msg-ctf/challenges/web-basic/web@sha256:{DIGEST_A}",
+                    "ports": [
+                        {"port": port, "public": True}
+                        for port in range(8001, 8010)
+                    ],
+                }
+            ]
+        )
+        self.assertEqual(registered.status_code, 200)
+        self.assertFalse(registered.data["data"]["is_deployable"])
+
+        res = self.activate(registered.data["data"]["release_id"])
+
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data["code"], "RELEASE_NOT_DEPLOYABLE")
+
     def test_activate_unknown_release(self):
         self.auth("root")
         res = self.activate(uuid.uuid4())
@@ -545,12 +615,20 @@ class ReleaseInstanceCreateTests(ReleaseTestBase):
                 {
                     "name": "web",
                     "image": f"ghcr.io/msg-ctf/challenges/web-basic/web@sha256:{DIGEST_A}",
-                    "ports": [{"port": 8080, "public": True}],
+                    "ports": [
+                        {"port": 8080, "public": True},
+                        {"port": 8443, "public": True},
+                    ],
                 },
                 {
                     "name": "db",
                     "image": f"ghcr.io/msg-ctf/challenges/web-basic/db@sha256:{DIGEST_B}",
                     "ports": [{"port": 5432, "public": False}],
+                },
+                {
+                    "name": "pwn",
+                    "image": f"ghcr.io/msg-ctf/challenges/web-basic/pwn@sha256:{DIGEST_C}",
+                    "ports": [{"port": 31337, "public": True}],
                 },
             ],
         ).data["data"]["release_id"]
@@ -596,9 +674,15 @@ class ReleaseInstanceCreateTests(ReleaseTestBase):
                     "expose": False,
                 },
                 {
+                    "name": "pwn",
+                    "image": f"ghcr.io/msg-ctf/challenges/web-basic/pwn@sha256:{DIGEST_C}",
+                    "ports": [31337],
+                    "expose": True,
+                },
+                {
                     "name": "web",
                     "image": f"ghcr.io/msg-ctf/challenges/web-basic/web@sha256:{DIGEST_A}",
-                    "ports": [8080],
+                    "ports": [8080, 8443],
                     "expose": True,
                 },
             ],
@@ -642,6 +726,8 @@ class ReleaseInstanceCreateTests(ReleaseTestBase):
         )
 
         self.assertEqual(str(instance.release_id), release_id)
+        self.assertEqual(instance.host, "https://instance.example")
+        self.assertEqual(instance.endpoints, [])
 
     def test_create_from_scheduler_rejects_missing_registry_revision(self):
         self.auth("root")
