@@ -15,4 +15,5 @@ urlpatterns = [
     path("admin/instances", views.instance_list),
     path("admin/instances/<uuid:instance_id>", views.instance_force_delete),
     path("admin/instances/<uuid:instance_id>/reset", views.instance_force_reset),
+    path("admin/challenges/<uuid:challenge_id>/visibility", views.challenge_visibility),
 ]

@@ -244,6 +244,70 @@ class AdminTests(TestCase):
         res = self.client.get(f"/api/v1/admin/teams/{self.team.team_id}")
         self.assertIsNone(res.data["data"]["board_position_states"])
 
+    def test_challenge_visibility_toggle(self):
+        self.auth("root")
+        ch = Challenge.objects.create(title="웹1", category="WEB", difficulty="EASY",
+                                      score=100, flag_hash="x", is_published=True)
+        res = self.client.patch(
+            f"/api/v1/admin/challenges/{ch.challenge_id}/visibility",
+            {"is_published": False, "reason": "서버 오류로 비공개"}, format="json",
+        )
+        self.assertEqual(res.status_code, 200)
+        d = res.data["data"]
+        self.assertTrue(d["previous_is_published"])
+        self.assertFalse(d["is_published"])
+        self.assertEqual(d["changed_by"], "root")
+        self.assertEqual(
+            set(d),
+            {"challenge_id", "title", "previous_is_published", "is_published",
+             "affected_team_count", "changed_at", "changed_by"},
+        )
+        ch.refresh_from_db()
+        self.assertFalse(ch.is_published)
+
+    def test_challenge_visibility_affected_team_count(self):
+        from apps.challenge.models import OpenedChallenge
+        self.auth("root")
+        ch = Challenge.objects.create(title="웹2", category="WEB", difficulty="EASY",
+                                      score=100, flag_hash="x", is_published=True)
+        OpenedChallenge.objects.create(
+            team=self.team, challenge=ch, cell_index=2,
+            solve_deadline_at=timezone.now() + timedelta(minutes=15),
+        )
+        res = self.client.patch(
+            f"/api/v1/admin/challenges/{ch.challenge_id}/visibility",
+            {"is_published": False, "reason": "x"}, format="json",
+        )
+        self.assertEqual(res.data["data"]["affected_team_count"], 1)
+
+    def test_challenge_visibility_invalid_body(self):
+        self.auth("root")
+        ch = Challenge.objects.create(title="웹3", category="WEB", difficulty="EASY",
+                                      score=100, flag_hash="x", is_published=True)
+        url = f"/api/v1/admin/challenges/{ch.challenge_id}/visibility"
+        for body in [{}, {"is_published": True}, {"reason": "x"},
+                     {"is_published": "yes", "reason": "x"}]:
+            self.assertEqual(self.client.patch(url, body, format="json").status_code, 400)
+
+    def test_challenge_visibility_not_found(self):
+        self.auth("root")
+        res = self.client.patch(
+            f"/api/v1/admin/challenges/{uuid.uuid4()}/visibility",
+            {"is_published": False, "reason": "x"}, format="json",
+        )
+        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.data["code"], "CHALLENGE_NOT_FOUND")
+
+    def test_challenge_visibility_participant_blocked(self):
+        self.auth("player")
+        ch = Challenge.objects.create(title="웹4", category="WEB", difficulty="EASY",
+                                      score=100, flag_hash="x", is_published=True)
+        res = self.client.patch(
+            f"/api/v1/admin/challenges/{ch.challenge_id}/visibility",
+            {"is_published": False, "reason": "x"}, format="json",
+        )
+        self.assertEqual(res.status_code, 403)
+
 
 @override_settings(CACHES=LOCMEM)
 class AdminDashboardTests(TestCase):
