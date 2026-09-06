@@ -458,6 +458,65 @@ class AdminTests(TestCase):
         )
         self.assertEqual(res.status_code, 403)
 
+    def test_registered_password_passes_login(self):
+        self.auth("root")
+        pw = "  spaced pw 12345  "
+        create = self.client.post(
+            "/api/v1/admin/accounts",
+            {"login_id": "spacey", "password": pw, "nickname": "공백"},
+            format="json",
+        )
+        self.assertEqual(create.status_code, 200)
+
+        login = APIClient().post(
+            "/api/v1/auth/login",
+            {"login_id": "spacey", "password": pw},
+            format="json",
+        )
+        self.assertEqual(login.status_code, 200)
+        self.assertEqual(login.data["code"], "SUCCESS")
+
+    def test_password_max_length_unified(self):
+        self.auth("root")
+        pw128 = "a" * 128
+        self.assertEqual(
+            self.client.post(
+                "/api/v1/admin/accounts",
+                {"login_id": "len128", "password": pw128, "nickname": "긴비번"},
+                format="json",
+            ).status_code,
+            200,
+        )
+        login = APIClient().post(
+            "/api/v1/auth/login",
+            {"login_id": "len128", "password": pw128},
+            format="json",
+        )
+        self.assertEqual(login.status_code, 200)
+
+        too_long = self.client.post(
+            "/api/v1/admin/accounts",
+            {"login_id": "len129", "password": "a" * 129, "nickname": "너무긴비번"},
+            format="json",
+        )
+        self.assertEqual(too_long.status_code, 400)
+
+    def test_account_create_leader_conflict_not_login_id(self):
+        self.auth("root")
+        User.objects.create_user(
+            login_id="leader1", password="pw12345678", nickname="팀장1",
+            team=self.team, is_leader=True,
+        )
+        res = self.client.post(
+            "/api/v1/admin/accounts",
+            {"login_id": "leader2", "password": "pw12345678", "nickname": "팀장2",
+             "team_id": str(self.team.team_id), "is_leader": True},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.data["code"], "TEAM_ALREADY_HAS_LEADER")
+        self.assertFalse(User.objects.filter(login_id="leader2").exists())
+
 @override_settings(CACHES=LOCMEM)
 class AdminDashboardTests(TestCase):
     def setUp(self):

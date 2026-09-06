@@ -37,6 +37,7 @@ from .exceptions import (
     PaymentTokenExpired,
     PaymentTokenInvalid,
     TeamNotFound,
+    TeamAlreadyHasLeader,
 )
 
 from apps.instances.models import (
@@ -154,6 +155,10 @@ def account_create(request):
     if not isinstance(password, str) or len(password) < 8:
         raise InvalidRequest("password 는 8자 이상이어야 합니다")
 
+    password = request.data.get("password")
+    if not isinstance(password, str) or not (8 <= len(password) <= 128):
+        raise InvalidRequest("password 는 8자 이상 128자 이하여야 합니다")
+
     nickname = request.data.get("nickname")
     if not isinstance(nickname, str) or not nickname.strip():
         raise InvalidRequest("필수 항목이 누락되었습니다: nickname")
@@ -180,6 +185,9 @@ def account_create(request):
     if User.objects.filter(login_id=login_id).exists():
         raise LoginIdTaken()
 
+    if is_leader and team is not None and User.objects.filter(team=team, is_leader=True).exists():
+        raise TeamAlreadyHasLeader()
+
     try:
         with transaction.atomic():
             user = User.objects.create_user(
@@ -190,7 +198,9 @@ def account_create(request):
                 team=team,
                 is_leader=is_leader,
             )
-    except IntegrityError:
+    except IntegrityError as exc:
+        if "uq_users_one_leader_per_team" in str(exc):
+            raise TeamAlreadyHasLeader()
         raise LoginIdTaken()
 
     return ok(
