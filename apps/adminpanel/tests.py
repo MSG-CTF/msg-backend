@@ -244,6 +244,82 @@ class AdminTests(TestCase):
         res = self.client.get(f"/api/v1/admin/teams/{self.team.team_id}")
         self.assertIsNone(res.data["data"]["board_position_states"])
 
+    def test_board_dice_grant(self):
+        from apps.board.models import Cell, TeamBoardState
+        self.auth("root")
+        cell, _ = Cell.objects.get_or_create(cell_index=1, defaults={"type": "START", "name": "출발"})
+        state = TeamBoardState.objects.create(team=self.team, position=cell, dice_rolls_left=0)
+        res = self.client.post(
+            f"/api/v1/admin/teams/{self.team.team_id}/board/dice",
+            {"amount": 2, "reason": "주사위 소실 보정"}, format="json",
+        )
+        self.assertEqual(res.status_code, 200)
+        d = res.data["data"]
+        self.assertEqual(d["previous_dice_rolls_left"], 0)
+        self.assertEqual(d["dice_rolls_left"], 2)
+        self.assertEqual(d["adjusted_by"], "root")
+        state.refresh_from_db()
+        self.assertEqual(state.dice_rolls_left, 2)
+
+    def test_board_dice_deduct(self):
+        from apps.board.models import Cell, TeamBoardState
+        self.auth("root")
+        cell, _ = Cell.objects.get_or_create(cell_index=1, defaults={"type": "START", "name": "출발"})
+        TeamBoardState.objects.create(team=self.team, position=cell, dice_rolls_left=3)
+        res = self.client.post(
+            f"/api/v1/admin/teams/{self.team.team_id}/board/dice",
+            {"amount": -2, "reason": "회수"}, format="json",
+        )
+        self.assertEqual(res.data["data"]["dice_rolls_left"], 1)
+
+    def test_board_dice_insufficient(self):
+        from apps.board.models import Cell, TeamBoardState
+        self.auth("root")
+        cell, _ = Cell.objects.get_or_create(cell_index=1, defaults={"type": "START", "name": "출발"})
+        TeamBoardState.objects.create(team=self.team, position=cell, dice_rolls_left=1)
+        res = self.client.post(
+            f"/api/v1/admin/teams/{self.team.team_id}/board/dice",
+            {"amount": -5, "reason": "x"}, format="json",
+        )
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data["code"], "INSUFFICIENT_DICE")
+        self.assertEqual(res.data["data"]["current_dice_rolls_left"], 1)
+        self.assertEqual(res.data["data"]["requested_amount"], 5)
+
+    def test_board_dice_zero_rejected(self):
+        self.auth("root")
+        res = self.client.post(
+            f"/api/v1/admin/teams/{self.team.team_id}/board/dice",
+            {"amount": 0, "reason": "x"}, format="json",
+        )
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data["code"], "INVALID_AMOUNT")
+
+    def test_board_dice_out_of_range(self):
+        self.auth("root")
+        res = self.client.post(
+            f"/api/v1/admin/teams/{self.team.team_id}/board/dice",
+            {"amount": 21, "reason": "x"}, format="json",
+        )
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data["code"], "INVALID_REQUEST")
+
+    def test_board_dice_team_not_found(self):
+        self.auth("root")
+        res = self.client.post(
+            f"/api/v1/admin/teams/{uuid.uuid4()}/board/dice",
+            {"amount": 1, "reason": "x"}, format="json",
+        )
+        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.data["code"], "TEAM_NOT_FOUND")
+
+    def test_board_dice_participant_blocked(self):
+        self.auth("player")
+        res = self.client.post(
+            f"/api/v1/admin/teams/{self.team.team_id}/board/dice",
+            {"amount": 1, "reason": "x"}, format="json",
+        )
+        self.assertEqual(res.status_code, 403)
 
 @override_settings(CACHES=LOCMEM)
 class AdminDashboardTests(TestCase):
