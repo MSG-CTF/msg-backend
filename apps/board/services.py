@@ -515,8 +515,14 @@ def spin_roulette(team):
     state = get_or_create_board_state(team)
 
     with transaction.atomic():
-        locked_team = Team.objects.select_for_update().get(pk=team.pk)
-        state = TeamBoardState.objects.select_for_update().select_related("position").get(team=team)
+        # Match flag submissions and other board actions: board state, then team.
+        # The shared cell is read-only and must not be locked with the state.
+        state = (
+            TeamBoardState.objects.select_for_update(of=("self",))
+            .select_related("position")
+            .get(team=team)
+        )
+        locked_team = Team.objects.select_for_update(no_key=True).get(pk=team.pk)
         cell = state.position
         if cell.type != Cell.CellType.ROULETTE:
             raise NotRouletteCell()

@@ -11,11 +11,21 @@ def migrate_opened_challenges(apps, schema_editor):
     database = schema_editor.connection.alias
 
     for opened in OpenedChallenge.objects.using(database).order_by("opened_at").iterator():
+        solve = Solve.objects.using(database).filter(
+            team_id=opened.team_id,
+            challenge_id=opened.challenge_id,
+        ).first()
         existing_access = TeamChallengeAccess.objects.using(database).filter(
             team_id=opened.team_id,
             challenge_id=opened.challenge_id,
         ).first()
         if existing_access is not None:
+            # Keep the canonical board access and its opening time, but carry
+            # over completed solves before removing the legacy access table.
+            if solve is not None:
+                TeamChallengeAccess.objects.using(database).filter(pk=existing_access.pk).update(
+                    status="CLEARED", cleared_at=solve.solved_at,
+                )
             continue
 
         if not Cell.objects.using(database).filter(pk=opened.cell_index).exists():
@@ -35,10 +45,6 @@ def migrate_opened_challenges(apps, schema_editor):
                 f"for board cell {opened.cell_index}."
             )
 
-        solve = Solve.objects.using(database).filter(
-            team_id=opened.team_id,
-            challenge_id=opened.challenge_id,
-        ).first()
         access = TeamChallengeAccess.objects.using(database).create(
             team_id=opened.team_id,
             challenge_id=opened.challenge_id,

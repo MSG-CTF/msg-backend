@@ -1,6 +1,6 @@
 import datetime
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier
+from threading import Barrier, Event
 from unittest import skipUnless
 from decimal import Decimal
 from unittest.mock import patch
@@ -376,6 +376,102 @@ class ChallengeSubmitTests(TestCase):
 @skipUnless(connection.vendor == "postgresql", "Requires PostgreSQL row locking")
 @override_settings(CACHES=LOCMEM, SECURE_SSL_REDIRECT=False)
 class ConcurrentChallengeSubmitTests(TransactionTestCase):
+    def test_submit_and_roulette_finish_when_submit_locks_board_first(self):
+        self._assert_submit_and_roulette_finish("submit")
+
+    def test_submit_and_roulette_finish_when_roulette_locks_board_first(self):
+        self._assert_submit_and_roulette_finish("roulette")
+
+    def _assert_submit_and_roulette_finish(self, first_action):
+        team = Team.objects.create(team_name="submit-and-roulette")
+        user = User.objects.create_user(
+            login_id="roulette-leader", nickname="roulette-leader", team=team,
+            is_leader=True,
+        )
+        challenge = Challenge.objects.create(
+            title="previous-cell", category=Challenge.CategoryType.WEB,
+            difficulty=Challenge.DifficultyType.EASY, score=1000,
+            initial_score=1000, minimum_score=100, decay=20, current_score=1000,
+            flag_hash=hash_flag("MSG{concurrent}"), is_published=True,
+        )
+        challenge_cell = Cell.objects.create(cell_index=1, type=Cell.CellType.CHALLENGE, name="previous")
+        roulette_cell = Cell.objects.create(cell_index=2, type=Cell.CellType.ROULETTE, name="roulette")
+        access = TeamChallengeAccess.objects.create(team=team, challenge=challenge, source_cell=challenge_cell)
+        state = TeamBoardState.objects.create(team=team, position=roulette_cell, dice_rolls_left=1)
+        first_locked = Event()
+        second_waiting = Event()
+
+        def request_action(action):
+            close_old_connections()
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute("SET lock_timeout = '5s'")
+                    cursor.execute("SET statement_timeout = '10s'")
+                client = APIClient()
+                client.force_authenticate(user=User.objects.get(pk=user.pk))
+                synchronized = False
+
+                def synchronize(execute, sql, params, many, context):
+                    nonlocal synchronized
+                    is_board_lock = 'FROM "team_board_states"' in sql and 'FOR UPDATE' in sql
+                    if not is_board_lock or synchronized:
+                        return execute(sql, params, many, context)
+                    synchronized = True
+                    if action == first_action:
+                        result = execute(sql, params, many, context)
+                        first_locked.set()
+                        if not second_waiting.wait(timeout=10):
+                            raise AssertionError("Second request never attempted the board lock")
+                        return result
+                    second_waiting.set()
+                    return execute(sql, params, many, context)
+
+                if action != first_action and not first_locked.wait(timeout=10):
+                    raise AssertionError("First request never acquired the board lock")
+                with connection.execute_wrapper(synchronize):
+                    if action == "submit":
+                        response = client.post(
+                            f"/api/v1/challenges/{challenge.pk}/submit",
+                            {"flag": "MSG{concurrent}"}, format="json",
+                        )
+                    else:
+                        response = client.post(
+                            "/api/v1/board/roulette/spin", {}, format="json",
+                            HTTP_IDEMPOTENCY_KEY=f"concurrent-roulette-{first_action}",
+                        )
+                return action, response.status_code, response.data
+            finally:
+                connections.close_all()
+
+        with patch("apps.board.services.random.choice", return_value=50):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(request_action, ["submit", "roulette"]))
+        bodies = {}
+        for action, status, body in results:
+            self.assertEqual(status, 200, body)
+            bodies[action] = body["data"]
+        self.assertFalse(bodies["submit"]["is_extra_dice_granted"])
+        self.assertEqual(bodies["submit"]["team_score"], 998)
+        self.assertEqual(bodies["roulette"]["mileage_gained"], 50)
+        self.assertEqual(bodies["submit"]["mileage"], 30 if first_action == "submit" else 80)
+        self.assertEqual(bodies["roulette"]["total_mileage"], 80 if first_action == "submit" else 50)
+        team.refresh_from_db()
+        state.refresh_from_db()
+        access.refresh_from_db()
+        self.assertEqual(team.mileage, 80)
+        self.assertEqual(team.team_score, Decimal("998"))
+        self.assertEqual(state.position_id, roulette_cell.pk)
+        self.assertEqual(state.dice_rolls_left, 1)
+        self.assertEqual(access.status, TeamChallengeAccess.Status.CLEARED)
+        self.assertIsNotNone(access.cleared_at)
+        solve = Solve.objects.get(team=team, challenge=challenge)
+        self.assertFalse(solve.is_extra_dice_granted)
+        self.assertEqual(solve.earned_mileage, 30)
+        self.assertCountEqual(
+            MileageHistory.objects.filter(team=team).values_list("type", "amount"),
+            [(MileageType.CHALLENGE_SOLVE, 30), (MileageType.ROULETTE, 50)],
+        )
+
     def test_cross_team_solves_on_different_challenges_finish_with_consistent_scores(self):
         teams = [Team.objects.create(team_name=f"concurrent-{i}") for i in range(3)]
         users = [
