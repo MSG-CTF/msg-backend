@@ -1,13 +1,15 @@
+import threading
 import uuid
 
 from datetime import timedelta
+from django.db import connections
 from django.utils import timezone
 from django.core.cache import cache
-from django.test import TestCase, override_settings
+from django.test import TestCase, TransactionTestCase, override_settings
 
 from rest_framework.test import APIClient
 
-from apps.common.jwt import hash_token
+from apps.common.jwt import ACCESS, decode_token, hash_token, issue_access_token
 from apps.accounts.models import (
     Role,
     Team,
@@ -44,6 +46,76 @@ class AdminTests(TestCase):
         res = self.client.post("/api/v1/auth/login",
                                {"login_id": login_id, "password": "pw1234"}, format="json")
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {res.data['data']['access_token']}")
+
+    def mileage(self, body, key=None):
+        return self.client.post(
+            f"/api/v1/admin/teams/{self.team.team_id}/mileage",
+            body, format="json",
+            HTTP_IDEMPOTENCY_KEY=key or uuid.uuid4().hex,
+        )
+
+    def test_mileage_idempotent_retry_applies_once(self):
+        self.auth("root")
+        k = "grant-1"
+        first = self.mileage({"amount": 100, "reason": "보상"}, key=k)
+        second = self.mileage({"amount": 100, "reason": "보상"}, key=k)
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.data["data"]["current_mileage"],
+                         first.data["data"]["current_mileage"])
+        self.team.refresh_from_db()
+        self.assertEqual(self.team.mileage, 100)
+        self.assertEqual(MileageHistory.objects.filter(team=self.team).count(), 1)
+
+    def test_mileage_same_key_different_body_conflict(self):
+        self.auth("root")
+        k = "grant-2"
+        self.mileage({"amount": 100, "reason": "보상"}, key=k)
+        res = self.mileage({"amount": 50, "reason": "보상"}, key=k)
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.data["code"], "IDEMPOTENCY_KEY_CONFLICT")
+        self.team.refresh_from_db()
+        self.assertEqual(self.team.mileage, 100)
+
+    def test_mileage_requires_idempotency_key(self):
+        self.auth("root")
+        res = self.client.post(
+            f"/api/v1/admin/teams/{self.team.team_id}/mileage",
+            {"amount": 100, "reason": "보상"}, format="json",
+        )
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data["code"], "IDEMPOTENCY_KEY_REQUIRED")
+
+    def test_mileage_key_too_long_rejected(self):
+        self.auth("root")
+        res = self.client.post(
+            f"/api/v1/admin/teams/{self.team.team_id}/mileage",
+            {"amount": 100, "reason": "보상"}, format="json",
+            HTTP_IDEMPOTENCY_KEY="x" * 201,
+        )
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data["code"], "INVALID_REQUEST")
+
+    def test_mileage_failed_request_still_binds_key(self):
+        from apps.accounts.models import Team
+        Team.objects.filter(pk=self.team.pk).update(mileage=20)
+        self.auth("root")
+        k = "deduct-fail-1"
+
+        first = self.mileage({"amount": -50, "reason": "회수"}, key=k)
+        self.assertEqual(first.status_code, 400)
+        self.assertEqual(first.data["code"], "INSUFFICIENT_MILEAGE")
+
+        replay = self.mileage({"amount": -50, "reason": "회수"}, key=k)
+        self.assertEqual(replay.status_code, 400)
+        self.assertEqual(replay.data["code"], "INSUFFICIENT_MILEAGE")
+
+        conflict = self.mileage({"amount": 10, "reason": "회수"}, key=k)
+        self.assertEqual(conflict.status_code, 409)
+        self.assertEqual(conflict.data["code"], "IDEMPOTENCY_KEY_CONFLICT")
+
+        self.team.refresh_from_db()
+        self.assertEqual(self.team.mileage, 20)
 
     def test_participant_blocked(self):
         self.auth("player")
@@ -101,7 +173,7 @@ class AdminTests(TestCase):
         url = f"/api/v1/admin/teams/{self.team.team_id}/mileage"
         before = self.team.mileage
 
-        res = self.client.post(url, {"amount": 50, "reason": "보상"}, format="json")
+        res = self.mileage({"amount": 50, "reason": "보상"})
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.data["data"]["previous_mileage"], before)
         self.assertEqual(res.data["data"]["current_mileage"], before + 50)
@@ -121,7 +193,7 @@ class AdminTests(TestCase):
         self.auth("root")
         url = f"/api/v1/admin/teams/{self.team.team_id}/mileage"
 
-        res = self.client.post(url, {"amount": -30, "reason": "회수"}, format="json")
+        res = self.mileage({"amount": -30, "reason": "회수"})
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.data["data"]["current_mileage"], 70)
 
@@ -138,9 +210,9 @@ class AdminTests(TestCase):
         self.auth("root")
         url = f"/api/v1/admin/teams/{self.team.team_id}/mileage"
 
-        self.client.post(url, {"amount": 100, "reason": "a"}, format="json")
-        self.client.post(url, {"amount": -30, "reason": "b"}, format="json")
-        self.client.post(url, {"amount": 50, "reason": "c"}, format="json")
+        self.mileage({"amount": 100, "reason": "a"})
+        self.mileage({"amount": -30, "reason": "b"})
+        self.mileage({"amount": 50, "reason": "c"})
 
         self.team.refresh_from_db()
         total = MileageHistory.objects.filter(team=self.team).aggregate(s=Sum("amount"))["s"]
@@ -161,7 +233,7 @@ class AdminTests(TestCase):
         self.auth("root")
         url = f"/api/v1/admin/teams/{self.team.team_id}/mileage"
 
-        res = self.client.post(url, {"amount": -50, "reason": "x"}, format="json")
+        res = self.mileage({"amount": -50, "reason": "x"})
         self.assertEqual(res.status_code, 400)
         self.assertEqual(res.data["code"], "INSUFFICIENT_MILEAGE")
         self.assertEqual(res.data["data"]["current_mileage"], 20)
@@ -187,6 +259,7 @@ class AdminTests(TestCase):
         res = self.client.post(
             "/api/v1/admin/teams/00000000-0000-0000-0000-000000000000/mileage",
             {"amount": 50, "reason": "x"}, format="json",
+            HTTP_IDEMPOTENCY_KEY=uuid.uuid4().hex,
         )
         self.assertEqual(res.data["code"], "TEAM_NOT_FOUND")
 
@@ -243,7 +316,235 @@ class AdminTests(TestCase):
         self.auth("root")
         res = self.client.get(f"/api/v1/admin/teams/{self.team.team_id}")
         self.assertIsNone(res.data["data"]["board_position_states"])
+    def test_mileage_history_lists_all(self):
+        self.auth("root")
+        MileageHistory.objects.create(team=self.team, type=MileageType.ADMIN_GRANT,
+                                      amount=100, reason="a", processed_by="root")
+        MileageHistory.objects.create(team=self.team, type=MileageType.PURCHASE,
+                                      amount=-30, reason="b", processed_by="root")
+        res = self.client.get("/api/v1/admin/mileage_history")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data["data"]["total_count"], 2)
+        row = res.data["data"]["history"][0]
+        self.assertEqual(
+            set(row),
+            {"history_id", "team_id", "team_name", "type", "amount",
+             "reason", "processed_by", "created_at"},
+        )
 
+    def test_mileage_history_filter_by_type(self):
+        self.auth("root")
+        MileageHistory.objects.create(team=self.team, type=MileageType.ADMIN_GRANT,
+                                      amount=100, reason="a", processed_by="root")
+        MileageHistory.objects.create(team=self.team, type=MileageType.PURCHASE,
+                                      amount=-30, reason="b", processed_by="root")
+        res = self.client.get("/api/v1/admin/mileage_history?type=PURCHASE")
+        self.assertEqual(res.data["data"]["total_count"], 1)
+        self.assertEqual(res.data["data"]["history"][0]["type"], "PURCHASE")
+
+    def test_mileage_history_filter_by_team(self):
+        other = Team.objects.create(team_name="다른팀")
+        MileageHistory.objects.create(team=self.team, type=MileageType.ADMIN_GRANT,
+                                      amount=100, reason="a", processed_by="root")
+        MileageHistory.objects.create(team=other, type=MileageType.ADMIN_GRANT,
+                                      amount=50, reason="c", processed_by="root")
+        self.auth("root")
+        res = self.client.get(f"/api/v1/admin/mileage_history?team_id={self.team.team_id}")
+        self.assertEqual(res.data["data"]["total_count"], 1)
+
+    def test_mileage_history_invalid_type(self):
+        self.auth("root")
+        res = self.client.get("/api/v1/admin/mileage_history?type=NOPE")
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data["code"], "INVALID_REQUEST")
+
+    def test_mileage_history_invalid_team_id(self):
+        self.auth("root")
+        res = self.client.get("/api/v1/admin/mileage_history?team_id=not-a-uuid")
+        self.assertEqual(res.status_code, 400)
+
+    def test_mileage_history_participant_blocked(self):
+        self.auth("player")
+        res = self.client.get("/api/v1/admin/mileage_history")
+        self.assertEqual(res.status_code, 403)
+
+    def test_account_create_success(self):
+        self.auth("root")
+        res = self.client.post(
+            "/api/v1/admin/accounts",
+            {"login_id": "newbie", "password": "pw12345678", "nickname": "새사람",
+             "team_id": str(self.team.team_id), "is_leader": True},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 200)
+        d = res.data["data"]
+        self.assertEqual(
+            set(d),
+            {"user_id", "login_id", "nickname", "role", "is_leader",
+             "team_id", "team_name", "created_at"},
+        )
+        self.assertNotIn("password", d)
+        self.assertEqual(d["team_id"], str(self.team.team_id))
+        u = User.objects.get(login_id="newbie")
+        self.assertTrue(u.check_password("pw12345678"))
+
+    def test_account_create_without_team(self):
+        self.auth("root")
+        res = self.client.post(
+            "/api/v1/admin/accounts",
+            {"login_id": "solo", "password": "pw12345678", "nickname": "혼자"},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertIsNone(res.data["data"]["team_id"])
+        self.assertEqual(res.data["data"]["role"], "PARTICIPANT")
+
+    def test_account_create_admin_role(self):
+        self.auth("root")
+        res = self.client.post(
+            "/api/v1/admin/accounts",
+            {"login_id": "op2", "password": "pw12345678", "nickname": "운영2", "role": "ADMIN"},
+            format="json",
+        )
+        self.assertEqual(res.data["data"]["role"], "ADMIN")
+
+    def test_account_create_duplicate_login_id(self):
+        self.auth("root")
+        res = self.client.post(
+            "/api/v1/admin/accounts",
+            {"login_id": "player", "password": "pw12345678", "nickname": "중복"},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.data["code"], "LOGIN_ID_TAKEN")
+
+    def test_account_create_missing_or_bad_fields(self):
+        self.auth("root")
+        for body in [
+            {},
+            {"login_id": "a"},
+            {"login_id": "a", "password": "pw12345678"},
+            {"login_id": "a", "password": "short", "nickname": "x"},
+        ]:
+            self.assertEqual(
+                self.client.post("/api/v1/admin/accounts", body, format="json").status_code, 400)
+
+    def test_account_create_invalid_role(self):
+        self.auth("root")
+        res = self.client.post(
+            "/api/v1/admin/accounts",
+            {"login_id": "b", "password": "pw12345678", "nickname": "x", "role": "SUPER"},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 400)
+
+    def test_account_create_invalid_team(self):
+        self.auth("root")
+        res = self.client.post(
+            "/api/v1/admin/accounts",
+            {"login_id": "c", "password": "pw12345678", "nickname": "x",
+             "team_id": str(uuid.uuid4())},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.data["code"], "TEAM_NOT_FOUND")
+
+    def test_account_create_participant_blocked(self):
+        self.auth("player")
+        res = self.client.post(
+            "/api/v1/admin/accounts",
+            {"login_id": "d", "password": "pw12345678", "nickname": "x"},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 403)
+
+    def test_registered_password_passes_login(self):
+        self.auth("root")
+        pw = "  spaced pw 12345  "
+        create = self.client.post(
+            "/api/v1/admin/accounts",
+            {"login_id": "spacey", "password": pw, "nickname": "공백"},
+            format="json",
+        )
+        self.assertEqual(create.status_code, 200)
+
+        login = APIClient().post(
+            "/api/v1/auth/login",
+            {"login_id": "spacey", "password": pw},
+            format="json",
+        )
+        self.assertEqual(login.status_code, 200)
+        self.assertEqual(login.data["code"], "SUCCESS")
+
+    def test_password_max_length_unified(self):
+        self.auth("root")
+        pw128 = "a" * 128
+        self.assertEqual(
+            self.client.post(
+                "/api/v1/admin/accounts",
+                {"login_id": "len128", "password": pw128, "nickname": "긴비번"},
+                format="json",
+            ).status_code,
+            200,
+        )
+        login = APIClient().post(
+            "/api/v1/auth/login",
+            {"login_id": "len128", "password": pw128},
+            format="json",
+        )
+        self.assertEqual(login.status_code, 200)
+
+        too_long = self.client.post(
+            "/api/v1/admin/accounts",
+            {"login_id": "len129", "password": "a" * 129, "nickname": "너무긴비번"},
+            format="json",
+        )
+        self.assertEqual(too_long.status_code, 400)
+
+    def test_account_create_leader_conflict_not_login_id(self):
+        self.auth("root")
+        User.objects.create_user(
+            login_id="leader1", password="pw12345678", nickname="팀장1",
+            team=self.team, is_leader=True,
+        )
+        res = self.client.post(
+            "/api/v1/admin/accounts",
+            {"login_id": "leader2", "password": "pw12345678", "nickname": "팀장2",
+             "team_id": str(self.team.team_id), "is_leader": True},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.data["code"], "TEAM_ALREADY_HAS_LEADER")
+        self.assertFalse(User.objects.filter(login_id="leader2").exists())
+
+    def test_admin_account_is_never_leader(self):
+        self.auth("root")
+        rejected = self.client.post(
+            "/api/v1/admin/accounts",
+            {"login_id": "admin_leader", "password": "pw12345678", "nickname": "관리자팀장",
+             "team_id": str(self.team.team_id), "role": "ADMIN", "is_leader": True},
+            format="json",
+        )
+        self.assertEqual(rejected.status_code, 400)
+        self.assertFalse(User.objects.filter(login_id="admin_leader").exists())
+
+        created = self.client.post(
+            "/api/v1/admin/accounts",
+            {"login_id": "admin1", "password": "pw12345678", "nickname": "관리자", "role": "ADMIN"},
+            format="json",
+        )
+        self.assertEqual(created.status_code, 200)
+        self.assertFalse(created.data["data"]["is_leader"])
+
+        login = APIClient().post(
+            "/api/v1/auth/login",
+            {"login_id": "admin1", "password": "pw12345678"},
+            format="json",
+        )
+        self.assertEqual(login.status_code, 200)
+        self.assertFalse(login.data["data"]["is_leader"])
+        payload = decode_token(login.data["data"]["access_token"], ACCESS)
+        self.assertFalse(payload["is_leader"])
 
 @override_settings(CACHES=LOCMEM)
 class AdminDashboardTests(TestCase):
@@ -753,3 +1054,48 @@ class AdminInstanceTests(TestCase):
     def test_list_summary_optout(self):
         res = self.client.get("/api/v1/admin/instances?summary=false")
         self.assertIsNone(res.data["data"]["summary"])
+
+
+class MileageIdempotencyRaceTest(TransactionTestCase):
+    def setUp(self):
+        self.team = Team.objects.create(team_name="레이스팀", mileage=0)
+        self.admin = User.objects.create_user(
+            login_id="root2", password="pw1234", nickname="운영자2",
+            team=None, role=Role.ADMIN,
+        )
+
+    def test_concurrent_same_key_applies_once(self):
+        token = issue_access_token(self.admin)
+        url = f"/api/v1/admin/teams/{self.team.team_id}/mileage"
+        results = {}
+        errors = []
+        start = threading.Barrier(2)
+
+        def send(tag):
+            client = APIClient()
+            client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+            start.wait()
+            try:
+                res = client.post(
+                    url, {"amount": 100, "reason": "보상"},
+                    format="json", HTTP_IDEMPOTENCY_KEY="race-1",
+                )
+                results[tag] = res.status_code
+            except Exception as exc:  # noqa: BLE001
+                errors.append(repr(exc))
+            finally:
+                connections.close_all()
+
+        threads = [threading.Thread(target=send, args=(i,)) for i in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 2)
+        self.team.refresh_from_db()
+        self.assertEqual(self.team.mileage, 100)
+        self.assertEqual(MileageHistory.objects.filter(team=self.team).count(), 1)
+        # 한 요청이 반영하고 나머지는 저장된 응답을 재생하므로 둘 다 200.
+        self.assertEqual(sorted(results.values()), [200, 200])

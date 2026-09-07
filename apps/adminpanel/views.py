@@ -1,18 +1,19 @@
 import uuid
 
 from django.core.exceptions import ValidationError
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Count, Prefetch, Q, Sum
 from django.utils import timezone
 
 from rest_framework.decorators import api_view, permission_classes
 
-from apps.accounts.models import Team, User
+from apps.accounts.models import Role, Team, User
 from apps.common.exceptions import InvalidRequest, TeamBanned
 from apps.common.permissions import IsAdmin
 from apps.common.response import fail, ok
 from apps.common.utils import num
 from apps.common.jwt import hash_token
+from apps.common.idempotency import run_idempotent
 from apps.challenge.models import Challenge, Solve
 from apps.board.models import TeamBoardState
 from apps.timer.models import Contest
@@ -29,12 +30,14 @@ from .exceptions import (
     AlreadyRefunded,
     InsufficientMileage,
     InvalidAmount,
+    LoginIdTaken,
     NotBanned,
     NotRefundable,
     PaymentNotFound,
     PaymentTokenExpired,
     PaymentTokenInvalid,
     TeamNotFound,
+    TeamAlreadyHasLeader,
 )
 
 from apps.instances.models import (
@@ -63,6 +66,7 @@ DEFAULT_PAGE_SIZE = 20
 MAX_PAGE_SIZE = 100
 MAX_PAGE = 10_000
 MAX_BAN_REASON_LENGTH = 500
+MILEAGE_TYPES = set(MileageType.values)
 
 
 def _page_number(raw, default, maximum=None):
@@ -137,6 +141,80 @@ def _get_team_for_update(team_id):
     except (Team.DoesNotExist, ValidationError, ValueError):
         raise TeamNotFound()
 
+@api_view(["POST"])
+@permission_classes([IsAdmin])
+def account_create(request):
+    login_id = request.data.get("login_id")
+    if not isinstance(login_id, str) or not login_id.strip():
+        raise InvalidRequest("필수 항목이 누락되었습니다: login_id")
+    login_id = login_id.strip()
+    if len(login_id) > 50:
+        raise InvalidRequest("login_id 는 50자 이하여야 합니다")
+
+    password = request.data.get("password")
+    if not isinstance(password, str) or not (8 <= len(password) <= 128):
+        raise InvalidRequest("password 는 8자 이상 128자 이하여야 합니다")
+
+    nickname = request.data.get("nickname")
+    if not isinstance(nickname, str) or not nickname.strip():
+        raise InvalidRequest("필수 항목이 누락되었습니다: nickname")
+    nickname = nickname.strip()
+    if len(nickname) > 50:
+        raise InvalidRequest("nickname 은 50자 이하여야 합니다")
+
+    role = request.data.get("role", Role.PARTICIPANT)
+    if role not in Role.values:
+        raise InvalidRequest("role 이 올바르지 않습니다")
+
+    is_leader = request.data.get("is_leader", False)
+    if not isinstance(is_leader, bool):
+        raise InvalidRequest("is_leader 는 boolean 이어야 합니다")
+
+    if role == Role.ADMIN and is_leader:
+        raise InvalidRequest("관리자 계정은 팀장이 될 수 없습니다")
+
+    team = None
+    team_id = request.data.get("team_id")
+    if team_id:
+        try:
+            team = Team.objects.get(pk=team_id)
+        except (Team.DoesNotExist, ValidationError, ValueError):
+            raise TeamNotFound()
+
+    if User.objects.filter(login_id=login_id).exists():
+        raise LoginIdTaken()
+
+    if is_leader and team is not None and User.objects.filter(team=team, is_leader=True).exists():
+        raise TeamAlreadyHasLeader()
+
+    try:
+        with transaction.atomic():
+            user = User.objects.create_user(
+                login_id=login_id,
+                password=password,
+                nickname=nickname,
+                role=role,
+                team=team,
+                is_leader=is_leader,
+            )
+    except IntegrityError as exc:
+        if "uq_users_one_leader_per_team" in str(exc):
+            raise TeamAlreadyHasLeader()
+        raise LoginIdTaken()
+
+    return ok(
+        {
+            "user_id": str(user.user_id),
+            "login_id": user.login_id,
+            "nickname": user.nickname,
+            "role": user.role,
+            "is_leader": user.is_leader,
+            "team_id": str(user.team_id) if user.team_id else None,
+            "team_name": team.team_name if team else None,
+            "created_at": user.created_at,
+        },
+        message="계정이 등록되었습니다",
+    )
 
 @api_view(["POST", "DELETE"])
 @permission_classes([IsAdmin])
@@ -234,7 +312,7 @@ def team_mileage(request, team_id):
     if len(reason) > 500:
         raise InvalidRequest("reason 은 500자 이하여야 합니다")
 
-    with transaction.atomic():
+    def work():
         team = _get_team_for_update(team_id)
         previous = team.mileage
 
@@ -242,15 +320,13 @@ def team_mileage(request, team_id):
             raise InsufficientMileage(
                 data={
                     "current_mileage": previous,
-                    "requested_amount": -amount
+                    "requested_amount": -amount,
                 }
             )
 
         mtype = MileageType.ADMIN_GRANT if amount > 0 else MileageType.ADMIN_DEDUCT
         now = timezone.now().replace(microsecond=0)
 
-        # 불변식: 아래 두 줄이 한 트랜잭션 안에서 함께 일어나야 한다.
-        # mileage_history 총합 == team.mileage
         MileageHistory.objects.create(
             team=team,
             type=mtype,
@@ -261,8 +337,7 @@ def team_mileage(request, team_id):
         team.mileage = previous + amount
         team.save(update_fields=["mileage", "updated_at"])
 
-    return ok(
-        {
+        return {
             "team_id": str(team.team_id),
             "previous_mileage": previous,
             "amount": amount,
@@ -270,9 +345,56 @@ def team_mileage(request, team_id):
             "reason": reason,
             "adjusted_at": now,
             "adjusted_by": request.user.login_id,
-        },
+        }
+
+    return run_idempotent(
+        request,
+        {"amount": amount, "reason": reason},
+        work,
         message="마일리지가 조정되었습니다",
     )
+
+@api_view(["GET"])
+@permission_classes([IsAdmin])
+def mileage_history(request):
+    queryset = MileageHistory.objects.select_related("team")
+
+    team_id = request.query_params.get("team_id")
+    if team_id:
+        try:
+            uuid.UUID(str(team_id))
+        except (ValueError, TypeError, AttributeError):
+            raise InvalidRequest("team_id 형식이 올바르지 않습니다")
+        queryset = queryset.filter(team_id=team_id)
+
+    mtype = request.query_params.get("type")
+    if mtype:
+        if mtype not in MILEAGE_TYPES:
+            raise InvalidRequest("type 이 올바르지 않습니다")
+        queryset = queryset.filter(type=mtype)
+
+    page = _page_number(request.query_params.get("page"), 1, MAX_PAGE)
+    size = min(_page_number(request.query_params.get("size"), DEFAULT_PAGE_SIZE), MAX_PAGE_SIZE)
+
+    total_count = queryset.count()
+    offset = (page - 1) * size
+    rows = queryset.order_by("-created_at", "-history_id")[offset : offset + size]
+
+    history = [
+        {
+            "history_id": str(r.history_id),
+            "team_id": str(r.team_id),
+            "team_name": r.team.team_name,
+            "type": r.type,
+            "amount": r.amount,
+            "reason": r.reason,
+            "processed_by": r.processed_by,
+            "created_at": r.created_at,
+        }
+        for r in rows
+    ]
+
+    return ok({"history": history, "total_count": total_count, "page": page, "size": size})
 
 
 @api_view(["POST"])
