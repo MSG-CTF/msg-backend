@@ -1,9 +1,9 @@
+from django.utils import timezone
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
 from .models import Contest
 from .serializers import ContestTimerSerializer
-
 
 def format_duration(seconds):
     hours, remainder = divmod(seconds, 3600)
@@ -22,14 +22,18 @@ def contest_timer(request):
             "data": None,
         })
 
-    snapshot = contest.snapshot()
+    now = timezone.now()
+    snapshot = contest.snapshot(now)
+
     payload = {
         "name": contest.name,
         "start_time": contest.start_time,
         "end_time": contest.end_time,
         "remaining_display": format_duration(snapshot["remaining_seconds"]),
+        "server_time": now,
         **snapshot,
     }
+
     serializer = ContestTimerSerializer(payload)
     return Response({
         "code": "SUCCESS",

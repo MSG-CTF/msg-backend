@@ -14,7 +14,7 @@ class StrictSerializer(serializers.Serializer):
 
 class LoginSerializer(StrictSerializer):
     login_id = serializers.CharField(max_length=50)
-    password = serializers.CharField(max_length=128)
+    password = serializers.CharField(max_length=128, trim_whitespace=False)
 
 
 class RefreshTokenSerializer(StrictSerializer):

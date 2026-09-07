@@ -1,13 +1,19 @@
 import datetime
 import secrets
+import threading
+import time
+from unittest import mock
 
 import jwt as pyjwt
 from django.conf import settings
 from django.core.cache import cache
-from django.test import TestCase, override_settings
+from django.db import connections
+from django.test import TestCase, TransactionTestCase, override_settings
 from rest_framework.test import APIClient
 
+from apps.accounts import views
 from apps.accounts.models import RefreshToken, Team, User
+from apps.common.jwt import hash_token, issue_access_token, issue_refresh_token
 
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 
@@ -157,3 +163,74 @@ class AuthTests(TestCase):
             "is_banned", "ban_reason",
         }
         self.assertEqual(set(res.data["data"]), expected)
+
+
+class RefreshLogoutRaceTest(TransactionTestCase):
+    def setUp(self):
+        self.team = Team.objects.create(team_name="레이스팀")
+        self.user = User.objects.create_user(
+            login_id="racer", password="pw1234", nickname="레이서",
+            team=self.team, is_leader=True,
+        )
+
+    def _issue_token(self):
+        raw, expires_at = issue_refresh_token(self.user)
+        RefreshToken.objects.create(
+            user=self.user, token_hash=hash_token(raw), expires_at=expires_at,
+        )
+        return raw
+
+    def test_logout_then_refresh_rejected(self):
+        raw = self._issue_token()
+        auth = APIClient()
+        auth.credentials(HTTP_AUTHORIZATION=f"Bearer {issue_access_token(self.user)}")
+
+        logout = auth.post("/api/v1/auth/logout", {"refresh_token": raw}, format="json")
+        self.assertEqual(logout.status_code, 200)
+
+        again = APIClient().post("/api/v1/auth/refresh", {"refresh_token": raw}, format="json")
+        self.assertEqual(again.status_code, 401)
+        self.assertEqual(again.data["code"], "REFRESH_TOKEN_NOT_FOUND")
+
+    def test_refresh_before_logout_succeeds(self):
+        raw = self._issue_token()
+
+        refreshed = APIClient().post("/api/v1/auth/refresh", {"refresh_token": raw}, format="json")
+        self.assertEqual(refreshed.status_code, 200)
+        self.assertIn("access_token", refreshed.data["data"])
+
+        auth = APIClient()
+        auth.credentials(HTTP_AUTHORIZATION=f"Bearer {issue_access_token(self.user)}")
+        logout = auth.post("/api/v1/auth/logout", {"refresh_token": raw}, format="json")
+        self.assertEqual(logout.status_code, 200)
+
+    def test_refresh_holds_lock_until_token_issued(self):
+        raw = self._issue_token()
+        logout_client = APIClient()
+        logout_client.credentials(HTTP_AUTHORIZATION=f"Bearer {issue_access_token(self.user)}")
+
+        state = {}
+
+        def run_logout():
+            res = logout_client.post("/api/v1/auth/logout", {"refresh_token": raw}, format="json")
+            state["logout_status"] = res.status_code
+            connections.close_all()
+
+        real_issue = views.issue_access_token
+
+        def issue_spy(user):
+            worker = threading.Thread(target=run_logout)
+            worker.start()
+            state["worker"] = worker
+            time.sleep(0.5)
+            state["logout_finished_before_issue"] = "logout_status" in state
+            return real_issue(user)
+
+        with mock.patch.object(views, "issue_access_token", side_effect=issue_spy):
+            res = APIClient().post("/api/v1/auth/refresh", {"refresh_token": raw}, format="json")
+
+        state["worker"].join(timeout=5)
+        connections.close_all()
+
+        self.assertEqual(res.status_code, 200)
+        self.assertFalse(state["logout_finished_before_issue"])

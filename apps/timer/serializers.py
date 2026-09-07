@@ -9,3 +9,4 @@ class ContestTimerSerializer(serializers.Serializer):
     remaining_seconds = serializers.IntegerField()
     remaining_display = serializers.CharField()
     time_until_start = serializers.IntegerField()
+    server_time = serializers.DateTimeField()

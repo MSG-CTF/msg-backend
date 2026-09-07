@@ -1,4 +1,5 @@
 import jwt
+from django.db import transaction
 from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes, throttle_classes
 from apps.common.throttling import LoginRateThrottle
@@ -90,10 +91,17 @@ def logout(request):
     serializer = RefreshTokenSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
 
-    RefreshToken.objects.filter(
-        user=request.user,
-        token_hash=hash_token(serializer.validated_data["refresh_token"]),
-    ).delete()
+    with transaction.atomic():
+        row = (
+            RefreshToken.objects.select_for_update()
+            .filter(
+                user=request.user,
+                token_hash=hash_token(serializer.validated_data["refresh_token"]),
+            )
+            .first()
+        )
+        if row is not None:
+            row.delete()
 
     return ok(None, message="로그아웃 성공")
 
@@ -113,16 +121,18 @@ def refresh(request):
     except jwt.InvalidTokenError:
         raise RefreshTokenInvalid()
 
-    row = (
-        RefreshToken.objects.select_related("user", "user__team")
-        .filter(token_hash=hash_token(raw))
-        .first()
-    )
-    if row is None:
-
-        raise RefreshTokenNotFound()
+    with transaction.atomic():
+        row = (
+            RefreshToken.objects.select_for_update(of=("self",))
+            .select_related("user", "user__team")
+            .filter(token_hash=hash_token(raw))
+            .first()
+        )
+        if row is None:
+            raise RefreshTokenNotFound()
+        access_token = issue_access_token(row.user)
 
     return ok(
-        {"access_token": issue_access_token(row.user)},
+        {"access_token": access_token},
         message="토큰이 재발급되었습니다",
     )
