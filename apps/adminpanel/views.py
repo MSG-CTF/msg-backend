@@ -15,6 +15,7 @@ from apps.common.utils import num
 from apps.common.jwt import hash_token
 from apps.common.idempotency import run_idempotent
 from apps.challenge.models import Challenge, Solve
+from apps.challenge.services import hash_flag
 from apps.board.models import TeamBoardState
 from apps.timer.models import Contest
 
@@ -56,6 +57,7 @@ from apps.instances.services import (
     isoformat_z,
     scheduler_auth_header,
 )
+from .serializers import ChallengeCreateSerializer
 
 SORT_FIELDS = {
     "score": "-team_score",
@@ -931,10 +933,51 @@ CHALLENGE_SORT = {
 }
 
 
-@api_view(["GET"])
+def _challenge_create(request):
+    serializer = ChallengeCreateSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    data = serializer.validated_data
+
+    challenge = Challenge.objects.create(
+        title=data["title"],
+        category=data["category"],
+        difficulty=data["difficulty"],
+        description=data.get("description"),
+        flag_hash=hash_flag(data["flag"]),
+        score=data["initial_score"],
+        initial_score=data["initial_score"],
+        minimum_score=data["minimum_score"],
+        decay=data["decay"],
+        current_score=data["initial_score"],
+        is_published=False,
+    )
+
+    return ok(
+        {
+            "challenge_id": str(challenge.challenge_id),
+            "title": challenge.title,
+            "category": challenge.category,
+            "difficulty": challenge.difficulty,
+            "description": challenge.description,
+            "score": num(challenge.score),
+            "initial_score": num(challenge.initial_score),
+            "minimum_score": num(challenge.minimum_score),
+            "decay": challenge.decay,
+            "current_score": num(challenge.current_score),
+            "is_published": challenge.is_published,
+            "created_at": challenge.created_at,
+        },
+        message="문제가 등록되었습니다.",
+    )
+
+
+@api_view(["GET", "POST"])
 @permission_classes([IsAdmin])
 def challenge_list(request):
-    """GET /api/v1/admin/challenges. 문제 목록 + 문제별 인스턴스 현황."""
+    """관리자 문제 등록 또는 문제별 인스턴스 현황 조회."""
+    if request.method == "POST":
+        return _challenge_create(request)
+
     sort = request.query_params.get("sort", "running")
     if sort not in CHALLENGE_SORT:
         raise InvalidRequest("정렬 기준이 올바르지 않습니다. (running, title, score 중 선택)")
