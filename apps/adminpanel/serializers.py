@@ -1,9 +1,23 @@
 from rest_framework import serializers
+from rest_framework.validators import UniqueValidator
 
 from apps.challenge.models import Challenge
 
 
 class ChallengeCreateSerializer(serializers.Serializer):
+    challenge_slug = serializers.RegexField(
+        regex=r"^[a-z0-9]+(?:-[a-z0-9]+)*$",
+        max_length=100,
+        validators=[
+            UniqueValidator(
+                queryset=Challenge.objects.all(),
+                message="이미 사용 중인 challenge_slug입니다.",
+            )
+        ],
+        error_messages={
+            "invalid": "challenge_slug는 소문자 영문, 숫자, 하이픈만 사용할 수 있습니다.",
+        },
+    )
     title = serializers.CharField(max_length=200)
     category = serializers.ChoiceField(choices=Challenge.CategoryType.choices)
     difficulty = serializers.ChoiceField(choices=Challenge.DifficultyType.choices)
