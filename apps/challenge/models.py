@@ -21,6 +21,7 @@ class Challenge(models.Model):
         HARD = "HARD"
 
     challenge_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    challenge_slug = models.CharField(max_length=100, unique=True, null=True, blank=True)
     title = models.CharField(max_length=200)
     category = models.CharField(max_length=20, choices=CategoryType.choices)
     difficulty = models.CharField(max_length=20, choices=DifficultyType.choices)
