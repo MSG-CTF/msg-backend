@@ -938,23 +938,29 @@ def _challenge_create(request):
     serializer.is_valid(raise_exception=True)
     data = serializer.validated_data
 
-    challenge = Challenge.objects.create(
-        title=data["title"],
-        category=data["category"],
-        difficulty=data["difficulty"],
-        description=data.get("description"),
-        flag_hash=hash_flag(data["flag"]),
-        score=data["initial_score"],
-        initial_score=data["initial_score"],
-        minimum_score=data["minimum_score"],
-        decay=data["decay"],
-        current_score=data["initial_score"],
-        is_published=False,
-    )
+    try:
+        with transaction.atomic():
+            challenge = Challenge.objects.create(
+                challenge_slug=data["challenge_slug"],
+                title=data["title"],
+                category=data["category"],
+                difficulty=data["difficulty"],
+                description=data.get("description"),
+                flag_hash=hash_flag(data["flag"]),
+                score=data["initial_score"],
+                initial_score=data["initial_score"],
+                minimum_score=data["minimum_score"],
+                decay=data["decay"],
+                current_score=data["initial_score"],
+                is_published=False,
+            )
+    except IntegrityError as error:
+        raise InvalidRequest("이미 사용 중인 challenge_slug입니다.") from error
 
     return ok(
         {
             "challenge_id": str(challenge.challenge_id),
+            "challenge_slug": challenge.challenge_slug,
             "title": challenge.title,
             "category": challenge.category,
             "difficulty": challenge.difficulty,
@@ -1018,6 +1024,7 @@ def challenge_list(request):
     challenges = [
         {
             "challenge_id": str(c.challenge_id),
+            "challenge_slug": c.challenge_slug,
             "title": c.title,
             "category": c.category,
             "difficulty": c.difficulty,

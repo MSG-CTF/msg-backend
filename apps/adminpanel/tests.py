@@ -640,6 +640,7 @@ class AdminChallengeTests(TestCase):
 
     def challenge_body(self, **overrides):
         body = {
+            "challenge_slug": "sql-injection-basic",
             "title": "SQL Injection 기초",
             "category": "WEB",
             "difficulty": "EASY",
@@ -661,6 +662,8 @@ class AdminChallengeTests(TestCase):
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.data["code"], "SUCCESS")
         challenge = Challenge.objects.get(challenge_id=res.data["data"]["challenge_id"])
+        self.assertEqual(challenge.challenge_slug, "sql-injection-basic")
+        self.assertEqual(res.data["data"]["challenge_slug"], "sql-injection-basic")
         self.assertEqual(challenge.initial_score, 1000)
         self.assertEqual(challenge.minimum_score, 600)
         self.assertEqual(challenge.decay, 70)
@@ -704,6 +707,34 @@ class AdminChallengeTests(TestCase):
                 self.assertEqual(res.status_code, 400)
                 self.assertEqual(res.data["code"], "INVALID_REQUEST")
         self.assertEqual(Challenge.objects.count(), 0)
+
+    def test_challenge_create_rejects_invalid_and_duplicate_slug(self):
+        invalid_slugs = ["Web-Notebook", "web_notebook", "web notebook", "-web", "web-"]
+        for slug in invalid_slugs:
+            with self.subTest(slug=slug):
+                res = self.client.post(
+                    "/api/v1/admin/challenges",
+                    self.challenge_body(challenge_slug=slug),
+                    format="json",
+                )
+                self.assertEqual(res.status_code, 400)
+                self.assertEqual(res.data["code"], "INVALID_REQUEST")
+
+        first = self.client.post(
+            "/api/v1/admin/challenges",
+            self.challenge_body(challenge_slug="web-notebook"),
+            format="json",
+        )
+        duplicate = self.client.post(
+            "/api/v1/admin/challenges",
+            self.challenge_body(challenge_slug="web-notebook", title="다른 문제"),
+            format="json",
+        )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(duplicate.status_code, 400)
+        self.assertEqual(duplicate.data["code"], "INVALID_REQUEST")
+        self.assertEqual(Challenge.objects.filter(challenge_slug="web-notebook").count(), 1)
 
     def test_challenge_create_rejects_missing_and_unknown_fields(self):
         missing = self.client.post(
