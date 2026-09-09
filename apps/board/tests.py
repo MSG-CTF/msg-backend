@@ -166,6 +166,10 @@ class BoardApiTestCase(TestCase):
         )
 
         self.state = get_or_create_board_state(self.team)
+        # Most action scenarios exercise a team with one remaining roll.
+        # Initial-state tests below remove this fixture to exercise creation.
+        self.state.dice_rolls_left = 1
+        self.state.save(update_fields=["dice_rolls_left"])
         self.as_leader()
 
     def _login(self, login_id):
@@ -274,13 +278,15 @@ class BoardApiTestCase(TestCase):
         self.assertEqual(response.json()["code"], "TOKEN_MISSING")
 
     def test_board_me_returns_initial_state(self):
+        self.state.delete()
         response = self.client.get("/api/v1/board/me")
 
         self.assertEqual(response.status_code, 200)
         data = response.json()["data"]
         self.assertEqual(data["position"], 1)
         self.assertEqual(data["type"], Cell.CellType.START)
-        self.assertEqual(data["dice_rolls_left"], 1)
+        self.assertEqual(data["dice_rolls_left"], 3)
+        self.assertIsNone(data["next_dice_reset_at"])
         self.assertFalse(data["board_completed"])
         self.assertEqual(data["consumed_cell_indexes"], [])
         self.assertEqual(data["cell_states"], [])
@@ -339,12 +345,41 @@ class BoardApiTestCase(TestCase):
     # ---------------------------------------------------------------- GET /board/dice/status
 
     def test_dice_status_initial(self):
+        self.state.delete()
         response = self.client.get("/api/v1/board/dice/status")
 
         data = response.json()["data"]
         self.assertTrue(data["can_roll"])
         self.assertIsNone(data["blocked_reason"])
-        self.assertEqual(data["dice_rolls_left"], 1)
+        self.assertEqual(data["dice_rolls_left"], 3)
+        self.assertIsNone(data["next_dice_reset_at"])
+
+    def test_model_and_seed_board_start_with_three_rolls(self):
+        state = TeamBoardState.objects.create(team=self.other_team, position_id=1)
+        state.refresh_from_db()
+        self.assertEqual(state.dice_rolls_left, 3)
+        self.assertIsNone(state.next_dice_reset_at)
+        seeded_state = TeamBoardState.objects.get(team__team_name="test-team")
+        self.assertEqual(seeded_state.dice_rolls_left, 3)
+        self.assertIsNone(seeded_state.next_dice_reset_at)
+
+    def test_first_roll_uses_one_of_three_and_repeated_reads_do_not_grant_again(self):
+        self.state.delete()
+        now = timezone.now().replace(microsecond=0)
+        with patch("apps.board.services.timezone.now", return_value=now):
+            with patch("apps.board.services.random.randint", return_value=1):
+                response = self.post_idem("/api/v1/board/dice/roll")
+            self.assertEqual(response.status_code, 200)
+            for path in ("/api/v1/board/me", "/api/v1/board/dice/status"):
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.data["data"]["dice_rolls_left"], 2)
+                self.assertEqual(
+                    response.data["data"]["next_dice_reset_at"], now + timedelta(minutes=15),
+                )
+        state = TeamBoardState.objects.get(team=self.team)
+        self.assertEqual(state.dice_rolls_left, 2)
+        self.assertEqual(DiceRoll.objects.filter(team=self.team).count(), 1)
 
     def test_dice_status_challenge_not_selected(self):
         self.set_position(2, consumed=True)  # 시드 결과 기준 CHALLENGE 칸

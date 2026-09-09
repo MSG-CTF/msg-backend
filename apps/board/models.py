@@ -321,7 +321,7 @@ class TeamBoardState(models.Model):
         on_delete=models.PROTECT,
         related_name="team_states",
     )
-    dice_rolls_left = models.PositiveSmallIntegerField(default=1)
+    dice_rolls_left = models.PositiveSmallIntegerField(default=3)
     active_challenge_access = models.ForeignKey(
         TeamChallengeAccess,
         on_delete=models.SET_NULL,

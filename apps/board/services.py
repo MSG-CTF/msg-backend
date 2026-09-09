@@ -96,7 +96,7 @@ def get_or_create_board_state(team):
         # Reads can apply a due recharge, so serialize them with rewards/rolls.
         state, _ = TeamBoardState.objects.select_for_update().get_or_create(
             team=team,
-            defaults={"position": start_cell, "dice_rolls_left": 1},
+            defaults={"position": start_cell},
         )
         state = apply_pending_dice_recharge(state)
         state = apply_pending_quarantine_release(state)

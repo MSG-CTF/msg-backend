@@ -13,7 +13,7 @@ from apps.board.models import (
     TeamChanceCard,
 )
 from apps.accounts.models import User
-from apps.board.services import get_default_team
+from apps.board.services import MAX_DICE_ROLLS, get_default_team
 from apps.challenge.models import Challenge
 from apps.challenge.services import hash_flag
 
@@ -254,7 +254,7 @@ class Command(BaseCommand):
             team=team,
             defaults={
                 "position_id": 1,
-                "dice_rolls_left": 1,
+                "dice_rolls_left": MAX_DICE_ROLLS,
                 "active_challenge_access": None,
             },
         )
