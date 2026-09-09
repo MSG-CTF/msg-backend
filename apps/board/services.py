@@ -69,6 +69,7 @@ MOVE_OFFSET_MAX = 3
 ROULETTE_REWARDS = (50, 100, 150, 200)
 ROULETTE_REASON_PREFIX = "ROULETTE_CELL"
 DICE_RECHARGE_INTERVAL = timedelta(minutes=15)
+MAX_DICE_ROLLS = 3
 QUARANTINE_LOCK_INTERVAL = timedelta(minutes=15)
 
 
@@ -91,38 +92,61 @@ def get_or_create_board_state(team):
     if start_cell is None:
         raise BoardNotReady()
 
-    state, _ = TeamBoardState.objects.get_or_create(
-        team=team,
-        defaults={"position": start_cell, "dice_rolls_left": 1},
-    )
-    state = apply_pending_dice_recharge(state)
-    state = apply_pending_quarantine_release(state)
+    with transaction.atomic():
+        # Reads can apply a due recharge, so serialize them with rewards/rolls.
+        state, _ = TeamBoardState.objects.select_for_update().get_or_create(
+            team=team,
+            defaults={"position": start_cell, "dice_rolls_left": 1},
+        )
+        state = apply_pending_dice_recharge(state)
+        state = apply_pending_quarantine_release(state)
     return state
 
 
-def apply_pending_dice_recharge(state):
-    """15분 회복 타이머가 지났으면 주사위 1회만 채운다. 오래 기다려도 1회 이상 쌓이지 않는다."""
-    if state.next_dice_reset_at is None or timezone.now() < state.next_dice_reset_at:
-        return state
+def _update_dice_recharge(state, now):
+    """Update a locked state's recharge clock in memory; the caller saves it."""
+    if state.dice_rolls_left >= MAX_DICE_ROLLS or is_board_completed(state.team_id):
+        state.next_dice_reset_at = None
+        return
+    if state.next_dice_reset_at is None:
+        state.next_dice_reset_at = now + DICE_RECHARGE_INTERVAL
+        return
+    if now < state.next_dice_reset_at:
+        return
 
-    state.dice_rolls_left += 1
-    state.next_dice_reset_at = None
-    state.save(update_fields=["dice_rolls_left", "next_dice_reset_at", "updated_at"])
+    elapsed_intervals = (now - state.next_dice_reset_at) // DICE_RECHARGE_INTERVAL + 1
+    state.dice_rolls_left = min(MAX_DICE_ROLLS, state.dice_rolls_left + elapsed_intervals)
+    state.next_dice_reset_at = (
+        state.next_dice_reset_at + elapsed_intervals * DICE_RECHARGE_INTERVAL
+        if state.dice_rolls_left < MAX_DICE_ROLLS else None
+    )
+
+
+def apply_pending_dice_recharge(state):
+    """Apply elapsed 15-minute recharges up to capacity, under the board lock."""
+    previous = (state.dice_rolls_left, state.next_dice_reset_at)
+    _update_dice_recharge(state, timezone.now())
+    if previous != (state.dice_rolls_left, state.next_dice_reset_at):
+        state.save(update_fields=["dice_rolls_left", "next_dice_reset_at", "updated_at"])
     return state
 
 
 def grant_dice_roll(state, amount):
-    """회복 타이머 밖에서 주사위를 지급한다. 대기 중인 회복 타이머가 있으면 같이 지운다.
-
-    안 그러면 회복 타이머가 나중에 다시 발동해서(apply_pending_dice_recharge) 이미 채워진
-    주사위에 1회를 더 얹어준다 — START 통과/찬스카드/문제 해결로 회복된 뒤에도 옛 타이머가
-    남아 있던 사례에서 확인된 이중 지급 버그.
-    """
+    """Return the actual reward, preserving the recharge deadline below capacity."""
     if amount <= 0:
-        return
-    state.dice_rolls_left += amount
-    if state.dice_rolls_left > 0:
-        state.next_dice_reset_at = None
+        return 0
+    now = timezone.now()
+    _update_dice_recharge(state, now)
+    granted = max(0, min(amount, MAX_DICE_ROLLS - state.dice_rolls_left))
+    state.dice_rolls_left += granted
+    _update_dice_recharge(state, now)
+    return granted
+
+
+def _consume_dice_roll(state):
+    state.dice_rolls_left -= 1
+    _update_dice_recharge(state, timezone.now())
+    state.save(update_fields=["dice_rolls_left", "next_dice_reset_at", "updated_at"])
 
 
 def apply_pending_quarantine_release(state):
@@ -268,7 +292,7 @@ def finalize_landing(team, state, cell, passed_start, landed_on_start):
     if passed_start:
         update_fields.append("has_passed_start")
     if reward["roll_gained"]:
-        grant_dice_roll(state, reward["roll_gained"])
+        reward["roll_gained"] = grant_dice_roll(state, reward["roll_gained"])
         update_fields += ["dice_rolls_left", "next_dice_reset_at"]
     state.save(update_fields=update_fields)
 
@@ -352,6 +376,7 @@ def roll_dice(team):
 
     with transaction.atomic():
         state = TeamBoardState.objects.select_for_update().get(team=team)
+        apply_pending_dice_recharge(state)
         _assert_can_roll(team, state)
 
         dice_a = random.randint(1, 6)
@@ -367,11 +392,7 @@ def roll_dice(team):
         destination_cell = Cell.objects.get(cell_index=destination)
         board_event_code = get_event_for_cell(destination_cell)
 
-        state.dice_rolls_left -= 1
-        state.next_dice_reset_at = (
-            timezone.now() + DICE_RECHARGE_INTERVAL if state.dice_rolls_left <= 0 else None
-        )
-        state.save(update_fields=["dice_rolls_left", "next_dice_reset_at", "updated_at"])
+        _consume_dice_roll(state)
 
         DiceRoll.objects.create(
             team=team,
@@ -512,9 +533,8 @@ def move_team_via_airport(team, destination_index):
 
 
 def spin_roulette(team):
-    state = get_or_create_board_state(team)
-
     with transaction.atomic():
+        get_or_create_board_state(team)
         # Match flag submissions and other board actions: board state, then team.
         # The shared cell is read-only and must not be locked with the state.
         state = (
@@ -682,7 +702,7 @@ def complete_challenge_from_submission(team, challenge, submitted_at):
             state.active_challenge_access = None
             update_fields.append("active_challenge_access")
         if not was_cleared and is_extra_dice_granted:
-            grant_dice_roll(state, 1)
+            is_extra_dice_granted = bool(grant_dice_roll(state, 1))
             update_fields.extend(["dice_rolls_left", "next_dice_reset_at"])
         state.save(update_fields=update_fields)
         return is_extra_dice_granted
@@ -699,12 +719,11 @@ def solve_active_challenge(team):
         access.status = TeamChallengeAccess.Status.CLEARED
         access.cleared_at = timezone.now()
         access.save(update_fields=["status", "cleared_at"])
-        grant_dice_roll(state, 1)
+        is_extra_dice_granted = bool(grant_dice_roll(state, 1))
 
     state.active_challenge_access = None
     update_fields = ["active_challenge_access", "updated_at"]
-    if is_extra_dice_granted:
-        update_fields += ["dice_rolls_left", "next_dice_reset_at"]
+    update_fields += ["dice_rolls_left", "next_dice_reset_at"]
     state.save(update_fields=update_fields)
     return state, access, is_extra_dice_granted
 
@@ -820,6 +839,8 @@ def build_cell_states(team):
 
 
 def _card_usable_now(card, state, blocked_reason, has_pending):
+    if card.effect == "GRANT_EXTRA_ROLL" and state.dice_rolls_left >= MAX_DICE_ROLLS:
+        return False
     if card.usage_timing == ChanceCard.UsageTiming.QUARANTINE_STATE:
         return state.is_quarantined
     if state.is_quarantined:
@@ -961,6 +982,7 @@ def _effect_reroll(team, state, draw, payload):
 
 
 def _effect_roll_twice_choose(team, state, draw, payload):
+    apply_pending_dice_recharge(state)
     _assert_can_roll(team, state)
 
     first_a = random.randint(1, 6)
@@ -977,11 +999,7 @@ def _effect_roll_twice_choose(team, state, draw, payload):
     second_destination, _, _, _ = compute_movement(consumed, previous_position, second_number)
     destination_cell = Cell.objects.get(cell_index=destination)
 
-    state.dice_rolls_left -= 1
-    state.next_dice_reset_at = (
-        timezone.now() + DICE_RECHARGE_INTERVAL if state.dice_rolls_left <= 0 else None
-    )
-    state.save(update_fields=["dice_rolls_left", "next_dice_reset_at", "updated_at"])
+    _consume_dice_roll(state)
 
     DiceRoll.objects.create(
         team=team,
@@ -1207,6 +1225,8 @@ def use_chance_card(team, card_id, payload):
         if draw.discarded_at is not None:
             raise ChanceCardNotFound()
 
+        # A recharge can become due while waiting for the board lock.
+        apply_pending_dice_recharge(state)
         card = draw.card
         _assert_timing_ok(team, state, card)
 

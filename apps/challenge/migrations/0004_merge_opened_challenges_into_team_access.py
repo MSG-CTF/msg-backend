@@ -10,6 +10,27 @@ def migrate_opened_challenges(apps, schema_editor):
     TeamChallengeAccess = apps.get_model("board", "TeamChallengeAccess")
     database = schema_editor.connection.alias
 
+    # Every access must remain readable after the legacy table is removed.
+    # Check before any updates, including accesses already present on the board.
+    missing_challenge_ids = set(
+        OpenedChallenge.objects.using(database)
+        .filter(challenge__board_meta__isnull=True)
+        .values_list("challenge_id", flat=True)
+    )
+    missing_challenge_ids.update(
+        TeamChallengeAccess.objects.using(database)
+        .filter(challenge__board_meta__isnull=True)
+        .values_list("challenge_id", flat=True)
+    )
+    if missing_challenge_ids:
+        identifiers = ", ".join(sorted(str(pk) for pk in missing_challenge_ids))
+        raise RuntimeError(
+            "Cannot migrate opened challenges: BoardChallenge metadata is missing "
+            f"for {len(missing_challenge_ids)} challenge(s): {identifiers}. "
+            "Restore their verified challenge_number and club_name, then retry. "
+            "Do not delete or skip the existing access records."
+        )
+
     for opened in OpenedChallenge.objects.using(database).order_by("opened_at").iterator():
         solve = Solve.objects.using(database).filter(
             team_id=opened.team_id,

@@ -878,11 +878,11 @@ class BoardApiTestCase(TestCase):
         self.assertEqual(data["dice_rolls_left"], 2)
         self.assertTrue(TeamCellConsumption.objects.filter(team=self.team, cell_id=7).exists())
 
-    def test_chance_now_clears_stale_dice_reset_timer(self):
-        # chance/now의 +1 지급도 grant_dice_roll을 거치므로 대기 중인 회복 타이머를 지워야 한다.
+    def test_chance_now_preserves_dice_reset_timer_below_capacity(self):
         self.set_position(7, consumed=True)
         self.state.dice_rolls_left = 0
-        self.state.next_dice_reset_at = timezone.now() + timedelta(minutes=15)
+        deadline = timezone.now() + timedelta(minutes=5)
+        self.state.next_dice_reset_at = deadline
         self.state.save(update_fields=["dice_rolls_left", "next_dice_reset_at"])
 
         with patch("apps.board.services.random.choice") as choice_mock:
@@ -892,7 +892,7 @@ class BoardApiTestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["data"]["dice_rolls_left"], 1)
         self.state.refresh_from_db()
-        self.assertIsNone(self.state.next_dice_reset_at)
+        self.assertEqual(self.state.next_dice_reset_at, deadline)
 
     def test_chance_now_requires_chance_cell(self):
         response = self.post_idem("/api/v1/board/chance/now")
@@ -938,12 +938,10 @@ class BoardApiTestCase(TestCase):
         self.assertTrue(data["used"])
         self.assertEqual(data["dice_rolls_left"], 2)
 
-    def test_chance_use_grant_extra_roll_clears_stale_dice_reset_timer(self):
-        # 회귀 테스트: 주사위가 0개일 때 걸린 15분 회복 타이머가 이 카드로 먼저 채워진 뒤에도
-        # 그대로 남아 있으면, 나중에 타이머가 만료될 때 회복 로직이 이미 채워진 주사위 위에
-        # 1회를 더 얹어준다 (이중 지급). 카드 사용 시점에 타이머를 같이 지워야 한다.
+    def test_chance_use_grant_extra_roll_preserves_dice_reset_timer_below_capacity(self):
         self.state.dice_rolls_left = 0
-        self.state.next_dice_reset_at = timezone.now() + timedelta(minutes=15)
+        deadline = timezone.now() + timedelta(minutes=5)
+        self.state.next_dice_reset_at = deadline
         self.state.save(update_fields=["dice_rolls_left", "next_dice_reset_at"])
         self.draw_card("card_extra_roll")
 
@@ -952,6 +950,74 @@ class BoardApiTestCase(TestCase):
         self.assertEqual(response.json()["data"]["dice_rolls_left"], 1)
 
         self.state.refresh_from_db()
+        self.assertEqual(self.state.next_dice_reset_at, deadline)
+
+    def test_extra_roll_card_is_not_consumed_at_capacity(self):
+        self.state.dice_rolls_left = 3
+        self.state.next_dice_reset_at = None
+        self.state.save(update_fields=["dice_rolls_left", "next_dice_reset_at"])
+        draw = self.draw_card("card_extra_roll")
+        response = self.post_idem("/api/v1/board/chance/use", {"card_id": draw.card_id})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["code"], "CHANCE_CARD_WRONG_TIMING")
+        draw.refresh_from_db()
+        self.assertIsNone(draw.used_at)
+        self.state.refresh_from_db()
+        self.assertEqual(self.state.dice_rolls_left, 3)
+
+    def test_roll_starts_recharge_at_capacity_and_preserves_existing_deadline(self):
+        now = timezone.now()
+        for initial_rolls in (3, 2, 1):
+            with self.subTest(initial_rolls=initial_rolls):
+                self.set_position(1)
+                self.state.dice_rolls_left = initial_rolls
+                deadline = now + timedelta(minutes=5) if initial_rolls < 3 else None
+                self.state.next_dice_reset_at = deadline
+                self.state.save(update_fields=["dice_rolls_left", "next_dice_reset_at"])
+                with patch("apps.board.services.timezone.now", return_value=now):
+                    with patch("apps.board.services.random.randint", return_value=1):
+                        response = self.post_idem(
+                            "/api/v1/board/dice/roll", key=f"recharge-roll-{initial_rolls}",
+                        )
+                self.assertEqual(response.status_code, 200)
+                self.state.refresh_from_db()
+                self.assertEqual(self.state.dice_rolls_left, initial_rolls - 1)
+                self.assertEqual(
+                    self.state.next_dice_reset_at, deadline or now + timedelta(minutes=15),
+                )
+
+    def test_recharge_uses_elapsed_intervals_and_stops_at_capacity(self):
+        deadline = timezone.now() + timedelta(minutes=5)
+        self.state.dice_rolls_left = 0
+        self.state.next_dice_reset_at = deadline
+        self.state.save(update_fields=["dice_rolls_left", "next_dice_reset_at"])
+        for minutes_later, expected_rolls, next_minutes in (
+            (0, 1, 15), (16, 2, 30), (120, 3, None), (180, 3, None),
+        ):
+            with self.subTest(minutes_later=minutes_later):
+                with patch(
+                    "apps.board.services.timezone.now",
+                    return_value=deadline + timedelta(minutes=minutes_later),
+                ):
+                    response = self.client.get("/api/v1/board/dice/status")
+                self.assertEqual(response.status_code, 200)
+                self.state.refresh_from_db()
+                self.assertEqual(self.state.dice_rolls_left, expected_rolls)
+                self.assertEqual(
+                    self.state.next_dice_reset_at,
+                    deadline + timedelta(minutes=next_minutes) if next_minutes is not None else None,
+                )
+
+    def test_start_reward_at_capacity_reports_zero_and_does_not_restart_recharge(self):
+        self.set_position(Cell.objects.get(type=Cell.CellType.AIRPORT).pk)
+        self.state.dice_rolls_left = 3
+        self.state.next_dice_reset_at = None
+        self.state.save(update_fields=["dice_rolls_left", "next_dice_reset_at"])
+        response = self.post_idem("/api/v1/board/airport/move", {"destination_index": 1})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["data"]["start_reward"]["roll_gained"], 0)
+        self.state.refresh_from_db()
+        self.assertEqual(self.state.dice_rolls_left, 3)
         self.assertIsNone(self.state.next_dice_reset_at)
 
     def test_chance_use_free_move(self):

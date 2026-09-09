@@ -13,6 +13,7 @@ from rest_framework.test import APIClient
 
 from apps.accounts.models import Team, User
 from apps.board.models import Cell, TeamBoardState, TeamChallengeAccess
+from apps.board.services import get_or_create_board_state
 from apps.challenge.models import Challenge, FlagSubmissionLock, Solve
 from apps.challenge.services import hash_flag
 from apps.teams.models import MileageHistory, MileageType
@@ -136,12 +137,58 @@ class ChallengeSubmitTests(TestCase):
                 if state:
                     state.refresh_from_db()
                     self.assertEqual(state.dice_rolls_left, int(granted))
-                    self.assertEqual(state.next_dice_reset_at is None, granted)
+                    self.assertIsNotNone(state.next_dice_reset_at)
                 if granted:
                     duplicate = self.submit("MSG{correct_flag}")
                     self.assertEqual(duplicate.status_code, 409)
                     state.refresh_from_db()
                     self.assertEqual(state.dice_rolls_left, 1)
+
+    def test_solve_reward_preserves_recharge_until_full_and_reports_actual_grant(self):
+        access = TeamChallengeAccess.objects.get(team=self.team, challenge=self.challenge)
+        now = timezone.now().replace(microsecond=0)
+        deadline = now + datetime.timedelta(minutes=5)
+        for initial_rolls in (0, 1, 2, 3):
+            with self.subTest(initial_rolls=initial_rolls):
+                Solve.objects.filter(team=self.team).delete()
+                access.status = TeamChallengeAccess.Status.OPENED
+                access.cleared_at = None
+                access.save(update_fields=["status", "cleared_at"])
+                state, _ = TeamBoardState.objects.update_or_create(
+                    team=self.team,
+                    defaults={
+                        "position": self.cell, "active_challenge_access": access,
+                        "dice_rolls_left": initial_rolls,
+                        "next_dice_reset_at": deadline if initial_rolls < 3 else None,
+                    },
+                )
+                with patch("apps.board.services.timezone.now", return_value=now):
+                    response = self.submit("MSG{correct_flag}")
+                    self.assertEqual(response.status_code, 200)
+                    expected_rolls = min(3, initial_rolls + 1)
+                    expected_deadline = deadline if expected_rolls < 3 else None
+                    state.refresh_from_db()
+                    self.assertEqual(state.dice_rolls_left, expected_rolls)
+                    self.assertEqual(state.next_dice_reset_at, expected_deadline)
+                    self.assertEqual(response.data["data"]["is_extra_dice_granted"], initial_rolls < 3)
+                    self.assertEqual(
+                        Solve.objects.get(team=self.team, challenge=self.challenge).is_extra_dice_granted,
+                        initial_rolls < 3,
+                    )
+                    for path in ("/api/v1/board/me", "/api/v1/board/dice/status"):
+                        status = self.client.get(path)
+                        self.assertEqual(status.status_code, 200)
+                        self.assertEqual(status.data["data"]["dice_rolls_left"], expected_rolls)
+                        self.assertEqual(status.data["data"]["next_dice_reset_at"], expected_deadline)
+
+                with patch("apps.board.services.timezone.now", return_value=deadline):
+                    status = self.client.get("/api/v1/board/dice/status")
+                    charged_rolls = min(3, expected_rolls + 1)
+                    self.assertEqual(status.data["data"]["dice_rolls_left"], charged_rolls)
+                    self.assertEqual(
+                        status.data["data"]["next_dice_reset_at"],
+                        deadline + datetime.timedelta(minutes=15) if charged_rolls < 3 else None,
+                    )
 
     def test_three_wrong_flags_lock_submission(self):
         # 같은 팀이 같은 문제에 3회 연속 오답을 내면 제출 제한이 걸린다
@@ -376,6 +423,75 @@ class ChallengeSubmitTests(TestCase):
 @skipUnless(connection.vendor == "postgresql", "Requires PostgreSQL row locking")
 @override_settings(CACHES=LOCMEM, SECURE_SSL_REDIRECT=False)
 class ConcurrentChallengeSubmitTests(TransactionTestCase):
+    def test_due_recharge_and_solve_reward_are_applied_once_when_requests_overlap(self):
+        team = Team.objects.create(team_name="recharge-and-solve")
+        user = User.objects.create_user(login_id="recharge-user", nickname="recharge-user", team=team)
+        cell = Cell.objects.create(cell_index=1, type=Cell.CellType.CHALLENGE, name="current")
+        challenge = Challenge.objects.create(
+            title="recharge", category="WEB", difficulty="EASY", score=1000,
+            flag_hash=hash_flag("MSG{recharge}"), is_published=True,
+        )
+        access = TeamChallengeAccess.objects.create(team=team, challenge=challenge, source_cell=cell)
+        now = timezone.now()
+        deadline = now - datetime.timedelta(seconds=1)
+        state = TeamBoardState.objects.create(
+            team=team, position=cell, active_challenge_access=access,
+            dice_rolls_left=0, next_dice_reset_at=deadline,
+        )
+        status_locked = Event()
+        submit_waiting = Event()
+
+        def request(action):
+            close_old_connections()
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute("SET lock_timeout = '5s'")
+                client = APIClient()
+                client.force_authenticate(user=User.objects.get(pk=user.pk))
+                synchronized = False
+
+                def synchronize(execute, sql, params, many, context):
+                    nonlocal synchronized
+                    if synchronized or 'FROM "team_board_states"' not in sql or 'FOR UPDATE' not in sql:
+                        return execute(sql, params, many, context)
+                    synchronized = True
+                    if action == "status":
+                        result = execute(sql, params, many, context)
+                        status_locked.set()
+                        if not submit_waiting.wait(timeout=10):
+                            raise AssertionError("Submission never attempted the board lock")
+                        return result
+                    submit_waiting.set()
+                    return execute(sql, params, many, context)
+
+                if action == "submit" and not status_locked.wait(timeout=10):
+                    raise AssertionError("Status read did not lock the recharge state")
+                with connection.execute_wrapper(synchronize):
+                    if action == "status":
+                        response = client.get("/api/v1/board/dice/status")
+                    else:
+                        response = client.post(
+                            f"/api/v1/challenges/{challenge.pk}/submit",
+                            {"flag": "MSG{recharge}"}, format="json",
+                        )
+                return action, response.status_code, response.data
+            finally:
+                connections.close_all()
+
+        with patch("apps.board.services.timezone.now", return_value=now):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(request, ("status", "submit")))
+            for action, status, body in results:
+                self.assertEqual(status, 200, body)
+                if action == "submit":
+                    self.assertTrue(body["data"]["is_extra_dice_granted"])
+            # Repeating a status read at the same time must not charge again.
+            get_or_create_board_state(team)
+        state.refresh_from_db()
+        self.assertEqual(state.dice_rolls_left, 2)
+        self.assertEqual(state.next_dice_reset_at, deadline + datetime.timedelta(minutes=15))
+        self.assertTrue(Solve.objects.get(team=team, challenge=challenge).is_extra_dice_granted)
+
     def test_submit_and_roulette_finish_when_submit_locks_board_first(self):
         self._assert_submit_and_roulette_finish("submit")
 
