@@ -18,6 +18,9 @@ class ChanceCardSerializer(serializers.ModelSerializer):
 
 class ChallengeCandidateSerializer(serializers.ModelSerializer):
     club_name = serializers.CharField(source="board_meta.club_name", read_only=True)
+    score = serializers.DecimalField(
+        source="current_score", max_digits=12, decimal_places=2, read_only=True
+    )
 
     class Meta:
         model = Challenge
@@ -26,6 +29,9 @@ class ChallengeCandidateSerializer(serializers.ModelSerializer):
 
 class ChallengeSerializer(serializers.ModelSerializer):
     club_name = serializers.CharField(source="board_meta.club_name", read_only=True)
+    score = serializers.DecimalField(
+        source="current_score", max_digits=12, decimal_places=2, read_only=True
+    )
 
     class Meta:
         model = Challenge

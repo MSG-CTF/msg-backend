@@ -1,6 +1,7 @@
 from django.db import transaction
 from rest_framework.views import APIView
 
+from apps.board.models import TeamChallengeAccess
 from apps.common.permissions import IsAuthenticated
 from apps.challenge.models import Challenge
 from apps.common.response import fail, ok
@@ -47,6 +48,9 @@ class InstanceCreateView(APIView):
         challenge = Challenge.objects.filter(challenge_id=challenge_id).first()
         if challenge is None:
             return fail("CHALLENGE_NOT_FOUND", "존재하지 않는 문제 ID입니다.", 404)
+
+        if not TeamChallengeAccess.objects.filter(team=team, challenge=challenge).exists():
+            return fail("CHALLENGE_LOCKED", "아직 개방되지 않은 문제입니다.", 403)
 
         runtime_config = get_challenge_runtime_config(challenge)
         if runtime_config is None:

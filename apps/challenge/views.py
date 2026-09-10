@@ -1,6 +1,7 @@
 from datetime import timedelta
 
 from django.db import IntegrityError, transaction
+from django.db.models import F
 from django.utils import timezone
 from rest_framework.views import APIView
 
@@ -8,10 +9,14 @@ from apps.challenge.models import (
     Challenge,
     FlagSubmission,
     FlagSubmissionLock,
-    OpenedChallenge,
     Solve,
 )
-from apps.challenge.services import hash_flag, is_correct_flag
+from apps.challenge.services import (
+    get_team_total_score,
+    hash_flag,
+    is_correct_flag,
+    update_dynamic_score_and_team_scores,
+)
 from apps.common.response import fail, ok
 from apps.instances.models import Instance
 from apps.instances.services import (
@@ -23,6 +28,17 @@ from apps.instances.services import (
     sync_instance_from_scheduler,
 )
 from apps.common.permissions import IsAuthenticated
+from apps.accounts.models import Team
+from apps.board.models import TeamBoardState, TeamChallengeAccess
+from apps.board.services import complete_challenge_from_submission
+from apps.teams.models import MileageHistory, MileageType
+
+
+CHALLENGE_MILEAGE_REWARDS = {
+    Challenge.DifficultyType.HARD: 120,
+    Challenge.DifficultyType.MEDIUM: 60,
+    Challenge.DifficultyType.EASY: 30,
+}
 
 def number_value(value):
     # Decimal 점수를 API 응답용 숫자로 바꾼다
@@ -42,8 +58,10 @@ class ChallengeDetailView(APIView):
         challenge = Challenge.objects.filter(challenge_id=challenge_id).first()
         if challenge is None:
             return fail("CHALLENGE_NOT_FOUND", "존재하지 않는 문제 ID입니다.", 404)
-        opened_challenge = OpenedChallenge.objects.filter(team=team, challenge=challenge).first()
-        if opened_challenge is None:
+        challenge_access = TeamChallengeAccess.objects.filter(
+            team=team, challenge=challenge
+        ).first()
+        if challenge_access is None:
             return fail("CHALLENGE_LOCKED", "아직 개방되지 않은 문제입니다.", 403)
 
         solve = Solve.objects.filter(team=team, challenge=challenge).first()
@@ -71,7 +89,7 @@ class ChallengeDetailView(APIView):
                 "title": challenge.title,
                 "category": challenge.category,
                 "difficulty": challenge.difficulty,
-                "score": number_value(challenge.score),
+                "score": number_value(challenge.current_score),
                 "description": challenge.description,
                 "files": [],
                 "solved_team_count": Solve.objects.filter(challenge=challenge).count(),
@@ -96,14 +114,30 @@ class ChallengeSubmitView(APIView):
         if challenge is None:
             return fail("CHALLENGE_NOT_FOUND", "존재하지 않는 문제 ID입니다.", 404)
 
-        opened_challenge = OpenedChallenge.objects.filter(team=team, challenge=challenge).first()
-        if opened_challenge is None:
+        challenge_access = TeamChallengeAccess.objects.filter(
+            team=team, challenge=challenge
+        ).first()
+        if challenge_access is None:
             return fail("CHALLENGE_LOCKED", "아직 개방되지 않은 문제입니다.", 403)
 
         now = timezone.now()
         submitted_flag_hash = hash_flag(flag)
 
         with transaction.atomic():
+            # Match board mutations: state precedes access and team locks.
+            TeamBoardState.objects.select_for_update().filter(team=team).first()
+            challenge = Challenge.objects.select_for_update().get(pk=challenge.pk)
+            # Lock all affected teams in UUID order before any mileage/score writes
+            # or FK inserts. NO KEY UPDATE allows unrelated FK references on PG.
+            affected_team_ids = set(
+                Solve.objects.filter(challenge=challenge).values_list("team_id", flat=True)
+            )
+            affected_team_ids.add(team.pk)
+            list(
+                Team.objects.select_for_update(no_key=True)
+                .filter(pk__in=affected_team_ids)
+                .order_by("pk")
+            )
             flag_lock, _ = FlagSubmissionLock.objects.select_for_update().get_or_create(
                 team=team,
                 challenge=challenge,
@@ -160,9 +194,11 @@ class ChallengeSubmitView(APIView):
                 )
                 return fail(code, message, status_code, data)
 
-            is_extra_dice_granted = opened_challenge.solve_deadline_at >= now
-            earned_score = challenge.score
-            earned_mileage = 0
+            is_extra_dice_granted = complete_challenge_from_submission(
+                team, challenge, now
+            )
+            earned_score = challenge.current_score
+            earned_mileage = CHALLENGE_MILEAGE_REWARDS[challenge.difficulty]
 
             try:
                 solve = Solve.objects.create(
@@ -175,6 +211,14 @@ class ChallengeSubmitView(APIView):
                 )
             except IntegrityError:
                 return fail("ALREADY_SOLVED", "이미 정답을 맞춘 문제입니다.", 409)
+
+            Team.objects.filter(pk=team.pk).update(mileage=F("mileage") + earned_mileage)
+            MileageHistory.objects.create(
+                team=team,
+                type=MileageType.CHALLENGE_SOLVE,
+                amount=earned_mileage,
+                reason=f"문제 풀이: {challenge.title}",
+            )
 
             flag_lock.failed_count = 0
             flag_lock.locked_until = None
@@ -189,6 +233,10 @@ class ChallengeSubmitView(APIView):
                 result=FlagSubmission.SubmissionResult.CORRECT,
             )
 
+            update_dynamic_score_and_team_scores(challenge)
+            team_score = get_team_total_score(team.pk)
+            team.refresh_from_db(fields=["mileage"])
+
         return ok(
             message="정답입니다!",
             data={
@@ -196,6 +244,8 @@ class ChallengeSubmitView(APIView):
                 "earned_score": number_value(earned_score),
                 "earned_mileage": earned_mileage,
                 "is_extra_dice_granted": is_extra_dice_granted,
+                "team_score": number_value(team_score),
+                "mileage": team.mileage,
                 "solved_at": isoformat_z(solve.solved_at),
             },
         )
