@@ -1,6 +1,16 @@
 # KOTH API 계약 스냅샷
 
-노션 KOTH 데이터베이스를 2026-08-24에 내보낸 로컬 계약 파일이다. 이번 대회는 동아리 6개에 각 1문제, 총 6문제다. 동적 값(UUID, UTC 시각, 팀 토큰)은 예시 형식만 검증한다.
+노션 KOTH 데이터베이스를 2026-08-24에 내보낸 로컬 계약 파일이다. 2026-09-10에 PR #57의 참가자 접속 주소 필드를 반영했다. 이번 대회는 동아리 6개에 각 1문제, 총 6문제다. 동적 값(UUID, UTC 시각, 팀 토큰)은 예시 형식만 검증한다.
+
+## 참가자 접속 주소
+
+목록·동아리 상세·내 팀 조회 응답의 각 `challenges[]` 객체에는 `challenge_url` 필드가 항상 포함된다.
+
+- 타입은 `string | null`이며 주소를 등록하지 않았거나 삭제한 경우 `null`을 반환한다.
+- 등록한 경우 전체 HTTP(S) URL을 반환하며 포트·경로·쿼리를 그대로 유지한다. 아래 응답의 주소는 예시용이다.
+- 문제 상태와 관계없이 등록된 주소를 반환한다. 프론트는 `status === "ACTIVE"`이고 URL이 있을 때 접속 버튼을 활성화한다.
+
+주소 등록 방법과 응답 규칙은 [KOTH 참가자 접속 URL](../../../../docs/koth-challenge-url.md)을 참고한다.
 
 ## GET /api/v1/koth/clubs
 
@@ -20,6 +30,7 @@
         "koth_challenge_id": "018f3f1e-0700-7a91-a30b-630000000010",
         "title": "KOTH A",
         "status": "ACTIVE",
+        "challenge_url": "https://challenge.example:8443/play?mode=koth",
         "open_group": 1,
         "current_owner_team_id": "018f3f1e-0100-7a91-a30b-630000000003",
         "current_owner_team_name": "MJSEC",
@@ -62,6 +73,7 @@ Status Code: 500
       "koth_challenge_id": "018f3f1e-0700-7a91-a30b-630000000010",
       "title": "KOTH A",
       "status": "ACTIVE",
+      "challenge_url": "https://challenge.example:8443/play?mode=koth",
       "open_group": 1,
       "opened_at": "2026-07-31T10:00:00Z",
       "closed_at": null,
@@ -109,6 +121,7 @@ Authorization: Bearer JWT 필요.
       "club_id": "018f3f1e-0600-7a91-a30b-630000000001",
       "title": "KOTH A",
       "status": "ACTIVE",
+      "challenge_url": "https://challenge.example:8443/play?mode=koth",
       "earned_score": 200,
       "rank": 1,
       "solved_at": "2026-07-31T10:15:00Z",
