@@ -1,5 +1,6 @@
 import uuid
 
+from django.core.validators import URLValidator
 from django.db import models
 
 
@@ -33,6 +34,13 @@ class KothChallenge(models.Model):
     koth_challenge_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     club = models.ForeignKey(KothClub, on_delete=models.PROTECT, db_column="club_id", related_name="challenges")
     title = models.CharField(max_length=100)
+    challenge_url = models.URLField(
+        max_length=500,
+        blank=True,
+        default="",
+        validators=[URLValidator(schemes=["http", "https"])],
+        help_text="참가자가 접속할 HTTP(S) 문제 주소. 미정이면 비워 두세요.",
+    )
     status = models.CharField(max_length=20, choices=KothChallengeStatus.choices, default=KothChallengeStatus.SCHEDULED)
     open_group = models.PositiveSmallIntegerField()
     opened_at = models.DateTimeField(null=True, blank=True)

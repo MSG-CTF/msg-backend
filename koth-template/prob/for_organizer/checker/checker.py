@@ -1,11 +1,11 @@
+import http.client
 import json
 import ipaddress
 import os
 import re
 import sys
 from datetime import datetime, timezone
-import urllib.error
-import urllib.request
+from urllib.parse import urlsplit
 
 
 DNS_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9])?$")
@@ -58,20 +58,21 @@ def main():
         result(team_id, koth_challenge_id, 0)
         return
 
+    target = urlsplit(url)
+    connection = http.client.HTTPConnection(target.hostname, target.port, timeout=5)
     try:
-        # scheme은 http로 고정되고 host와 port는 target_url에서 검증된다.
-        with urllib.request.urlopen(url, timeout=5) as response:  # nosec B310
+        # 지정된 문제 서버만 검사한다. 리다이렉트로 다른 서버에 접근하지 않는다.
+        connection.request("GET", "/")
+        with connection.getresponse() as response:
             if response.status != 200:
                 result(team_id, koth_challenge_id, 0)
                 return
-    except urllib.error.URLError as exc:
+    except (OSError, http.client.HTTPException) as exc:
         print(f"service unreachable: {exc}", file=sys.stderr)
         result(team_id, koth_challenge_id, 0)
         return
-    except TimeoutError:
-        print("service timeout", file=sys.stderr)
-        result(team_id, koth_challenge_id, 0)
-        return
+    finally:
+        connection.close()
 
     # TODO: replace this with the real KOTH condition check.
     result(team_id, koth_challenge_id, 100)

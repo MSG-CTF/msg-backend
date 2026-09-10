@@ -291,7 +291,8 @@ Response:
 - 지난 `period_id` 요청: 저장된 과거 결과 반환
 - 잘못된 내부 인증값: 오류 응답
 - 잘못된 팀 토큰: `valid: false` 처리
-- 잘못된 팀 토큰 3회 연속 시도: 429 `TOO_MANY_ATTEMPTS`, 30초 락
+- 문제 서버의 같은 참가자 세션/IP에서 잘못된 팀 토큰 3회 연속 시도: 문제 서버가 429 `TOO_MANY_ATTEMPTS`와 30초 락 적용
+- 플랫폼 `/internal/koth/team_tokens/verify`는 실패 시 `valid: false`를 반환하며 문제 전체를 차단하지 않음
 - 동점 팀 존재: 작성한 동점 기준대로 반환
 - 문제 상태 오류 또는 채점 실패: 오류 응답
 
