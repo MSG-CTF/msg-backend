@@ -62,8 +62,13 @@ def _request_scores(challenge, period):
     connection_class = (
         http.client.HTTPSConnection if parsed_url.scheme == "https" else http.client.HTTPConnection
     )
-    connection = connection_class(parsed_url.hostname, port, timeout=10)
+    # Without an explicit port, http.client reparses an unbracketed IPv6 host
+    # as host:port. Always supply the scheme's default when the URL omits it.
+    if port is None:
+        port = 443 if parsed_url.scheme == "https" else 80
+    connection = None
     try:
+        connection = connection_class(parsed_url.hostname, port, timeout=10)
         # Use only HTTP(S) and never follow redirects with the internal token.
         connection.request(
             "GET", path, headers={"X-KOTH-Internal-Token": token, "Accept": "application/json"},
@@ -75,7 +80,8 @@ def _request_scores(challenge, period):
     except (OSError, http.client.HTTPException, UnicodeError, ValueError) as exc:
         raise ScoreFetchError(f"score server request failed: {exc}") from exc
     finally:
-        connection.close()
+        if connection is not None:
+            connection.close()
     try:
         payload = json.loads(body)
     except json.JSONDecodeError as exc:
