@@ -52,6 +52,7 @@
 ## Idempotency-Key
 
 - 보드 쓰기 API는 `Idempotency-Key` 헤더가 필수다.
+- 보드 API의 키는 최대 255자다. 초과하면 처리·저장 전에 `400 INVALID_REQUEST`를 반환한다.
 - 멱등 범위는 `(user_id, HTTP method, path, Idempotency-Key)` 조합이다.
 - 서버는 요청 본문 해시, 처리 상태, 최초 HTTP 상태와 응답 본문을 DB에 영속 저장한다.
 - 같은 키와 같은 본문의 재요청은 Redis 초기화나 서버 재시작 이후에도 최초 응답을 반환한다.
