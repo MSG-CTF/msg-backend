@@ -88,6 +88,8 @@ def _request_scores(challenge, period):
         raise ScoreFetchError("score server returned invalid JSON") from exc
     if not isinstance(payload, dict) or payload.get("code") != "SUCCESS":
         raise ScoreFetchError("score server returned an unsuccessful payload")
+    if "data" not in payload:
+        raise ScoreFetchError("score server response is missing data")
     if payload.get("data") is not None and not isinstance(payload.get("data"), dict):
         raise ScoreFetchError("score server returned an invalid data payload")
     return payload
@@ -173,9 +175,15 @@ def poll_challenge_period(challenge, period):
         payload = _request_scores(challenge, period)
         results = _validated_results(challenge, period, payload)
     except ScoreFetchError as exc:
-        KothScorePeriod.objects.filter(pk=record.pk).update(
+        # Another poll may have committed while this request was in flight.
+        # Keep APPLIED terminal with a conditional update under the DB row lock.
+        updated = KothScorePeriod.objects.filter(pk=record.pk).exclude(
+            status=KothScorePeriodStatus.APPLIED,
+        ).update(
             status=KothScorePeriodStatus.FAILED, last_error=str(exc), updated_at=timezone.now()
         )
+        if not updated:
+            return False
         raise
 
     with transaction.atomic():
