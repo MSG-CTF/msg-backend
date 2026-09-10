@@ -8,6 +8,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.accounts.models import Team, User
+from apps.board.models import Cell, TeamChallengeAccess
 from apps.challenge.models import Challenge
 from apps.challenge.services import hash_flag
 from apps.instances.models import ChallengeRuntimeConfig, InstanceLock
@@ -40,6 +41,17 @@ class InstanceLockTests(TestCase):
             challenge=self.challenge,
             container_image="registry.msgctf.local/challenges/web-basic:latest",
             container_port=8080,
+        )
+        self.cell = Cell.objects.create(
+            cell_index=1,
+            type=Cell.CellType.CHALLENGE,
+            difficulty=Cell.Difficulty.EASY,
+            name="challenge-cell-1",
+        )
+        TeamChallengeAccess.objects.create(
+            team=self.team,
+            challenge=self.challenge,
+            source_cell=self.cell,
         )
         self.auth()
 
@@ -76,3 +88,20 @@ class InstanceLockTests(TestCase):
         self.assertEqual(res.status_code, 202)
         self.assertEqual(res.data["code"], "SUCCESS")
         self.assertTrue(InstanceLock.objects.filter(user=self.user).exists())
+
+    @patch("apps.instances.views.call_scheduler_create")
+    def test_instance_create_rejects_locked_challenge(self, call_scheduler_create):
+        TeamChallengeAccess.objects.filter(
+            team=self.team,
+            challenge=self.challenge,
+        ).delete()
+
+        res = self.client.post(
+            "/api/v1/instances",
+            {"challenge_id": str(self.challenge.challenge_id)},
+            format="json",
+        )
+
+        self.assertEqual(res.status_code, 403)
+        self.assertEqual(res.data["code"], "CHALLENGE_LOCKED")
+        call_scheduler_create.assert_not_called()

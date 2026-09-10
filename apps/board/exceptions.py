@@ -27,6 +27,18 @@ class IdempotencyKeyRequired(APIError):
     message = "Idempotency-Key 헤더가 필요합니다."
 
 
+class IdempotencyKeyConflict(APIError):
+    status_code = status.HTTP_409_CONFLICT
+    code = "IDEMPOTENCY_KEY_CONFLICT"
+    message = "같은 Idempotency-Key로 다른 요청을 보낼 수 없습니다."
+
+
+class IdempotencyInProgress(APIError):
+    status_code = status.HTTP_409_CONFLICT
+    code = "IDEMPOTENCY_IN_PROGRESS"
+    message = "같은 Idempotency-Key 요청이 처리 중입니다. 잠시 후 다시 시도해주세요."
+
+
 class RequestBodyNotAllowed(APIError):
     status_code = status.HTTP_400_BAD_REQUEST
     code = "REQUEST_BODY_NOT_ALLOWED"

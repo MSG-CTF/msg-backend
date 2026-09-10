@@ -1,16 +1,22 @@
 from datetime import timedelta
+import time
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 from django.core.cache import cache
 from django.core.management import call_command
-from django.test import SimpleTestCase, TestCase, override_settings
+from django.db import close_old_connections
+from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
-from rest_framework.test import APIClient
+from rest_framework.test import APIClient, APIRequestFactory
+from rest_framework.response import Response
 
 from apps.accounts.models import Team, User
 from apps.board.models import (
     Cell,
     ChanceCard,
+    DiceRoll,
+    IdempotencyRequest,
     PendingDiceRoll,
     QuarantineEscapeCode,
     TeamBoardState,
@@ -20,10 +26,112 @@ from apps.board.models import (
     TeamChanceCard,
 )
 from apps.board.services import SOLVE_LIMIT_SECONDS, get_or_create_board_state
-from apps.challenge.models import Challenge
+from apps.board.idempotency import idempotent
+from apps.board.exceptions import IdempotencyKeyConflict
+from apps.challenge.models import Challenge, Solve
 from apps.teams.models import MileageHistory
 
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
+
+
+@override_settings(CACHES=LOCMEM)
+class IdempotencyPersistenceTestCase(TransactionTestCase):
+    def setUp(self):
+        cache.clear()
+        self.team = Team.objects.create(team_name="idempotency-team")
+        self.user = User.objects.create_user(
+            login_id="idempotency-user",
+            password="pw1234",
+            nickname="idempotency-user",
+            team=self.team,
+        )
+        self.factory = APIRequestFactory()
+
+    def request(self, body, key="parallel-key"):
+        request = self.factory.post(
+            "/api/v1/board/dice/roll",
+            body,
+            format="json",
+            HTTP_IDEMPOTENCY_KEY=key,
+        )
+        request.user = self.user
+        return request
+
+    def test_same_key_concurrent_requests_execute_view_once_and_replay_response(self):
+        calls = []
+
+        class ProbeView:
+            @idempotent
+            def post(self, request):
+                calls.append(request.body)
+                time.sleep(0.2)
+                return Response({"value": len(calls)}, status=200)
+
+        requests = [self.request({"roll": True}) for _ in range(2)]
+
+        def invoke(request):
+            close_old_connections()
+            try:
+                return ProbeView().post(request)
+            finally:
+                close_old_connections()
+
+        with patch("apps.board.idempotency.cache.get", return_value=None):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                responses = list(executor.map(invoke, requests))
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(responses[0].data, responses[1].data)
+        self.assertEqual(IdempotencyRequest.objects.count(), 1)
+        self.assertEqual(
+            IdempotencyRequest.objects.get().status,
+            IdempotencyRequest.Status.SUCCEEDED,
+        )
+
+    def test_same_key_with_different_body_is_rejected_after_cache_clear(self):
+        class ProbeView:
+            @idempotent
+            def post(self, request):
+                return Response({"ok": True}, status=200)
+
+        ProbeView().post(self.request({"roll": True}, key="conflict-key"))
+        cache.clear()
+
+        with self.assertRaises(IdempotencyKeyConflict):
+            ProbeView().post(self.request({"roll": False}, key="conflict-key"))
+
+    def test_database_replay_preserves_datetime_response_exactly(self):
+        opened_at = timezone.now().replace(microsecond=123456)
+
+        class ProbeView:
+            @idempotent
+            def post(self, request):
+                return Response({"opened_at": opened_at}, status=200)
+
+        first = ProbeView().post(self.request({}, key="datetime-key"))
+        cache.clear()
+        second = ProbeView().post(self.request({}, key="datetime-key"))
+
+        self.assertIsInstance(first.data["opened_at"], str)
+        self.assertEqual(first.data, second.data)
+        self.assertEqual(
+            first.data,
+            IdempotencyRequest.objects.get(key="datetime-key").response_body,
+        )
+
+    def test_view_exception_rolls_back_claim_and_domain_changes(self):
+        class ProbeView:
+            @idempotent
+            def post(inner_self, request):
+                Team.objects.filter(pk=self.team.pk).update(mileage=120)
+                raise RuntimeError("simulated process failure")
+
+        with self.assertRaises(RuntimeError):
+            ProbeView().post(self.request({}, key="crash-key"))
+
+        self.team.refresh_from_db()
+        self.assertEqual(self.team.mileage, 0)
+        self.assertFalse(IdempotencyRequest.objects.filter(key="crash-key").exists())
 
 
 @override_settings(DEBUG=False)
@@ -58,6 +166,10 @@ class BoardApiTestCase(TestCase):
         )
 
         self.state = get_or_create_board_state(self.team)
+        # Most action scenarios exercise a team with one remaining roll.
+        # Initial-state tests below remove this fixture to exercise creation.
+        self.state.dice_rolls_left = 1
+        self.state.save(update_fields=["dice_rolls_left"])
         self.as_leader()
 
     def _login(self, login_id):
@@ -166,13 +278,15 @@ class BoardApiTestCase(TestCase):
         self.assertEqual(response.json()["code"], "TOKEN_MISSING")
 
     def test_board_me_returns_initial_state(self):
+        self.state.delete()
         response = self.client.get("/api/v1/board/me")
 
         self.assertEqual(response.status_code, 200)
         data = response.json()["data"]
         self.assertEqual(data["position"], 1)
         self.assertEqual(data["type"], Cell.CellType.START)
-        self.assertEqual(data["dice_rolls_left"], 1)
+        self.assertEqual(data["dice_rolls_left"], 3)
+        self.assertIsNone(data["next_dice_reset_at"])
         self.assertFalse(data["board_completed"])
         self.assertEqual(data["consumed_cell_indexes"], [])
         self.assertEqual(data["cell_states"], [])
@@ -231,12 +345,41 @@ class BoardApiTestCase(TestCase):
     # ---------------------------------------------------------------- GET /board/dice/status
 
     def test_dice_status_initial(self):
+        self.state.delete()
         response = self.client.get("/api/v1/board/dice/status")
 
         data = response.json()["data"]
         self.assertTrue(data["can_roll"])
         self.assertIsNone(data["blocked_reason"])
-        self.assertEqual(data["dice_rolls_left"], 1)
+        self.assertEqual(data["dice_rolls_left"], 3)
+        self.assertIsNone(data["next_dice_reset_at"])
+
+    def test_model_and_seed_board_start_with_three_rolls(self):
+        state = TeamBoardState.objects.create(team=self.other_team, position_id=1)
+        state.refresh_from_db()
+        self.assertEqual(state.dice_rolls_left, 3)
+        self.assertIsNone(state.next_dice_reset_at)
+        seeded_state = TeamBoardState.objects.get(team__team_name="test-team")
+        self.assertEqual(seeded_state.dice_rolls_left, 3)
+        self.assertIsNone(seeded_state.next_dice_reset_at)
+
+    def test_first_roll_uses_one_of_three_and_repeated_reads_do_not_grant_again(self):
+        self.state.delete()
+        now = timezone.now().replace(microsecond=0)
+        with patch("apps.board.services.timezone.now", return_value=now):
+            with patch("apps.board.services.random.randint", return_value=1):
+                response = self.post_idem("/api/v1/board/dice/roll")
+            self.assertEqual(response.status_code, 200)
+            for path in ("/api/v1/board/me", "/api/v1/board/dice/status"):
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.data["data"]["dice_rolls_left"], 2)
+                self.assertEqual(
+                    response.data["data"]["next_dice_reset_at"], now + timedelta(minutes=15),
+                )
+        state = TeamBoardState.objects.get(team=self.team)
+        self.assertEqual(state.dice_rolls_left, 2)
+        self.assertEqual(DiceRoll.objects.filter(team=self.team).count(), 1)
 
     def test_dice_status_challenge_not_selected(self):
         self.set_position(2, consumed=True)  # 시드 결과 기준 CHALLENGE 칸
@@ -317,6 +460,35 @@ class BoardApiTestCase(TestCase):
         second = self.post_idem("/api/v1/board/dice/roll", key="same-key")
 
         self.assertEqual(first.json(), second.json())
+        self.assertEqual(TeamBoardState.objects.get(team=self.team).dice_rolls_left, 0)
+
+    def test_dice_roll_replays_from_database_when_cache_is_cleared(self):
+        with patch("apps.board.services.random.randint", side_effect=[1, 1]):
+            first = self.post_idem("/api/v1/board/dice/roll", key="restart-key")
+        cache.clear()
+        second = self.post_idem("/api/v1/board/dice/roll", key="restart-key")
+
+        self.assertEqual(first.json(), second.json())
+        self.assertEqual(DiceRoll.objects.filter(team=self.team).count(), 1)
+        self.assertEqual(TeamBoardState.objects.get(team=self.team).dice_rolls_left, 0)
+
+    def test_dice_roll_cache_write_failure_does_not_repeat_side_effects(self):
+        with patch("apps.board.services.random.randint", side_effect=[1, 1]):
+            with patch(
+                "apps.board.idempotency.cache.set",
+                side_effect=RuntimeError("redis unavailable"),
+            ):
+                with self.assertLogs("apps.board.idempotency", level="WARNING"):
+                    first = self.post_idem(
+                        "/api/v1/board/dice/roll", key="cache-failure-key"
+                    )
+
+        cache.clear()
+        second = self.post_idem("/api/v1/board/dice/roll", key="cache-failure-key")
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.json(), second.json())
+        self.assertEqual(DiceRoll.objects.filter(team=self.team).count(), 1)
         self.assertEqual(TeamBoardState.objects.get(team=self.team).dice_rolls_left, 0)
 
     def test_dice_roll_moves_team_and_consumes_cell(self):
@@ -575,6 +747,106 @@ class BoardApiTestCase(TestCase):
         self.assertEqual(second.status_code, 409)
         self.assertEqual(second.json()["code"], "CELL_ALREADY_OPENED")
 
+    def test_cell_open_database_replay_preserves_exact_response(self):
+        self.set_position(2, consumed=True)
+        current = self.client.get("/api/v1/board/cell/current").json()["data"]
+        challenge_id = current["challenge_candidates"][0]["challenge_id"]
+
+        with patch(
+            "apps.board.idempotency.cache.set",
+            side_effect=RuntimeError("redis unavailable"),
+        ):
+            with self.assertLogs("apps.board.idempotency", level="WARNING"):
+                first = self.post_idem(
+                    "/api/v1/board/cell/open",
+                    {"challenge_id": challenge_id},
+                    key="open-cache-failure",
+                )
+
+        cache.clear()
+        second = self.post_idem(
+            "/api/v1/board/cell/open",
+            {"challenge_id": challenge_id},
+            key="open-cache-failure",
+        )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.json(), second.json())
+        self.assertEqual(
+            first.json(),
+            IdempotencyRequest.objects.get(key="open-cache-failure").response_body,
+        )
+        self.assertEqual(
+            TeamChallengeAccess.objects.filter(
+                team=self.team,
+                challenge_id=challenge_id,
+            ).count(),
+            1,
+        )
+
+    def test_board_open_challenge_submit_and_board_completion_are_one_flow(self):
+        cell = self.set_position(2, consumed=True)
+        current = self.client.get("/api/v1/board/cell/current").json()["data"]
+        challenge_id = current["challenge_candidates"][0]["challenge_id"]
+        challenge = Challenge.objects.get(challenge_id=challenge_id)
+
+        opened = self.post_idem(
+            "/api/v1/board/cell/open", {"challenge_id": challenge_id}, key="integrated-open"
+        )
+        self.assertEqual(opened.status_code, 200)
+        self.assertTrue(
+            TeamChallengeAccess.objects.filter(team=self.team, challenge=challenge).exists()
+        )
+
+        detail = self.client.get(f"/api/v1/challenges/{challenge_id}")
+        self.assertEqual(detail.status_code, 200)
+
+        challenge_number = challenge.board_meta.challenge_number
+        submit = self.client.post(
+            f"/api/v1/challenges/{challenge_id}/submit",
+            {"flag": f"MSG{{challenge_{challenge_number:02d}}}"},
+            format="json",
+        )
+        self.assertEqual(submit.status_code, 200)
+        self.assertEqual(submit.json()["data"]["earned_mileage"], 120)
+
+        access = TeamChallengeAccess.objects.get(team=self.team, challenge=challenge)
+        self.assertEqual(access.status, TeamChallengeAccess.Status.CLEARED)
+        self.state.refresh_from_db()
+        self.assertIsNone(self.state.active_challenge_access_id)
+
+    def test_challenge_submission_failure_rolls_back_board_completion(self):
+        self.set_position(2, consumed=True)
+        current = self.client.get("/api/v1/board/cell/current").json()["data"]
+        challenge_id = current["challenge_candidates"][0]["challenge_id"]
+        challenge = Challenge.objects.get(challenge_id=challenge_id)
+        self.post_idem(
+            "/api/v1/board/cell/open",
+            {"challenge_id": challenge_id},
+            key="rollback-open",
+        )
+        access = TeamChallengeAccess.objects.get(team=self.team, challenge=challenge)
+
+        with patch(
+            "apps.challenge.views.update_dynamic_score_and_team_scores",
+            side_effect=RuntimeError("simulated scoring failure"),
+        ):
+            with self.assertLogs("apps.common.exceptions", level="ERROR"):
+                response = self.client.post(
+                    f"/api/v1/challenges/{challenge_id}/submit",
+                    {"flag": f"MSG{{challenge_{challenge.board_meta.challenge_number:02d}}}"},
+                    format="json",
+                )
+
+        self.assertEqual(response.status_code, 500)
+        access.refresh_from_db()
+        self.state.refresh_from_db()
+        self.team.refresh_from_db()
+        self.assertEqual(access.status, TeamChallengeAccess.Status.OPENED)
+        self.assertEqual(self.state.active_challenge_access_id, access.id)
+        self.assertEqual(self.team.mileage, 0)
+        self.assertFalse(Solve.objects.filter(team=self.team, challenge=challenge).exists())
+
     def test_cell_open_requires_challenge_cell(self):
         response = self.post_idem("/api/v1/board/cell/open", {"challenge_id": "not-a-uuid"})
         self.assertEqual(response.status_code, 400)
@@ -641,11 +913,11 @@ class BoardApiTestCase(TestCase):
         self.assertEqual(data["dice_rolls_left"], 2)
         self.assertTrue(TeamCellConsumption.objects.filter(team=self.team, cell_id=7).exists())
 
-    def test_chance_now_clears_stale_dice_reset_timer(self):
-        # chance/now의 +1 지급도 grant_dice_roll을 거치므로 대기 중인 회복 타이머를 지워야 한다.
+    def test_chance_now_preserves_dice_reset_timer_below_capacity(self):
         self.set_position(7, consumed=True)
         self.state.dice_rolls_left = 0
-        self.state.next_dice_reset_at = timezone.now() + timedelta(minutes=15)
+        deadline = timezone.now() + timedelta(minutes=5)
+        self.state.next_dice_reset_at = deadline
         self.state.save(update_fields=["dice_rolls_left", "next_dice_reset_at"])
 
         with patch("apps.board.services.random.choice") as choice_mock:
@@ -655,7 +927,7 @@ class BoardApiTestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["data"]["dice_rolls_left"], 1)
         self.state.refresh_from_db()
-        self.assertIsNone(self.state.next_dice_reset_at)
+        self.assertEqual(self.state.next_dice_reset_at, deadline)
 
     def test_chance_now_requires_chance_cell(self):
         response = self.post_idem("/api/v1/board/chance/now")
@@ -701,12 +973,10 @@ class BoardApiTestCase(TestCase):
         self.assertTrue(data["used"])
         self.assertEqual(data["dice_rolls_left"], 2)
 
-    def test_chance_use_grant_extra_roll_clears_stale_dice_reset_timer(self):
-        # 회귀 테스트: 주사위가 0개일 때 걸린 15분 회복 타이머가 이 카드로 먼저 채워진 뒤에도
-        # 그대로 남아 있으면, 나중에 타이머가 만료될 때 회복 로직이 이미 채워진 주사위 위에
-        # 1회를 더 얹어준다 (이중 지급). 카드 사용 시점에 타이머를 같이 지워야 한다.
+    def test_chance_use_grant_extra_roll_preserves_dice_reset_timer_below_capacity(self):
         self.state.dice_rolls_left = 0
-        self.state.next_dice_reset_at = timezone.now() + timedelta(minutes=15)
+        deadline = timezone.now() + timedelta(minutes=5)
+        self.state.next_dice_reset_at = deadline
         self.state.save(update_fields=["dice_rolls_left", "next_dice_reset_at"])
         self.draw_card("card_extra_roll")
 
@@ -715,6 +985,74 @@ class BoardApiTestCase(TestCase):
         self.assertEqual(response.json()["data"]["dice_rolls_left"], 1)
 
         self.state.refresh_from_db()
+        self.assertEqual(self.state.next_dice_reset_at, deadline)
+
+    def test_extra_roll_card_is_not_consumed_at_capacity(self):
+        self.state.dice_rolls_left = 3
+        self.state.next_dice_reset_at = None
+        self.state.save(update_fields=["dice_rolls_left", "next_dice_reset_at"])
+        draw = self.draw_card("card_extra_roll")
+        response = self.post_idem("/api/v1/board/chance/use", {"card_id": draw.card_id})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["code"], "CHANCE_CARD_WRONG_TIMING")
+        draw.refresh_from_db()
+        self.assertIsNone(draw.used_at)
+        self.state.refresh_from_db()
+        self.assertEqual(self.state.dice_rolls_left, 3)
+
+    def test_roll_starts_recharge_at_capacity_and_preserves_existing_deadline(self):
+        now = timezone.now()
+        for initial_rolls in (3, 2, 1):
+            with self.subTest(initial_rolls=initial_rolls):
+                self.set_position(1)
+                self.state.dice_rolls_left = initial_rolls
+                deadline = now + timedelta(minutes=5) if initial_rolls < 3 else None
+                self.state.next_dice_reset_at = deadline
+                self.state.save(update_fields=["dice_rolls_left", "next_dice_reset_at"])
+                with patch("apps.board.services.timezone.now", return_value=now):
+                    with patch("apps.board.services.random.randint", return_value=1):
+                        response = self.post_idem(
+                            "/api/v1/board/dice/roll", key=f"recharge-roll-{initial_rolls}",
+                        )
+                self.assertEqual(response.status_code, 200)
+                self.state.refresh_from_db()
+                self.assertEqual(self.state.dice_rolls_left, initial_rolls - 1)
+                self.assertEqual(
+                    self.state.next_dice_reset_at, deadline or now + timedelta(minutes=15),
+                )
+
+    def test_recharge_uses_elapsed_intervals_and_stops_at_capacity(self):
+        deadline = timezone.now() + timedelta(minutes=5)
+        self.state.dice_rolls_left = 0
+        self.state.next_dice_reset_at = deadline
+        self.state.save(update_fields=["dice_rolls_left", "next_dice_reset_at"])
+        for minutes_later, expected_rolls, next_minutes in (
+            (0, 1, 15), (16, 2, 30), (120, 3, None), (180, 3, None),
+        ):
+            with self.subTest(minutes_later=minutes_later):
+                with patch(
+                    "apps.board.services.timezone.now",
+                    return_value=deadline + timedelta(minutes=minutes_later),
+                ):
+                    response = self.client.get("/api/v1/board/dice/status")
+                self.assertEqual(response.status_code, 200)
+                self.state.refresh_from_db()
+                self.assertEqual(self.state.dice_rolls_left, expected_rolls)
+                self.assertEqual(
+                    self.state.next_dice_reset_at,
+                    deadline + timedelta(minutes=next_minutes) if next_minutes is not None else None,
+                )
+
+    def test_start_reward_at_capacity_reports_zero_and_does_not_restart_recharge(self):
+        self.set_position(Cell.objects.get(type=Cell.CellType.AIRPORT).pk)
+        self.state.dice_rolls_left = 3
+        self.state.next_dice_reset_at = None
+        self.state.save(update_fields=["dice_rolls_left", "next_dice_reset_at"])
+        response = self.post_idem("/api/v1/board/airport/move", {"destination_index": 1})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["data"]["start_reward"]["roll_gained"], 0)
+        self.state.refresh_from_db()
+        self.assertEqual(self.state.dice_rolls_left, 3)
         self.assertIsNone(self.state.next_dice_reset_at)
 
     def test_chance_use_free_move(self):
@@ -1117,6 +1455,45 @@ class BoardApiTestCase(TestCase):
             "/api/v1/board/chance/use", {"card_id": "card_extra_roll"}, key="use-1"
         )
         self.assertEqual(use_response.status_code, 200)
+
+    def test_duplicate_card_id_remaining_card_is_usable_after_discard(self):
+        self.draw_card("card_extra_roll", source_cell_index=7)
+        self.draw_card("card_extra_roll", source_cell_index=30)
+
+        discard_response = self.post_idem(
+            "/api/v1/board/chance/discard",
+            {"card_id": "card_extra_roll"},
+            key="discard-duplicate",
+        )
+
+        self.assertEqual(discard_response.status_code, 200)
+        self.assertEqual(
+            TeamChanceCard.objects.filter(
+                team=self.team,
+                card_id="card_extra_roll",
+                discarded_at__isnull=True,
+                used_at__isnull=True,
+            ).count(),
+            1,
+        )
+
+        use_response = self.post_idem(
+            "/api/v1/board/chance/use",
+            {"card_id": "card_extra_roll"},
+            key="use-duplicate-remaining",
+        )
+
+        self.assertEqual(use_response.status_code, 200)
+        self.state.refresh_from_db()
+        self.assertEqual(self.state.dice_rolls_left, 2)
+        self.assertEqual(
+            TeamChanceCard.objects.filter(
+                team=self.team,
+                card_id="card_extra_roll",
+                used_at__isnull=False,
+            ).count(),
+            1,
+        )
 
     def test_chance_discard_requires_two_held_cards(self):
         self.draw_card("card_extra_roll")
