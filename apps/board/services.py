@@ -1118,7 +1118,9 @@ def _effect_free_move(team, state, draw, payload):
 
 
 def _effect_grant_extra_roll(team, state, draw, payload):
-    grant_dice_roll(state, 1)
+    # Recharge may fill capacity after the timing check, even under the lock.
+    if grant_dice_roll(state, 1) == 0:
+        raise ChanceCardWrongTiming()
     state.save(update_fields=["dice_rolls_left", "next_dice_reset_at", "updated_at"])
 
     draw.used_at = timezone.now()
