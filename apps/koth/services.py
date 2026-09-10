@@ -1,9 +1,8 @@
+import http.client
 import json
 import os
 import uuid
-import urllib.error
 import urllib.parse
-import urllib.request
 from collections import defaultdict
 from datetime import timedelta, timezone as dt_timezone
 from decimal import Decimal, InvalidOperation
@@ -43,22 +42,40 @@ def _request_scores(challenge, period):
     token = os.getenv(challenge.score_api_token_env)
     if not token:
         raise ScoreFetchError("score API token environment variable is empty")
-    parsed_url = urllib.parse.urlsplit(challenge.score_api_url)
-    if parsed_url.scheme not in {"http", "https"} or not parsed_url.hostname:
-        raise ScoreFetchError("score API URL must be an http or https URL")
-    query = urllib.parse.urlencode({"period_id": format_utc(period), "scored_at": format_utc(period)})
-    request = urllib.request.Request(
-        f"{challenge.score_api_url}?{query}",
-        headers={"X-KOTH-Internal-Token": token, "Accept": "application/json"},
-        method="GET",
-    )
     try:
-        with urllib.request.urlopen(request, timeout=10) as response:  # nosec B310 - scheme and host validated above
-            body = response.read().decode("utf-8")
+        parsed_url = urllib.parse.urlsplit(challenge.score_api_url)
+        port = parsed_url.port
+    except ValueError as exc:
+        raise ScoreFetchError("score API URL is invalid") from exc
+    if (
+        parsed_url.scheme not in {"http", "https"} or not parsed_url.hostname
+        or parsed_url.username is not None or parsed_url.password is not None
+        or parsed_url.fragment or port == 0
+    ):
+        raise ScoreFetchError("score API URL must be HTTP(S), without credentials or a fragment")
+    query = [
+        (key, value) for key, value in urllib.parse.parse_qsl(parsed_url.query, keep_blank_values=True)
+        if key not in {"period_id", "scored_at"}
+    ]
+    query.extend((key, format_utc(period)) for key in ("period_id", "scored_at"))
+    path = f"{parsed_url.path or '/'}?{urllib.parse.urlencode(query)}"
+    connection_class = (
+        http.client.HTTPSConnection if parsed_url.scheme == "https" else http.client.HTTPConnection
+    )
+    connection = connection_class(parsed_url.hostname, port, timeout=10)
+    try:
+        # Use only HTTP(S) and never follow redirects with the internal token.
+        connection.request(
+            "GET", path, headers={"X-KOTH-Internal-Token": token, "Accept": "application/json"},
+        )
+        with connection.getresponse() as response:
             if response.status != 200:
                 raise ScoreFetchError(f"score server returned HTTP {response.status}")
-    except (urllib.error.URLError, TimeoutError, UnicodeDecodeError) as exc:
+            body = response.read().decode("utf-8")
+    except (OSError, http.client.HTTPException, UnicodeError, ValueError) as exc:
         raise ScoreFetchError(f"score server request failed: {exc}") from exc
+    finally:
+        connection.close()
     try:
         payload = json.loads(body)
     except json.JSONDecodeError as exc:

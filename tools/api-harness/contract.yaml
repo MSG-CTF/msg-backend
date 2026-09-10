@@ -105,6 +105,12 @@ common_error_codes:
   - {http: 405, code: METHOD_NOT_ALLOWED}
   # 인스턴스 스케줄러 연동 (PR #8) — 외부 scheduler 미가용 시
   - {http: 503, code: SCHEDULER_UNAVAILABLE}
+  # KOTH 동아리 조회와 문제별 리더보드 (PR #20, #55)
+  - {http: 400, code: INVALID_CLUB_ID}
+  - {http: 404, code: CLUB_NOT_FOUND}
+  - {http: 400, code: KOTH_CHALLENGE_ID_REQUIRED}
+  - {http: 400, code: INVALID_KOTH_CHALLENGE_ID}
+  - {http: 404, code: KOTH_CHALLENGE_NOT_FOUND}
   # KOTH 내부 API 전용 (/internal/koth/scores, /internal/koth/team_tokens/verify, /internal/teams)
   - {http: 400, code: INVALID_PERIOD}
   - {http: 401, code: INVALID_INTERNAL_TOKEN}
