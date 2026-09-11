@@ -2,7 +2,7 @@ import random
 from datetime import timedelta
 
 from django.db import transaction
-from django.db.models import F
+from django.db.models import F, Q
 from django.utils import timezone
 
 from apps.accounts.models import Team
@@ -589,8 +589,9 @@ def get_current_cell_candidates(team):
         "challenge_id", flat=True
     )
 
-    TeamCellCandidate.objects.filter(
-        team=team, cell=cell, challenge_id__in=opened_challenge_ids
+    TeamCellCandidate.objects.filter(team=team, cell=cell).filter(
+        Q(challenge_id__in=opened_challenge_ids)
+        | Q(status=TeamCellCandidate.Status.OFFERED, challenge__is_published=False)
     ).delete()
 
     existing_candidates = list(
@@ -603,7 +604,9 @@ def get_current_cell_candidates(team):
     if missing_count > 0:
         existing_challenge_ids = [candidate.challenge_id for candidate in existing_candidates]
         available_challenges = list(
-            Challenge.objects.filter(difficulty=cell.difficulty, board_meta__isnull=False)
+            Challenge.objects.filter(
+                difficulty=cell.difficulty, board_meta__isnull=False, is_published=True
+            )
             .exclude(challenge_id__in=opened_challenge_ids)
             .exclude(challenge_id__in=existing_challenge_ids)
             .select_related("board_meta")
@@ -645,9 +648,17 @@ def open_current_cell_challenge(team, challenge_id):
         if TeamChallengeAccess.objects.filter(team=team, source_cell=cell).exists():
             raise CellAlreadyOpened()
 
+        # Serialize selection with admin visibility updates to the same challenge.
         candidate = (
-            TeamCellCandidate.objects.select_related("challenge", "challenge__board_meta")
-            .filter(team=team, cell=cell, challenge_id=challenge_id)
+            TeamCellCandidate.objects.select_for_update(of=("challenge",))
+            .select_related("challenge", "challenge__board_meta")
+            .filter(
+                team=team,
+                cell=cell,
+                challenge_id=challenge_id,
+                status=TeamCellCandidate.Status.OFFERED,
+                challenge__is_published=True,
+            )
             .first()
         )
         if candidate is None:
