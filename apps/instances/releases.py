@@ -245,7 +245,7 @@ def public_container(release):
 
 
 def is_deployable(release):
-    # 포트별 공개 설정을 Scheduler의 컨테이너 단위 expose로 손실 없이 변환한다
+    # Scheduler의 exposed_ports 및 격리 프로필별 공개 규칙을 확인한다
     if release.registry_revision <= 0:
         return False
 
@@ -254,15 +254,26 @@ def is_deployable(release):
         return False
 
     exposed_port_count = 0
+    exposed_containers = []
     for container in containers:
         if not 1 <= len(container.ports) <= MAX_PORTS_PER_CONTAINER:
             return False
         public_ports = [entry["port"] for entry in container.ports if entry.get("public")]
-        if public_ports and len(public_ports) != len(container.ports):
-            return False
+        if public_ports:
+            exposed_containers.append((container, public_ports))
         exposed_port_count += len(public_ports)
 
-    return 1 <= exposed_port_count <= MAX_EXPOSED_PORTS
+    if not 1 <= exposed_port_count <= MAX_EXPOSED_PORTS:
+        return False
+
+    if release.isolation_profile == IsolationProfile.PWN:
+        return (
+            len(exposed_containers) == 1
+            and len(exposed_containers[0][0].ports) == 1
+            and len(exposed_containers[0][1]) == 1
+        )
+
+    return True
 
 
 def serialize_release(release, current_release_id=None):

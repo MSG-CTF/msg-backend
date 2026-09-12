@@ -402,7 +402,7 @@ class ReleaseActivateTests(ReleaseTestBase):
 
         self.assertEqual(res.status_code, 200)
 
-    def test_activate_rejects_mixed_public_and_private_ports(self):
+    def test_activate_accepts_mixed_public_and_private_ports_for_web(self):
         self.auth("root")
         registered = self.register(
             containers=[
@@ -417,12 +417,80 @@ class ReleaseActivateTests(ReleaseTestBase):
             ]
         )
         self.assertEqual(registered.status_code, 200)
-        self.assertFalse(registered.data["data"]["is_deployable"])
+        self.assertTrue(registered.data["data"]["is_deployable"])
 
         res = self.activate(registered.data["data"]["release_id"])
 
+        self.assertEqual(res.status_code, 200)
+
+    def test_activate_rejects_multiple_public_containers_for_pwn(self):
+        self.auth("root")
+        registered = self.register(
+            isolation_profile="PWN",
+            containers=[
+                {
+                    "name": "pwn",
+                    "image": f"ghcr.io/msg-ctf/challenges/web-basic/pwn@sha256:{DIGEST_A}",
+                    "ports": [{"port": 31337, "public": True}],
+                },
+                {
+                    "name": "admin",
+                    "image": f"ghcr.io/msg-ctf/challenges/web-basic/admin@sha256:{DIGEST_B}",
+                    "ports": [{"port": 8080, "public": True}],
+                },
+            ],
+        )
+
+        self.assertEqual(registered.status_code, 200)
+        self.assertFalse(registered.data["data"]["is_deployable"])
+        res = self.activate(registered.data["data"]["release_id"])
         self.assertEqual(res.status_code, 400)
         self.assertEqual(res.data["code"], "RELEASE_NOT_DEPLOYABLE")
+
+    def test_activate_rejects_multiple_declared_ports_on_public_pwn_container(self):
+        self.auth("root")
+        registered = self.register(
+            isolation_profile="PWN",
+            containers=[
+                {
+                    "name": "pwn",
+                    "image": f"ghcr.io/msg-ctf/challenges/web-basic/pwn@sha256:{DIGEST_A}",
+                    "ports": [
+                        {"port": 31337, "public": True},
+                        {"port": 9000, "public": False},
+                    ],
+                }
+            ],
+        )
+
+        self.assertEqual(registered.status_code, 200)
+        self.assertFalse(registered.data["data"]["is_deployable"])
+        res = self.activate(registered.data["data"]["release_id"])
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data["code"], "RELEASE_NOT_DEPLOYABLE")
+
+    def test_activate_accepts_private_helper_container_for_pwn(self):
+        self.auth("root")
+        registered = self.register(
+            isolation_profile="PWN",
+            containers=[
+                {
+                    "name": "pwn",
+                    "image": f"ghcr.io/msg-ctf/challenges/web-basic/pwn@sha256:{DIGEST_A}",
+                    "ports": [{"port": 31337, "public": True}],
+                },
+                {
+                    "name": "db",
+                    "image": f"ghcr.io/msg-ctf/challenges/web-basic/db@sha256:{DIGEST_B}",
+                    "ports": [{"port": 5432, "public": False}],
+                },
+            ],
+        )
+
+        self.assertEqual(registered.status_code, 200)
+        self.assertTrue(registered.data["data"]["is_deployable"])
+        res = self.activate(registered.data["data"]["release_id"])
+        self.assertEqual(res.status_code, 200)
 
     def test_activate_rejects_more_than_eight_public_ports(self):
         self.auth("root")
@@ -596,7 +664,7 @@ class ReleaseInstanceCreateTests(ReleaseTestBase):
         self.assertEqual(body["isolation_profile"], "PWN")
         self.assertEqual(body["architecture"], "ARM64")
         self.assertEqual(body["containers"], [
-            {"name": "app", "image": image, "ports": [31337], "expose": True}
+            {"name": "app", "image": image, "ports": [31337], "exposed_ports": [31337]}
         ])
         self.assertEqual((body["ttl_minutes"], body["hard_timeout_minutes"]), (45, 90))
         self.assertEqual(str(Instance.objects.get(pk=instance_id).release_id), release_id)
@@ -617,7 +685,7 @@ class ReleaseInstanceCreateTests(ReleaseTestBase):
                     "image": f"ghcr.io/msg-ctf/challenges/web-basic/web@sha256:{DIGEST_A}",
                     "ports": [
                         {"port": 8080, "public": True},
-                        {"port": 8443, "public": True},
+                        {"port": 8443, "public": False},
                     ],
                 },
                 {
@@ -664,6 +732,8 @@ class ReleaseInstanceCreateTests(ReleaseTestBase):
         self.assertEqual(body["registry_revision"], release.registry_revision)
         self.assertEqual(body["isolation_profile"], "WEB")
         self.assertEqual(body["architecture"], "AMD64")
+        self.assertNotIn("internal_connections", body)
+        self.assertTrue(all("expose" not in container for container in body["containers"]))
         self.assertEqual(
             body["containers"],
             [
@@ -671,19 +741,19 @@ class ReleaseInstanceCreateTests(ReleaseTestBase):
                     "name": "db",
                     "image": f"ghcr.io/msg-ctf/challenges/web-basic/db@sha256:{DIGEST_B}",
                     "ports": [5432],
-                    "expose": False,
+                    "exposed_ports": [],
                 },
                 {
                     "name": "pwn",
                     "image": f"ghcr.io/msg-ctf/challenges/web-basic/pwn@sha256:{DIGEST_C}",
                     "ports": [31337],
-                    "expose": True,
+                    "exposed_ports": [31337],
                 },
                 {
                     "name": "web",
                     "image": f"ghcr.io/msg-ctf/challenges/web-basic/web@sha256:{DIGEST_A}",
                     "ports": [8080, 8443],
-                    "expose": True,
+                    "exposed_ports": [8080],
                 },
             ],
         )
