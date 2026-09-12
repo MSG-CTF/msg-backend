@@ -64,6 +64,7 @@ INSTALLED_APPS = [
     "apps.instances",
     "apps.leaderboard",
     "apps.koth",
+    "apps.signature",
 
 ]
 
