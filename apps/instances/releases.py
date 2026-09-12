@@ -155,9 +155,20 @@ def validate_release_payload(body):
     if not isinstance(workload, dict):
         raise ReleaseValidationError("workload 값이 올바르지 않습니다")
 
+    registry_revision = _require_positive_int(
+        artifact.get("registry_revision"), "registry_revision"
+    )
+    legacy_revision = artifact.get("revision")
+    if legacy_revision is not None:
+        legacy_revision = _require_positive_int(legacy_revision, "revision")
+        if legacy_revision != registry_revision:
+            raise ReleaseValidationError(
+                "revision과 registry_revision이 일치하지 않습니다"
+            )
+
     return {
         "challenge_slug": _require_string(artifact.get("challenge_slug"), "challenge_slug"),
-        "registry_revision": _require_positive_int(artifact.get("revision"), "revision"),
+        "registry_revision": registry_revision,
         "runtime_type": runtime_type,
         "architecture": architecture,
         "isolation_profile": _validate_isolation_profile(
