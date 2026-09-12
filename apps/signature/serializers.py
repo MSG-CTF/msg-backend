@@ -46,3 +46,11 @@ class SignatureUpdateSerializer(serializers.Serializer):
 
 class SignaturePublishSerializer(serializers.Serializer):
     is_published = serializers.BooleanField()
+
+
+class SignatureSubmitSerializer(serializers.Serializer):
+    flag = serializers.CharField(
+        min_length=1,
+        max_length=512,
+        trim_whitespace=False,
+    )

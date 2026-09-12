@@ -6,6 +6,7 @@ from apps.common.response import ok
 from apps.common.utils import num
 from apps.koth.models import KothSolve
 from apps.ranking.ranking import build_team_ranking
+from apps.signature.models import SignatureSolve
 
 TOP_TEAM_COUNT = 8
 TOP3_COUNT = 3
@@ -40,6 +41,16 @@ def collect_solves_map():
             "points": solve.earned_score,
         })
 
+    signatures = SignatureSolve.objects.select_related("challenge").all()
+    for solve in signatures:
+        team_id = str(solve.team_id)
+        solves_map.setdefault(team_id, []).append({
+            "challenge_id": str(solve.challenge_id),
+            "source_type": "SIGNATURE",
+            "solved_at": solve.solved_at,
+            "points": solve.earned_score,
+        })
+
     for rows in solves_map.values():
         rows.sort(key=lambda row: row["solved_at"])
 
@@ -56,18 +67,24 @@ def build_team_data(teams, solves_map):
 
         jeopardy_score = Decimal("0")
         koth_score = Decimal("0")
+        signature_score = Decimal("0")
         jeopardy_at = None
         koth_at = None
+        signature_at = None
 
         for row in rows:
             if row["source_type"] == "JEOPARDY":
                 jeopardy_score += row["points"]
                 if jeopardy_at is None or row["solved_at"] > jeopardy_at:
                     jeopardy_at = row["solved_at"]
-            else:
+            elif row["source_type"] == "KOTH":
                 koth_score += row["points"]
                 if koth_at is None or row["solved_at"] < koth_at:
                     koth_at = row["solved_at"]
+            else:
+                signature_score += row["points"]
+                if signature_at is None or row["solved_at"] > signature_at:
+                    signature_at = row["solved_at"]
 
         team_data.append({
             "team_id": str(team.team_id),
@@ -75,8 +92,10 @@ def build_team_data(teams, solves_map):
             "jeopardy_score": jeopardy_score,
             "mileage": team.mileage,
             "koth_score": koth_score,
+            "signature_score": signature_score,
             "jeopardy_solved_at": jeopardy_at,
             "koth_solved_at": koth_at,
+            "signature_solved_at": signature_at,
         })
 
     return team_data
