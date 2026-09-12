@@ -15,6 +15,7 @@ from apps.instances.models import (
     DeleteReason,
     Instance,
     InstanceStatus,
+    IsolationProfile,
 )
 
 
@@ -139,16 +140,12 @@ def release_container_public_ports(container):
     return [entry["port"] for entry in container.ports if entry.get("public")]
 
 
-def release_container_expose(container):
-    return bool(release_container_public_ports(container))
-
-
 def serialize_release_container(container):
     return {
         "name": container.name,
         "image": container.image_ref,
         "ports": release_container_ports(container),
-        "expose": release_container_expose(container),
+        "exposed_ports": release_container_public_ports(container),
     }
 
 
@@ -170,6 +167,7 @@ def validate_release_for_scheduler(release):
         )
 
     exposed_port_count = 0
+    exposed_containers = []
     for container in containers:
         ports = release_container_ports(container)
         public_ports = release_container_public_ports(container)
@@ -179,18 +177,25 @@ def validate_release_for_scheduler(release):
                 "컨테이너 포트 설정을 확인해주세요.",
                 400,
             )
-        if public_ports and len(public_ports) != len(ports):
-            raise SchedulerError(
-                "RELEASE_NOT_DEPLOYABLE",
-                "한 컨테이너의 공개·비공개 포트를 함께 사용할 수 없습니다.",
-                400,
-            )
+        if public_ports:
+            exposed_containers.append((ports, public_ports))
         exposed_port_count += len(public_ports)
 
     if not 1 <= exposed_port_count <= 8:
         raise SchedulerError(
             "RELEASE_NOT_DEPLOYABLE",
             "공개 포트 수는 1개 이상 8개 이하여야 합니다.",
+            400,
+        )
+
+    if release.isolation_profile == IsolationProfile.PWN and (
+        len(exposed_containers) != 1
+        or len(exposed_containers[0][0]) != 1
+        or len(exposed_containers[0][1]) != 1
+    ):
+        raise SchedulerError(
+            "RELEASE_NOT_DEPLOYABLE",
+            "PWN 릴리스는 포트가 하나인 공개 컨테이너를 정확히 하나 사용해야 합니다.",
             400,
         )
 
