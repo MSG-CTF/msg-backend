@@ -38,6 +38,7 @@ def artifact_payload(revision=1, slug="web-basic", containers=None, note=None, *
         "schema_version": "2.0",
         "challenge_slug": slug,
         "revision": revision,
+        "registry_revision": revision,
         "name": "Web Basic",
         "category": "web",
         "runtime_type": "KUBERNETES",
@@ -252,6 +253,34 @@ class ReleaseRegisterTests(ReleaseTestBase):
         res = self.register(schema_version="1.0")
         self.assertEqual(res.status_code, 400)
         self.assertEqual(res.data["code"], "RELEASE_INVALID")
+
+    def test_register_rejects_missing_registry_revision(self):
+        self.auth("root")
+        body = artifact_payload()
+        del body["artifact"]["registry_revision"]
+
+        res = self.client.post(self.base_url, body, format="json")
+
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data["code"], "RELEASE_INVALID")
+
+    def test_register_rejects_mismatched_revision_fields(self):
+        self.auth("root")
+
+        res = self.register(registry_revision=2)
+
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data["code"], "RELEASE_INVALID")
+
+    def test_register_accepts_registry_revision_without_legacy_revision(self):
+        self.auth("root")
+        body = artifact_payload(revision=7)
+        del body["artifact"]["revision"]
+
+        res = self.client.post(self.base_url, body, format="json")
+
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data["data"]["registry_revision"], 7)
 
     def test_register_rejects_slug_mismatch(self):
         # 첫 등록이 slug를 정하고 이후 다른 slug는 거절한다

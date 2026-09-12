@@ -33,6 +33,7 @@ def bundle(
         "schema_version": "2.0",
         "challenge_slug": slug,
         "revision": revision,
+        "registry_revision": revision,
         "name": name,
         "category": "web",
         "runtime_type": "KUBERNETES",
@@ -170,6 +171,15 @@ class RegisterBundleTests(PollerTestBase):
 
     def test_invalid_bundle_is_skipped(self):
         status, _ = register_bundle(bundle(scan_result="FAIL"))
+        self.assertEqual(status, "invalid")
+        self.assertEqual(ChallengeRelease.objects.count(), 0)
+
+    def test_revision_mismatch_bundle_is_skipped(self):
+        artifact_data = bundle(revision=1)
+        artifact_data["registry_revision"] = 2
+
+        status, _ = register_bundle(artifact_data)
+
         self.assertEqual(status, "invalid")
         self.assertEqual(ChallengeRelease.objects.count(), 0)
 
