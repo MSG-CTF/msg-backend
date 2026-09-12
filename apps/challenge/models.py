@@ -21,13 +21,14 @@ class Challenge(models.Model):
         HARD = "HARD"
 
     challenge_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    challenge_slug = models.CharField(max_length=100, unique=True, null=True, blank=True)
     title = models.CharField(max_length=200)
     category = models.CharField(max_length=20, choices=CategoryType.choices)
     difficulty = models.CharField(max_length=20, choices=DifficultyType.choices)
     score = models.DecimalField(max_digits=12, decimal_places=2)
     initial_score = models.DecimalField(max_digits=12, decimal_places=2, default=1000)
-    minimum_score = models.DecimalField(max_digits=12, decimal_places=2, default=100)
-    decay = models.IntegerField(default=20)
+    minimum_score = models.DecimalField(max_digits=12, decimal_places=2, default=600)
+    decay = models.IntegerField(default=70)
     current_score = models.DecimalField(max_digits=12, decimal_places=2, default=1000)
     description = models.TextField(blank=True, null=True)
     flag_hash = models.CharField(max_length=255)
