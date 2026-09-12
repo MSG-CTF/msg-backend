@@ -116,8 +116,7 @@ class ReleaseActivateView(APIView):
             if not is_deployable(release):
                 return fail(
                     "RELEASE_NOT_DEPLOYABLE",
-                    "현재 Scheduler 계약으로 배포할 수 없는 릴리스입니다. "
-                    "컨테이너 1개와 public 포트 1개인 릴리스만 전환할 수 있습니다.",
+                    "현재 Scheduler 계약으로 배포할 수 없는 릴리스입니다.",
                     400,
                 )
 

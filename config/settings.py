@@ -207,6 +207,7 @@ REST_FRAMEWORK = {
         "login": "10/min",
     }
 }
+SCHEDULER_API_TOKEN = os.getenv("SCHEDULER_API_TOKEN", "")
 SCHEDULER_BASE_URL = os.getenv(
     "SCHEDULER_BASE_URL", "http://127.0.0.1:8001"
 ).rstrip("/")
@@ -241,3 +242,4 @@ RELEASE_POLL_REPO = os.getenv("RELEASE_POLL_REPO", "MSG-CTF/2026_MSG_CTF")
 # Actions artifact 다운로드는 공개 저장소여도 토큰이 필요하다 (actions:read)
 RELEASE_POLL_GITHUB_TOKEN = os.getenv("RELEASE_POLL_GITHUB_TOKEN", "")
 RELEASE_POLL_LIMIT = int(os.getenv("RELEASE_POLL_LIMIT", "30"))
+RELEASE_POLL_SOURCE_REF = os.getenv("RELEASE_POLL_SOURCE_REF", "refs/heads/main")

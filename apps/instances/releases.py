@@ -2,7 +2,7 @@ import re
 
 from django.db.models import Max
 
-from apps.instances.models import ChallengeRelease, ReleaseContainer
+from apps.instances.models import ChallengeRelease, IsolationProfile, ReleaseContainer
 from apps.instances.services import isoformat_z
 
 # 공급망 발행 명명과 동일한 digest 고정 GHCR 참조만 허용한다
@@ -14,7 +14,9 @@ IMAGE_REF_PATTERN = re.compile(
 )
 
 SUPPORTED_SCHEMA_VERSION = "2.0"
-MAX_CONTAINERS = 10
+MAX_CONTAINERS = 8
+MAX_PORTS_PER_CONTAINER = 8
+MAX_EXPOSED_PORTS = 8
 MAX_NOTE_LENGTH = 500
 
 
@@ -34,6 +36,13 @@ def _require_positive_int(value, field):
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ReleaseValidationError(f"{field} 값은 양의 정수여야 합니다")
     return value
+
+
+def _validate_isolation_profile(value):
+    profile = _require_string(value, "isolation_profile")
+    if profile not in IsolationProfile.values:
+        raise ReleaseValidationError("isolation_profile 값이 올바르지 않습니다")
+    return profile
 
 
 def _validate_ports(raw_ports, container_name):
@@ -146,11 +155,25 @@ def validate_release_payload(body):
     if not isinstance(workload, dict):
         raise ReleaseValidationError("workload 값이 올바르지 않습니다")
 
+    registry_revision = _require_positive_int(
+        artifact.get("registry_revision"), "registry_revision"
+    )
+    legacy_revision = artifact.get("revision")
+    if legacy_revision is not None:
+        legacy_revision = _require_positive_int(legacy_revision, "revision")
+        if legacy_revision != registry_revision:
+            raise ReleaseValidationError(
+                "revision과 registry_revision이 일치하지 않습니다"
+            )
+
     return {
         "challenge_slug": _require_string(artifact.get("challenge_slug"), "challenge_slug"),
-        "registry_revision": _require_positive_int(artifact.get("revision"), "revision"),
+        "registry_revision": registry_revision,
         "runtime_type": runtime_type,
         "architecture": architecture,
+        "isolation_profile": _validate_isolation_profile(
+            artifact.get("isolation_profile")
+        ),
         "cpu_millicores": _require_positive_int(
             resource_profile.get("cpu_millicores"), "resource_profile.cpu_millicores"
         ),
@@ -200,6 +223,7 @@ def create_release(challenge, validated, created_by):
         challenge_slug=validated["challenge_slug"],
         runtime_type=validated["runtime_type"],
         architecture=validated["architecture"],
+        isolation_profile=validated["isolation_profile"],
         cpu_millicores=validated["cpu_millicores"],
         memory_mib=validated["memory_mib"],
         ephemeral_storage_mib=validated["ephemeral_storage_mib"],
@@ -232,12 +256,35 @@ def public_container(release):
 
 
 def is_deployable(release):
-    # 현 Scheduler 계약(단일 container_image)으로 배포 가능한지 판정한다
-    containers = list(release.containers.all())
-    if len(containers) != 1:
+    # Scheduler의 exposed_ports 및 격리 프로필별 공개 규칙을 확인한다
+    if release.registry_revision <= 0:
         return False
-    public_ports = [entry["port"] for entry in containers[0].ports if entry.get("public")]
-    return len(public_ports) == 1
+
+    containers = list(release.containers.all())
+    if not 1 <= len(containers) <= 8:
+        return False
+
+    exposed_port_count = 0
+    exposed_containers = []
+    for container in containers:
+        if not 1 <= len(container.ports) <= MAX_PORTS_PER_CONTAINER:
+            return False
+        public_ports = [entry["port"] for entry in container.ports if entry.get("public")]
+        if public_ports:
+            exposed_containers.append((container, public_ports))
+        exposed_port_count += len(public_ports)
+
+    if not 1 <= exposed_port_count <= MAX_EXPOSED_PORTS:
+        return False
+
+    if release.isolation_profile == IsolationProfile.PWN:
+        return (
+            len(exposed_containers) == 1
+            and len(exposed_containers[0][0].ports) == 1
+            and len(exposed_containers[0][1]) == 1
+        )
+
+    return True
 
 
 def serialize_release(release, current_release_id=None):
