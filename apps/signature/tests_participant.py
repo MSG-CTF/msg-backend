@@ -38,7 +38,7 @@ class SignatureParticipantApiTests(TestCase):
             flag_hash="hidden-hash",
             is_published=False,
         )
-        SignatureSolve.objects.create(
+        solve = SignatureSolve.objects.create(
             team=self.team,
             challenge=self.published,
             solved_by_user=self.user,
@@ -57,10 +57,22 @@ class SignatureParticipantApiTests(TestCase):
         row = response.data["data"]["signatures"][0]
         self.assertEqual(row["signature_id"], str(self.published.signature_id))
         self.assertTrue(row["is_solved"])
+        self.assertEqual(
+            row["solved_at"],
+            solve.solved_at.isoformat().replace("+00:00", "Z"),
+        )
         self.assertEqual(row["solved_team_count"], 2)
         self.assertNotEqual(row["signature_id"], str(hidden.signature_id))
         self.assertNotIn("description", row)
         self.assertNotIn("flag_hash", row)
+
+    def test_list_returns_null_solved_at_when_unsolved(self):
+        response = self.client.get("/api/v1/signatures")
+
+        self.assertEqual(response.status_code, 200)
+        row = response.data["data"]["signatures"][0]
+        self.assertFalse(row["is_solved"])
+        self.assertIsNone(row["solved_at"])
 
     def test_detail_returns_description_and_current_team_solved_at(self):
         solve = SignatureSolve.objects.create(

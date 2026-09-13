@@ -51,6 +51,7 @@ class SignatureSubmitApiTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["code"], "SUCCESS")
+        self.assertEqual(response.data["data"]["club_id"], str(self.club.club_id))
         self.assertEqual(response.data["data"]["earned_score"], 300)
         self.assertEqual(response.data["data"]["team_score"], 300)
         solve = SignatureSolve.objects.get(team=self.team, challenge=self.challenge)

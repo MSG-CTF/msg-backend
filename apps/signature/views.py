@@ -2,7 +2,7 @@ from datetime import timedelta
 from math import ceil
 
 from django.db import transaction
-from django.db.models import Count, Exists, OuterRef
+from django.db.models import Count, Exists, OuterRef, Subquery
 from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
 
@@ -49,6 +49,7 @@ def _base_queryset(team):
         .select_related("club")
         .annotate(
             is_solved=Exists(team_solves),
+            solved_at=Subquery(team_solves.values("solved_at")[:1]),
             solved_team_count=Count("solves", distinct=True),
         )
         .order_by("club__name", "signature_id")
@@ -63,6 +64,7 @@ def _serialize_summary(challenge):
         "title": challenge.title,
         "score": num(challenge.score),
         "is_solved": challenge.is_solved,
+        "solved_at": _isoformat_z(challenge.solved_at),
         "solved_team_count": challenge.solved_team_count,
     }
 
@@ -87,17 +89,8 @@ def signature_detail(request, signature_id):
     except SignatureChallenge.DoesNotExist:
         raise SignatureNotFound()
 
-    solve = SignatureSolve.objects.filter(
-        team=team,
-        challenge=challenge,
-    ).only("solved_at").first()
     data = _serialize_summary(challenge)
-    data.update(
-        {
-            "description": challenge.description,
-            "solved_at": _isoformat_z(solve.solved_at) if solve else None,
-        }
-    )
+    data["description"] = challenge.description
     return ok(data, message="시그니처 문제 상세 조회 성공")
 
 
@@ -225,6 +218,7 @@ def signature_submit(request, signature_id):
     return ok(
         {
             "signature_id": str(challenge.signature_id),
+            "club_id": str(challenge.club_id),
             "earned_score": num(solve.earned_score),
             "team_score": num(team_score),
             "solved_at": _isoformat_z(solve.solved_at),
