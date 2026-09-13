@@ -16,7 +16,11 @@ from apps.common.jwt import hash_token
 from apps.common.idempotency import run_idempotent
 from apps.challenge.models import Challenge, Solve
 from apps.board.models import TeamBoardState, TeamChallengeAccess
-from apps.board.services import get_or_create_board_state
+from apps.board.services import (
+    MAX_DICE_ROLLS,
+    apply_pending_dice_recharge,
+    get_or_create_board_state,
+)
 from apps.timer.models import Contest
 
 from apps.teams.models import (
@@ -138,6 +142,13 @@ def team_list(request):
         
 
     return ok({"teams": teams, "total_count": total_count, "page": page, "size": size})
+
+def _get_team(team_id):
+    try:
+        return Team.objects.get(pk=team_id)
+    except (Team.DoesNotExist, ValidationError, ValueError):
+        raise TeamNotFound()
+
 
 def _get_team_for_update(team_id):
     try:
@@ -1050,21 +1061,29 @@ def board_dice(request, team_id):
         raise InvalidRequest("reason 은 500자 이하여야 합니다")
 
     with transaction.atomic():
-        team = _get_team_for_update(team_id)
-        state = get_or_create_board_state(team)
+        # 보드와 같은 순서로 잠근다: 보드 상태 먼저, 팀은 잠그지 않는다.
+        team = _get_team(team_id)
+        get_or_create_board_state(team)
+        state = TeamBoardState.objects.select_for_update(of=("self",)).get(team=team)
+        apply_pending_dice_recharge(state)
+
         previous = state.dice_rolls_left
         if amount < 0 and previous + amount < 0:
             raise InsufficientDice(
                 data={"current_dice_rolls_left": previous, "requested_amount": -amount}
             )
-        state.dice_rolls_left = previous + amount
+        # 보드 보상(grant_dice_roll)과 같은 규칙으로 보유 상한을 넘기지 않는다.
+        applied = max(0, min(amount, MAX_DICE_ROLLS - previous)) if amount > 0 else amount
+        state.dice_rolls_left = previous + applied
         state.save(update_fields=["dice_rolls_left", "updated_at"])
+        # 조정 뒤 충전 시계를 보드와 같은 규칙으로 다시 맞춘다.
+        apply_pending_dice_recharge(state)
 
     return ok(
         {
             "team_id": str(team.team_id),
             "previous_dice_rolls_left": previous,
-            "amount": amount,
+            "amount": applied,
             "dice_rolls_left": state.dice_rolls_left,
             "reason": reason,
             "adjusted_at": timezone.now().replace(microsecond=0),

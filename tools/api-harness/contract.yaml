@@ -142,5 +142,3 @@ common_error_codes:
   # 관리자 계정 등록 (adminpanel)
   - {http: 409, code: LOGIN_ID_TAKEN}
   - {http: 409, code: TEAM_ALREADY_HAS_LEADER}
-  # 관리자 보드 조작 (adminpanel)
-  - {http: 400, code: INSUFFICIENT_DICE}

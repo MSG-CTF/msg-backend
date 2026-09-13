@@ -445,6 +445,9 @@ class AdminTests(TestCase):
             {"login_id": "c", "password": "pw12345678", "nickname": "x",
              "team_id": str(uuid.uuid4())},
             format="json",
+        )
+        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.data["code"], "TEAM_NOT_FOUND")
 
     def test_board_dice_grant(self):
         from apps.board.models import Cell, TeamBoardState
@@ -487,6 +490,83 @@ class AdminTests(TestCase):
         self.assertEqual(res.data["code"], "INSUFFICIENT_DICE")
         self.assertEqual(res.data["data"]["current_dice_rolls_left"], 1)
         self.assertEqual(res.data["data"]["requested_amount"], 5)
+
+    def _dice_state(self, rolls, next_reset_at=None):
+        from apps.board.models import Cell, TeamBoardState
+        cell, _ = Cell.objects.get_or_create(
+            cell_index=1, defaults={"type": "START", "name": "출발"}
+        )
+        state, _ = TeamBoardState.objects.get_or_create(
+            team=self.team, defaults={"position": cell}
+        )
+        TeamBoardState.objects.filter(pk=state.pk).update(
+            dice_rolls_left=rolls, next_dice_reset_at=next_reset_at
+        )
+        state.refresh_from_db()
+        return state
+
+    def _adjust(self, amount):
+        self.auth("root")
+        return self.client.post(
+            f"/api/v1/admin/teams/{self.team.team_id}/board/dice",
+            {"amount": amount, "reason": "운영 보정"}, format="json",
+        )
+
+    def test_board_dice_deduct_restarts_recharge(self):
+        """상한이던 팀에서 회수하면 충전이 다시 시작된다."""
+        from apps.board.models import TeamBoardState
+        self._dice_state(3, None)
+        res = self._adjust(-1)
+        self.assertEqual(res.status_code, 200)
+        state = TeamBoardState.objects.get(team=self.team)
+        self.assertEqual(state.dice_rolls_left, 2)
+        self.assertIsNotNone(state.next_dice_reset_at)
+
+    def test_board_dice_grant_to_cap_stops_recharge(self):
+        """지급으로 상한에 닿으면 충전이 멈춘다."""
+        from apps.board.models import TeamBoardState
+        self._dice_state(2, timezone.now() + timedelta(minutes=10))
+        res = self._adjust(1)
+        self.assertEqual(res.status_code, 200)
+        state = TeamBoardState.objects.get(team=self.team)
+        self.assertEqual(state.dice_rolls_left, 3)
+        self.assertIsNone(state.next_dice_reset_at)
+
+    def test_board_dice_grant_does_not_exceed_board_cap(self):
+        """보드 보상과 같이 보유 상한을 넘겨 지급하지 않는다."""
+        from apps.board.models import TeamBoardState
+        from apps.board.services import MAX_DICE_ROLLS
+        self._dice_state(2, timezone.now() + timedelta(minutes=10))
+        res = self._adjust(5)
+        self.assertEqual(res.status_code, 200)
+        d = res.data["data"]
+        self.assertEqual(d["dice_rolls_left"], MAX_DICE_ROLLS)
+        self.assertEqual(d["amount"], MAX_DICE_ROLLS - 2)
+        state = TeamBoardState.objects.get(team=self.team)
+        self.assertEqual(state.dice_rolls_left, MAX_DICE_ROLLS)
+        self.assertIsNone(state.next_dice_reset_at)
+
+    def test_board_dice_grant_keeps_existing_recharge_deadline(self):
+        """충전 대기 중 지급을 받아도 남은 시간이 늘어나지 않는다."""
+        from apps.board.models import TeamBoardState
+        deadline = (timezone.now() + timedelta(minutes=10)).replace(microsecond=0)
+        self._dice_state(0, deadline)
+        res = self._adjust(1)
+        self.assertEqual(res.status_code, 200)
+        state = TeamBoardState.objects.get(team=self.team)
+        self.assertEqual(state.dice_rolls_left, 1)
+        self.assertEqual(state.next_dice_reset_at.replace(microsecond=0), deadline)
+
+    def test_board_dice_applies_pending_recharge_before_adjusting(self):
+        """밀린 자동 충전을 먼저 반영한 뒤 조정한다."""
+        from apps.board.models import TeamBoardState
+        self._dice_state(0, timezone.now() - timedelta(minutes=1))
+        res = self._adjust(1)
+        self.assertEqual(res.status_code, 200)
+        d = res.data["data"]
+        self.assertEqual(d["previous_dice_rolls_left"], 1)
+        self.assertEqual(d["dice_rolls_left"], 2)
+        self.assertEqual(TeamBoardState.objects.get(team=self.team).dice_rolls_left, 2)
 
     def test_board_dice_zero_rejected(self):
         self.auth("root")
