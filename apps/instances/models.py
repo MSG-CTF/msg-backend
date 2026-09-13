@@ -39,6 +39,11 @@ class RuntimeType(models.TextChoices):
     VM = "VM"
 
 
+class IsolationProfile(models.TextChoices):
+    WEB = "WEB"
+    PWN = "PWN"
+
+
 class Instance(models.Model):
     instance_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(
@@ -66,6 +71,7 @@ class Instance(models.Model):
     )
     host = models.CharField(max_length=255, null=True, blank=True)
     ports = models.JSONField(default=list, blank=True)
+    endpoints = models.JSONField(default=list, blank=True)
     expires_at = models.DateTimeField(null=True, blank=True)
     hard_expires_at = models.DateTimeField(null=True, blank=True)
     extend_count = models.IntegerField(default=0)
@@ -150,6 +156,10 @@ class ChallengeRelease(models.Model):
         max_length=20,
         choices=ArchitectureType.choices,
         default=ArchitectureType.AMD64,
+    )
+    isolation_profile = models.CharField(
+        max_length=20,
+        choices=IsolationProfile.choices,
     )
     cpu_millicores = models.IntegerField()
     memory_mib = models.IntegerField()
