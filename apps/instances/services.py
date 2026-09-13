@@ -150,6 +150,8 @@ def serialize_release_container(container):
 
 
 def validate_release_for_scheduler(release):
+    from apps.instances.releases import has_sufficient_container_resources
+
     containers = list(release.containers.all())
 
     if release.registry_revision <= 0:
@@ -163,6 +165,13 @@ def validate_release_for_scheduler(release):
         raise SchedulerError(
             "RELEASE_NOT_DEPLOYABLE",
             "현재 Scheduler 계약으로 배포할 수 없는 릴리스입니다.",
+            400,
+        )
+
+    if not has_sufficient_container_resources(release, len(containers)):
+        raise SchedulerError(
+            "RELEASE_NOT_DEPLOYABLE",
+            "컨테이너 수에 비해 릴리스 자원이 부족합니다.",
             400,
         )
 

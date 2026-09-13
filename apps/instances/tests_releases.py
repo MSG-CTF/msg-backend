@@ -394,6 +394,107 @@ class ReleaseActivateTests(ReleaseTestBase):
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.data["data"]["release_id"], release_id)
 
+    def test_activate_rejects_insufficient_ephemeral_storage_for_container_count(self):
+        self.auth("root")
+        containers = [
+            {
+                "name": "web",
+                "image": f"ghcr.io/msg-ctf/challenges/web-basic/web@sha256:{DIGEST_A}",
+                "ports": [{"port": 8080, "public": True}],
+            },
+            {
+                "name": "db",
+                "image": f"ghcr.io/msg-ctf/challenges/web-basic/db@sha256:{DIGEST_B}",
+                "ports": [{"port": 5432, "public": False}],
+            },
+        ]
+
+        for revision, ephemeral_storage_mib in ((10, 64), (11, 127)):
+            with self.subTest(ephemeral_storage_mib=ephemeral_storage_mib):
+                registered = self.register(
+                    revision=revision,
+                    containers=containers,
+                    resource_profile={
+                        "cpu_millicores": 500,
+                        "memory_mib": 512,
+                        "ephemeral_storage_mib": ephemeral_storage_mib,
+                    },
+                )
+
+                self.assertEqual(registered.status_code, 200)
+                self.assertFalse(registered.data["data"]["is_deployable"])
+                activated = self.activate(registered.data["data"]["release_id"])
+                self.assertEqual(activated.status_code, 400)
+                self.assertEqual(activated.data["code"], "RELEASE_NOT_DEPLOYABLE")
+
+    def test_activate_accepts_minimum_ephemeral_storage_for_container_count(self):
+        self.auth("root")
+        registered = self.register(
+            revision=12,
+            containers=[
+                {
+                    "name": "web",
+                    "image": f"ghcr.io/msg-ctf/challenges/web-basic/web@sha256:{DIGEST_A}",
+                    "ports": [{"port": 8080, "public": True}],
+                },
+                {
+                    "name": "db",
+                    "image": f"ghcr.io/msg-ctf/challenges/web-basic/db@sha256:{DIGEST_B}",
+                    "ports": [{"port": 5432, "public": False}],
+                },
+            ],
+            resource_profile={
+                "cpu_millicores": 2,
+                "memory_mib": 2,
+                "ephemeral_storage_mib": 128,
+            },
+        )
+
+        self.assertEqual(registered.status_code, 200)
+        self.assertTrue(registered.data["data"]["is_deployable"])
+        activated = self.activate(registered.data["data"]["release_id"])
+        self.assertEqual(activated.status_code, 200)
+
+    def test_activate_rejects_cpu_or_memory_below_container_count(self):
+        self.auth("root")
+        containers = [
+            {
+                "name": "web",
+                "image": f"ghcr.io/msg-ctf/challenges/web-basic/web@sha256:{DIGEST_A}",
+                "ports": [{"port": 8080, "public": True}],
+            },
+            {
+                "name": "db",
+                "image": f"ghcr.io/msg-ctf/challenges/web-basic/db@sha256:{DIGEST_B}",
+                "ports": [{"port": 5432, "public": False}],
+            },
+        ]
+        cases = (
+            (13, 1, 512),
+            (14, 500, 1),
+        )
+
+        for revision, cpu_millicores, memory_mib in cases:
+            with self.subTest(
+                cpu_millicores=cpu_millicores,
+                memory_mib=memory_mib,
+            ):
+                registered = self.register(
+                    revision=revision,
+                    containers=containers,
+                    resource_profile={
+                        "cpu_millicores": cpu_millicores,
+                        "memory_mib": memory_mib,
+                        "ephemeral_storage_mib": 128,
+                    },
+                )
+
+                self.assertEqual(registered.status_code, 200)
+                self.assertFalse(registered.data["data"]["is_deployable"])
+                activated = self.activate(registered.data["data"]["release_id"])
+                self.assertEqual(activated.status_code, 400)
+                self.assertEqual(activated.data["code"], "RELEASE_NOT_DEPLOYABLE")
+
     def test_activate_accepts_multiple_exposed_containers_and_ports(self):
         self.auth("root")
         registered = self.register(
@@ -631,6 +732,40 @@ class ReleaseInstanceCreateTests(ReleaseTestBase):
 
         self.assertEqual(res.status_code, 400)
         self.assertEqual(res.data["code"], "RELEASE_NOT_DEPLOYABLE")
+        scheduler_request.assert_not_called()
+
+    @patch("apps.instances.services.scheduler_request")
+    def test_create_revalidates_container_resources_before_scheduler(self, scheduler_request):
+        self.auth("root")
+        release_id = self.register(
+            revision=15,
+            containers=[
+                {
+                    "name": "web",
+                    "image": f"ghcr.io/msg-ctf/challenges/web-basic/web@sha256:{DIGEST_A}",
+                    "ports": [{"port": 8080, "public": True}],
+                },
+                {
+                    "name": "db",
+                    "image": f"ghcr.io/msg-ctf/challenges/web-basic/db@sha256:{DIGEST_B}",
+                    "ports": [{"port": 5432, "public": False}],
+                },
+            ],
+        ).data["data"]["release_id"]
+        self.activate(release_id)
+        release = ChallengeRelease.objects.get(release_id=release_id)
+        release.ephemeral_storage_mib = 127
+        release.save(update_fields=["ephemeral_storage_mib"])
+
+        self.auth("player")
+        response = self.client.post(
+            self.player_url,
+            {"challenge_id": str(self.challenge.challenge_id)},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["code"], "RELEASE_NOT_DEPLOYABLE")
         scheduler_request.assert_not_called()
 
     @patch("apps.instances.services.scheduler_request")

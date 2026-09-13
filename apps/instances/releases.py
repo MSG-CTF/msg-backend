@@ -18,12 +18,22 @@ MAX_CONTAINERS = 8
 MAX_PORTS_PER_CONTAINER = 8
 MAX_EXPOSED_PORTS = 8
 MAX_NOTE_LENGTH = 500
+WRITABLE_MIB_PER_CONTAINER = 64
 
 
 class ReleaseValidationError(Exception):
     def __init__(self, message):
         self.message = message
         super().__init__(message)
+
+
+def has_sufficient_container_resources(release, container_count):
+    return (
+        release.cpu_millicores >= container_count
+        and release.memory_mib >= container_count
+        and release.ephemeral_storage_mib
+        >= WRITABLE_MIB_PER_CONTAINER * container_count
+    )
 
 
 def _require_string(value, field):
@@ -262,6 +272,8 @@ def is_deployable(release):
 
     containers = list(release.containers.all())
     if not 1 <= len(containers) <= 8:
+        return False
+    if not has_sufficient_container_resources(release, len(containers)):
         return False
 
     exposed_port_count = 0
