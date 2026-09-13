@@ -81,3 +81,9 @@ class TeamNameTaken(APIError):
     status_code = status.HTTP_409_CONFLICT
     code = "TEAM_NAME_TAKEN"
     message = "이미 사용 중인 팀 이름입니다"
+
+
+class ContestAlreadyStarted(APIError):
+    status_code = status.HTTP_409_CONFLICT
+    code = "CONTEST_ALREADY_STARTED"
+    message = "이미 시작된 대회의 시작 시각은 변경할 수 없습니다"
