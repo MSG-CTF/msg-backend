@@ -23,16 +23,14 @@ class ChallengeCreateSerializer(serializers.Serializer):
     difficulty = serializers.ChoiceField(choices=Challenge.DifficultyType.choices)
     description = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     flag = serializers.CharField(trim_whitespace=False, write_only=True)
-    initial_score = serializers.DecimalField(
-        max_digits=12,
-        decimal_places=2,
+    initial_score = serializers.IntegerField(
         min_value=0,
+        max_value=9_999_999_999,
         default=1000,
     )
-    minimum_score = serializers.DecimalField(
-        max_digits=12,
-        decimal_places=2,
+    minimum_score = serializers.IntegerField(
         min_value=0,
+        max_value=9_999_999_999,
         default=600,
     )
     decay = serializers.IntegerField(min_value=1, default=70)

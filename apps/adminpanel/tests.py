@@ -15,6 +15,7 @@ from apps.accounts.models import (
     Team,
     User,
 )
+from apps.board.models import Cell, TeamChallengeAccess
 from apps.teams.models import (
     MileageHistory,
     MileageType,
@@ -947,6 +948,8 @@ class AdminChallengeTests(TestCase):
             {"initial_score": 599, "minimum_score": 600},
             {"minimum_score": -1},
             {"decay": 0},
+            {"initial_score": 1000.50},
+            {"minimum_score": 600.50},
         ]
 
         for values in invalid_values:
@@ -959,6 +962,47 @@ class AdminChallengeTests(TestCase):
                 self.assertEqual(res.status_code, 400)
                 self.assertEqual(res.data["code"], "INVALID_REQUEST")
         self.assertEqual(Challenge.objects.count(), 0)
+
+    def test_challenge_create_and_first_solve_never_exceeds_initial_score(self):
+        created = self.client.post(
+            "/api/v1/admin/challenges",
+            self.challenge_body(
+                initial_score=1000,
+                minimum_score=600,
+                decay=70,
+            ),
+            format="json",
+        )
+        self.assertEqual(created.status_code, 200)
+
+        challenge = Challenge.objects.get(
+            challenge_id=created.data["data"]["challenge_id"]
+        )
+        challenge.is_published = True
+        challenge.save(update_fields=["is_published"])
+        cell = Cell.objects.create(
+            cell_index=1,
+            type=Cell.CellType.CHALLENGE,
+            difficulty=Cell.Difficulty.EASY,
+            name="registered-challenge",
+        )
+        TeamChallengeAccess.objects.create(
+            team=self.team,
+            challenge=challenge,
+            source_cell=cell,
+        )
+
+        self.auth("player")
+        submitted = self.client.post(
+            f"/api/v1/challenges/{challenge.challenge_id}/submit",
+            {"flag": "MSG{admin_create_test}"},
+            format="json",
+        )
+
+        self.assertEqual(submitted.status_code, 200)
+        challenge.refresh_from_db()
+        self.assertLessEqual(challenge.current_score, challenge.initial_score)
+        self.assertEqual(challenge.current_score, challenge.initial_score)
 
     def test_challenge_create_rejects_invalid_and_duplicate_slug(self):
         invalid_slugs = ["Web-Notebook", "web_notebook", "web notebook", "-web", "web-"]
