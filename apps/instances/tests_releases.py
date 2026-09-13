@@ -6,6 +6,7 @@ from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
 from apps.accounts.models import Role, Team, User
+from apps.board.models import Cell, TeamChallengeAccess
 from apps.challenge.models import Challenge
 from apps.challenge.services import hash_flag
 from apps.instances.models import ChallengeRelease, ChallengeRuntimeConfig
@@ -357,6 +358,17 @@ class ReleaseInstanceCreateTests(ReleaseTestBase):
     def setUp(self):
         super().setUp()
         self.player_url = "/api/v1/instances"
+        self.challenge_cell = Cell.objects.create(
+            cell_index=1,
+            type=Cell.CellType.CHALLENGE,
+            difficulty=Cell.Difficulty.EASY,
+            name="release-instance-challenge",
+        )
+        TeamChallengeAccess.objects.create(
+            team=self.team,
+            challenge=self.challenge,
+            source_cell=self.challenge_cell,
+        )
 
     def test_create_without_current_release_fails(self):
         # 활성 릴리스가 없으면 인스턴스를 만들 수 없다
