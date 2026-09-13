@@ -1351,3 +1351,354 @@ class MileageIdempotencyRaceTest(TransactionTestCase):
         self.assertEqual(MileageHistory.objects.filter(team=self.team).count(), 1)
         # 한 요청이 반영하고 나머지는 저장된 응답을 재생하므로 둘 다 200.
         self.assertEqual(sorted(results.values()), [200, 200])
+
+@override_settings(CACHES=LOCMEM)
+class AdminSettingsTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.team = Team.objects.create(team_name="감자는외로워")
+        self.player = User.objects.create_user(
+            login_id="player", password="pw1234", nickname="참가자", team=self.team
+        )
+        self.admin = User.objects.create_user(
+            login_id="root", password="pw1234", nickname="운영자",
+            team=None, role=Role.ADMIN,
+        )
+        self.url = "/api/v1/admin/settings"
+
+    def auth(self, login_id):
+        res = self.client.post("/api/v1/auth/login",
+                               {"login_id": login_id, "password": "pw1234"}, format="json")
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {res.data['data']['access_token']}")
+
+    def _contest(self, start_offset_hours=-1, end_offset_hours=5):
+        from apps.timer.models import Contest
+        now = timezone.now()
+        return Contest.objects.create(
+            name="본선", is_active=True,
+            start_time=now + timedelta(hours=start_offset_hours),
+            end_time=now + timedelta(hours=end_offset_hours),
+        )
+
+    # ---- 조회 ----
+    def test_get_returns_defaults_without_stored_rows(self):
+        self.auth("root")
+        res = self.client.get(self.url)
+        self.assertEqual(res.status_code, 200)
+        d = res.data["data"]
+        self.assertEqual(set(d), {"contest", "board", "flag", "updated_at", "updated_by"})
+        self.assertEqual(d["board"]["dice_rolls_per_reset"], 3)
+        self.assertEqual(d["board"]["dice_reset_interval_minutes"], 15)
+        self.assertEqual(d["board"]["solve_deadline_minutes"], 15)
+        self.assertEqual(d["flag"]["max_attempts"], 3)
+        self.assertEqual(d["flag"]["lock_seconds"], 30)
+        self.assertIsNone(d["updated_at"])
+
+    def test_get_without_active_contest(self):
+        self.auth("root")
+        d = self.client.get(self.url).data["data"]
+        self.assertEqual(d["contest"]["status"], "BEFORE")
+        self.assertIsNone(d["contest"]["started_at"])
+        self.assertIsNone(d["contest"]["ends_at"])
+
+    def test_get_reflects_active_contest(self):
+        self._contest()
+        self.auth("root")
+        d = self.client.get(self.url).data["data"]
+        self.assertEqual(d["contest"]["status"], "RUNNING")
+        self.assertIsNotNone(d["contest"]["started_at"])
+
+    def test_participant_blocked(self):
+        self.auth("player")
+        self.assertEqual(self.client.get(self.url).status_code, 403)
+        self.assertEqual(
+            self.client.patch(self.url, {"flag": {"max_attempts": 5}}, format="json").status_code,
+            403,
+        )
+
+    def test_token_missing(self):
+        self.assertEqual(self.client.get(self.url).status_code, 401)
+
+    # ---- 변경 ----
+    def test_patch_partial_update_keeps_other_keys(self):
+        self.auth("root")
+        res = self.client.patch(self.url, {"flag": {"lock_seconds": 60}}, format="json")
+        self.assertEqual(res.status_code, 200)
+        d = res.data["data"]
+        self.assertEqual(d["flag"]["lock_seconds"], 60)
+        self.assertEqual(d["flag"]["max_attempts"], 3)
+        self.assertEqual(d["board"]["dice_rolls_per_reset"], 3)
+        self.assertEqual(d["updated_by"], "root")
+        self.assertIsNotNone(d["updated_at"])
+
+    def test_patch_persists(self):
+        self.auth("root")
+        self.client.patch(self.url, {"board": {"dice_rolls_per_reset": 4}}, format="json")
+        d = self.client.get(self.url).data["data"]
+        self.assertEqual(d["board"]["dice_rolls_per_reset"], 4)
+
+    def test_patch_multiple_groups(self):
+        self.auth("root")
+        res = self.client.patch(
+            self.url,
+            {"board": {"solve_deadline_minutes": 20}, "flag": {"max_attempts": 5}},
+            format="json",
+        )
+        d = res.data["data"]
+        self.assertEqual(d["board"]["solve_deadline_minutes"], 20)
+        self.assertEqual(d["flag"]["max_attempts"], 5)
+
+    def test_patch_rejects_out_of_range(self):
+        self.auth("root")
+        for body in [
+            {"board": {"dice_rolls_per_reset": 0}},
+            {"board": {"dice_rolls_per_reset": 21}},
+            {"board": {"dice_reset_interval_minutes": 1441}},
+            {"board": {"solve_deadline_minutes": 181}},
+            {"flag": {"max_attempts": 11}},
+            {"flag": {"lock_seconds": 3601}},
+        ]:
+            with self.subTest(body=body):
+                res = self.client.patch(self.url, body, format="json")
+                self.assertEqual(res.status_code, 400)
+                self.assertEqual(res.data["code"], "INVALID_REQUEST")
+
+    def test_patch_rejects_bad_types(self):
+        self.auth("root")
+        for body in [
+            {"flag": {"max_attempts": "3"}},
+            {"flag": {"max_attempts": True}},
+            {"flag": {"max_attempts": 1.5}},
+            {"board": "not-an-object"},
+        ]:
+            with self.subTest(body=body):
+                self.assertEqual(
+                    self.client.patch(self.url, body, format="json").status_code, 400
+                )
+
+    def test_patch_rejects_unknown_keys(self):
+        self.auth("root")
+        for body in [
+            {"board": {"nope": 1}},
+            {"unknown_group": {"a": 1}},
+            {},
+        ]:
+            with self.subTest(body=body):
+                self.assertEqual(
+                    self.client.patch(self.url, body, format="json").status_code, 400
+                )
+
+    def test_patch_nothing_persisted_when_one_value_invalid(self):
+        """한 값이라도 범위를 벗어나면 아무것도 저장하지 않는다."""
+        self.auth("root")
+        res = self.client.patch(
+            self.url,
+            {"flag": {"lock_seconds": 60, "max_attempts": 99}},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(self.client.get(self.url).data["data"]["flag"]["lock_seconds"], 30)
+
+    # ---- 대회 시각 ----
+    def test_patch_contest_end_time(self):
+        contest = self._contest()
+        self.auth("root")
+        new_end = (timezone.now() + timedelta(hours=9)).replace(microsecond=0)
+        res = self.client.patch(
+            self.url,
+            {"contest": {"ends_at": new_end.isoformat().replace("+00:00", "Z")}},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 200)
+        contest.refresh_from_db()
+        self.assertEqual(contest.end_time.replace(microsecond=0), new_end)
+
+    def test_patch_started_contest_start_time_rejected(self):
+        self._contest(start_offset_hours=-1)
+        self.auth("root")
+        new_start = (timezone.now() + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+        res = self.client.patch(
+            self.url, {"contest": {"started_at": new_start}}, format="json"
+        )
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.data["code"], "CONTEST_ALREADY_STARTED")
+
+    def test_patch_not_started_contest_start_time_allowed(self):
+        contest = self._contest(start_offset_hours=2, end_offset_hours=8)
+        self.auth("root")
+        new_start = (timezone.now() + timedelta(hours=3)).replace(microsecond=0)
+        res = self.client.patch(
+            self.url,
+            {"contest": {"started_at": new_start.isoformat().replace("+00:00", "Z")}},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 200)
+        contest.refresh_from_db()
+        self.assertEqual(contest.start_time.replace(microsecond=0), new_start)
+
+    def test_patch_end_before_start_rejected(self):
+        self._contest()
+        self.auth("root")
+        past = (timezone.now() - timedelta(hours=5)).isoformat().replace("+00:00", "Z")
+        res = self.client.patch(self.url, {"contest": {"ends_at": past}}, format="json")
+        self.assertEqual(res.status_code, 400)
+
+    def test_patch_contest_bad_datetime(self):
+        self._contest()
+        self.auth("root")
+        for value in ["2026-08-24 18:00", "not-a-date", "2026-08-24T18:00:00", 123]:
+            with self.subTest(value=value):
+                self.assertEqual(
+                    self.client.patch(
+                        self.url, {"contest": {"ends_at": value}}, format="json"
+                    ).status_code,
+                    400,
+                )
+
+    def test_patch_contest_without_active_contest(self):
+        self.auth("root")
+        res = self.client.patch(
+            self.url, {"contest": {"ends_at": "2026-08-24T18:00:00Z"}}, format="json"
+        )
+        self.assertEqual(res.status_code, 400)
+
+    def test_patch_contest_unknown_key(self):
+        self._contest()
+        self.auth("root")
+        self.assertEqual(
+            self.client.patch(
+                self.url, {"contest": {"status": "ENDED"}}, format="json"
+            ).status_code,
+            400,
+        )
+
+
+@override_settings(CACHES=LOCMEM)
+class AdminEventTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.team = Team.objects.create(team_name="감자는외로워")
+        self.other = Team.objects.create(team_name="세그폴트")
+        self.player = User.objects.create_user(
+            login_id="player", password="pw1234", nickname="참가자", team=self.team
+        )
+        self.admin = User.objects.create_user(
+            login_id="root", password="pw1234", nickname="운영자",
+            team=None, role=Role.ADMIN,
+        )
+        self.url = "/api/v1/admin/events"
+
+    def auth(self, login_id):
+        res = self.client.post("/api/v1/auth/login",
+                               {"login_id": login_id, "password": "pw1234"}, format="json")
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {res.data['data']['access_token']}")
+
+    def _event(self, **kwargs):
+        from apps.adminpanel.models import AdminEvent
+        defaults = {
+            "type": AdminEvent.EventType.TEAM_BANNED,
+            "severity": AdminEvent.Severity.WARNING,
+            "message": "팀 활동이 정지되었습니다.",
+            "actor": "root",
+        }
+        defaults.update(kwargs)
+        return AdminEvent.objects.create(**defaults)
+
+    def test_empty_list(self):
+        self.auth("root")
+        res = self.client.get(self.url)
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(
+            res.data["data"], {"events": [], "total_count": 0, "page": 1, "size": 50}
+        )
+
+    def test_list_fields(self):
+        from apps.adminpanel.models import AdminEvent
+        ch = Challenge.objects.create(title="웹1", category="WEB", difficulty="EASY",
+                                      score=100, flag_hash="x")
+        instance_id = uuid.uuid4()
+        self._event(
+            type=AdminEvent.EventType.INSTANCE_FAILED,
+            severity=AdminEvent.Severity.CRITICAL,
+            message="인스턴스 생성에 실패했습니다.",
+            team=self.team, challenge=ch, instance_id=instance_id, actor="system",
+        )
+        self.auth("root")
+        row = self.client.get(self.url).data["data"]["events"][0]
+        self.assertEqual(
+            set(row),
+            {"event_id", "type", "severity", "message", "team_id", "team_name",
+             "challenge_id", "challenge_title", "instance_id", "actor", "created_at"},
+        )
+        self.assertEqual(row["type"], "INSTANCE_FAILED")
+        self.assertEqual(row["severity"], "CRITICAL")
+        self.assertEqual(row["team_name"], "감자는외로워")
+        self.assertEqual(row["challenge_title"], "웹1")
+        self.assertEqual(row["instance_id"], str(instance_id))
+
+    def test_null_relations(self):
+        self._event(team=None)
+        self.auth("root")
+        row = self.client.get(self.url).data["data"]["events"][0]
+        for key in ("team_id", "team_name", "challenge_id", "challenge_title", "instance_id"):
+            self.assertIsNone(row[key])
+
+    def test_newest_first(self):
+        first = self._event(message="먼저")
+        second = self._event(message="나중")
+        self.auth("root")
+        messages = [e["message"] for e in self.client.get(self.url).data["data"]["events"]]
+        self.assertEqual(messages, ["나중", "먼저"])
+
+    def test_filter_by_type(self):
+        from apps.adminpanel.models import AdminEvent
+        self._event(type=AdminEvent.EventType.TEAM_BANNED)
+        self._event(type=AdminEvent.EventType.SETTINGS_CHANGED)
+        self.auth("root")
+        d = self.client.get(f"{self.url}?type=SETTINGS_CHANGED").data["data"]
+        self.assertEqual(d["total_count"], 1)
+        self.assertEqual(d["events"][0]["type"], "SETTINGS_CHANGED")
+
+    def test_filter_by_team(self):
+        self._event(team=self.team)
+        self._event(team=self.other)
+        self.auth("root")
+        d = self.client.get(f"{self.url}?team_id={self.team.team_id}").data["data"]
+        self.assertEqual(d["total_count"], 1)
+        self.assertEqual(d["events"][0]["team_name"], "감자는외로워")
+
+    def test_invalid_type(self):
+        self.auth("root")
+        res = self.client.get(f"{self.url}?type=NOPE")
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data["code"], "INVALID_REQUEST")
+        self.assertEqual(res.data["message"], "이벤트 타입이 올바르지 않습니다.")
+
+    def test_invalid_team_id(self):
+        self.auth("root")
+        self.assertEqual(self.client.get(f"{self.url}?team_id=not-a-uuid").status_code, 400)
+
+    def test_pagination(self):
+        for i in range(7):
+            self._event(message=f"e{i}")
+        self.auth("root")
+        d = self.client.get(f"{self.url}?page=2&size=3").data["data"]
+        self.assertEqual(d["total_count"], 7)
+        self.assertEqual(d["page"], 2)
+        self.assertEqual(d["size"], 3)
+        self.assertEqual(len(d["events"]), 3)
+
+    def test_invalid_pagination(self):
+        self.auth("root")
+        for query in ["page=0", "size=0", "page=abc"]:
+            with self.subTest(query=query):
+                self.assertEqual(self.client.get(f"{self.url}?{query}").status_code, 400)
+
+    def test_participant_blocked(self):
+        self.auth("player")
+        self.assertEqual(self.client.get(self.url).status_code, 403)
+
+    def test_token_missing(self):
+        self.assertEqual(self.client.get(self.url).status_code, 401)
