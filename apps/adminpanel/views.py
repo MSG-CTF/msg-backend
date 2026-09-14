@@ -88,6 +88,7 @@ SETTING_SPECS = {
     "flag.max_attempts": (1, 10, 3),
     "flag.lock_seconds": (1, 3600, 30),
 }
+SETTINGS_UPDATED_KEY = "_meta.updated"
 EVENT_TYPES = set(AdminEvent.EventType.values)
 
 
@@ -1136,13 +1137,13 @@ def _settings_payload():
             "ends_at": contest.end_time,
         }
 
-    latest = max(stored.values(), key=lambda r: r.updated_at, default=None)
+    marker = stored.get(SETTINGS_UPDATED_KEY)
     return {
         "contest": contest_data,
         "board": grouped.get("board", {}),
         "flag": grouped.get("flag", {}),
-        "updated_at": latest.updated_at if latest else None,
-        "updated_by": latest.updated_by if latest else None,
+        "updated_at": marker.updated_at if marker else None,
+        "updated_by": marker.updated_by if marker else None,
     }
 
 
@@ -1162,9 +1163,9 @@ def settings_view(request):
 
     changes = {}
     for group in ("board", "flag"):
-        values = body.get(group)
-        if values is None:
+        if group not in body:
             continue
+        values = body[group]
         if not isinstance(values, dict):
             raise InvalidRequest(f"{group} 은 객체여야 합니다")
         for name, value in values.items():
@@ -1178,9 +1179,11 @@ def settings_view(request):
                 raise InvalidRequest(f"{key} 는 {low} ~ {high} 범위여야 합니다")
             changes[key] = value
 
-    contest_body = body.get("contest")
-    if contest_body is not None and not isinstance(contest_body, dict):
-        raise InvalidRequest("contest 는 객체여야 합니다")
+    contest_body = None
+    if "contest" in body:
+        contest_body = body["contest"]
+        if not isinstance(contest_body, dict):
+            raise InvalidRequest("contest 는 객체여야 합니다")
 
     with transaction.atomic():
         if contest_body:
@@ -1211,6 +1214,11 @@ def settings_view(request):
                 key=key,
                 defaults={"value": value, "updated_by": request.user.login_id},
             )
+
+        AdminSetting.objects.update_or_create(
+            key=SETTINGS_UPDATED_KEY,
+            defaults={"value": 0, "updated_by": request.user.login_id},
+        )
 
     return ok(_settings_payload(), message="설정이 변경되었습니다")
 

@@ -1573,6 +1573,65 @@ class AdminSettingsTests(TestCase):
             400,
         )
 
+    def test_contest_only_change_records_updater(self):
+        """대회 시각만 바꿔도 수정자와 수정 시각이 남는다."""
+        self._contest()
+        self.auth("root")
+        new_end = (timezone.now() + timedelta(hours=9)).isoformat().replace("+00:00", "Z")
+        res = self.client.patch(self.url, {"contest": {"ends_at": new_end}}, format="json")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data["data"]["updated_by"], "root")
+        self.assertIsNotNone(res.data["data"]["updated_at"])
+
+        d = self.client.get(self.url).data["data"]
+        self.assertEqual(d["updated_by"], "root")
+        self.assertEqual(d["updated_at"], res.data["data"]["updated_at"])
+
+    def test_contest_change_overwrites_previous_updater(self):
+        """이전 관리자 정보가 남지 않는다."""
+        User.objects.create_user(
+            login_id="root2", password="pw1234", nickname="운영자2",
+            team=None, role=Role.ADMIN,
+        )
+        self._contest()
+        self.auth("root")
+        self.client.patch(self.url, {"flag": {"lock_seconds": 60}}, format="json")
+
+        self.auth("root2")
+        new_end = (timezone.now() + timedelta(hours=9)).isoformat().replace("+00:00", "Z")
+        self.client.patch(self.url, {"contest": {"ends_at": new_end}}, format="json")
+        self.assertEqual(self.client.get(self.url).data["data"]["updated_by"], "root2")
+
+    def test_explicit_null_rejected(self):
+        """항목을 null 로 명시하면 타입 오류다."""
+        self._contest()
+        self.auth("root")
+        for body in [{"board": None}, {"flag": None}, {"contest": None}]:
+            with self.subTest(body=body):
+                res = self.client.patch(self.url, body, format="json")
+                self.assertEqual(res.status_code, 400)
+                self.assertEqual(res.data["code"], "INVALID_REQUEST")
+
+    def test_omitted_group_still_kept(self):
+        """보내지 않은 항목은 그대로 유지된다."""
+        self.auth("root")
+        self.client.patch(self.url, {"flag": {"lock_seconds": 60}}, format="json")
+        d = self.client.patch(
+            self.url, {"board": {"dice_rolls_per_reset": 4}}, format="json"
+        ).data["data"]
+        self.assertEqual(d["flag"]["lock_seconds"], 60)
+        self.assertEqual(d["board"]["dice_rolls_per_reset"], 4)
+
+    def test_meta_key_not_exposed(self):
+        """수정 정보용 내부 키가 응답에 새어나오지 않는다."""
+        self.auth("root")
+        self.client.patch(self.url, {"flag": {"lock_seconds": 60}}, format="json")
+        d = self.client.get(self.url).data["data"]
+        self.assertEqual(set(d["board"]), {
+            "dice_rolls_per_reset", "dice_reset_interval_minutes", "solve_deadline_minutes",
+        })
+        self.assertEqual(set(d["flag"]), {"max_attempts", "lock_seconds"})
+
 
 @override_settings(CACHES=LOCMEM)
 class AdminEventTests(TestCase):
