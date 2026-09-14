@@ -2,6 +2,7 @@ import threading
 import uuid
 
 from datetime import timedelta
+from decimal import Decimal
 from django.db import connections
 from django.utils import timezone
 from django.core.cache import cache
@@ -1003,6 +1004,54 @@ class AdminChallengeTests(TestCase):
         challenge.refresh_from_db()
         self.assertLessEqual(challenge.current_score, challenge.initial_score)
         self.assertEqual(challenge.current_score, challenge.initial_score)
+
+    def test_max_score_challenges_can_be_solved_by_same_team(self):
+        maximum_score = 9_999_999_999
+
+        for index in range(2):
+            flag = f"MSG{{max_score_{index}}}"
+            self.auth("root")
+            created = self.client.post(
+                "/api/v1/admin/challenges",
+                self.challenge_body(
+                    challenge_slug=f"max-score-{index}",
+                    title=f"Max score challenge {index}",
+                    flag=flag,
+                    initial_score=maximum_score,
+                    minimum_score=maximum_score,
+                    decay=70,
+                ),
+                format="json",
+            )
+            self.assertEqual(created.status_code, 200)
+
+            challenge = Challenge.objects.get(
+                challenge_id=created.data["data"]["challenge_id"]
+            )
+            challenge.is_published = True
+            challenge.save(update_fields=["is_published"])
+            cell = Cell.objects.create(
+                cell_index=index + 1,
+                type=Cell.CellType.CHALLENGE,
+                difficulty=Cell.Difficulty.EASY,
+                name=f"max-score-challenge-{index}",
+            )
+            TeamChallengeAccess.objects.create(
+                team=self.team,
+                challenge=challenge,
+                source_cell=cell,
+            )
+
+            self.auth("player")
+            submitted = self.client.post(
+                f"/api/v1/challenges/{challenge.challenge_id}/submit",
+                {"flag": flag},
+                format="json",
+            )
+            self.assertEqual(submitted.status_code, 200)
+
+        self.team.refresh_from_db()
+        self.assertEqual(self.team.team_score, Decimal("19999999998.00"))
 
     def test_challenge_create_rejects_invalid_and_duplicate_slug(self):
         invalid_slugs = ["Web-Notebook", "web_notebook", "web notebook", "-web", "web-"]
