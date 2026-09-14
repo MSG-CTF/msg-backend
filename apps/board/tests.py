@@ -509,7 +509,7 @@ class BoardApiTestCase(TestCase):
             for roll_number, position in enumerate((3, 5, 7), start=1):
                 with patch("apps.board.services.random.randint", return_value=1):
                     response = self.post_idem(
-                        "/api/v1/board/dice/roll", key=f"consecutive-roll-{roll_number}",
+                        "/api/v1/board/dice/roll", key=f"test-roll-{roll_number}",
                     )
                 self.assertEqual(response.status_code, 200, response.data)
                 self.assertEqual(response.data["data"]["current_position"], position)
@@ -529,10 +529,10 @@ class BoardApiTestCase(TestCase):
                 self.assertEqual(status["can_roll"], roll_number < 3)
                 self.assertEqual(status["blocked_reason"], None if roll_number < 3 else "NO_ROLL_LEFT")
 
-            fourth = self.post_idem("/api/v1/board/dice/roll", key="consecutive-roll-4")
+            fourth = self.post_idem("/api/v1/board/dice/roll", key="test-roll-4")
             self.assertEqual(fourth.status_code, 409)
             self.assertEqual(fourth.data["code"], "NO_ROLL_LEFT")
-            replay = self.post_idem("/api/v1/board/dice/roll", key="consecutive-roll-3")
+            replay = self.post_idem("/api/v1/board/dice/roll", key="test-roll-3")
             self.assertEqual(replay.data, response.data)
 
         self.assertEqual(DiceRoll.objects.filter(team=self.team).count(), 3)
