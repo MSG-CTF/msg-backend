@@ -546,6 +546,104 @@ class AdminTests(TestCase):
         payload = decode_token(login.data["data"]["access_token"], ACCESS)
         self.assertFalse(payload["is_leader"])
 
+    def test_challenge_visibility_toggle(self):
+        self.auth("root")
+        ch = Challenge.objects.create(title="웹1", category="WEB", difficulty="EASY",
+                                      score=100, flag_hash="x", is_published=True)
+        res = self.client.patch(
+            f"/api/v1/admin/challenges/{ch.challenge_id}/visibility",
+            {"is_published": False, "reason": "서버 오류로 비공개"}, format="json",
+        )
+        self.assertEqual(res.status_code, 200)
+        d = res.data["data"]
+        self.assertTrue(d["previous_is_published"])
+        self.assertFalse(d["is_published"])
+        self.assertEqual(d["changed_by"], "root")
+        self.assertEqual(
+            set(d),
+            {"challenge_id", "title", "previous_is_published", "is_published",
+             "affected_team_count", "changed_at", "changed_by"},
+        )
+        ch.refresh_from_db()
+        self.assertFalse(ch.is_published)
+
+    def test_challenge_visibility_affected_team_count(self):
+        from apps.board.services import (
+            get_current_cell_candidates,
+            open_current_cell_challenge,
+        )
+        ch, _ = self._board_challenge_setup()
+        get_current_cell_candidates(self.team)
+        open_current_cell_challenge(self.team, ch.challenge_id)
+
+        res = self._unpublish(ch)
+        self.assertEqual(res.data["data"]["affected_team_count"], 1)
+
+    def _board_challenge_setup(self, published=True, cell_index=2, number=1):
+        from apps.board.models import BoardChallenge, Cell, TeamBoardState
+        Cell.objects.get_or_create(
+            cell_index=1, defaults={"type": "START", "name": "출발"}
+        )
+        ch = Challenge.objects.create(title=f"보드{number}", category="WEB", difficulty="EASY",
+                                      score=100, flag_hash="x", is_published=published)
+        BoardChallenge.objects.create(challenge=ch, challenge_number=number)
+        cell = Cell.objects.create(cell_index=cell_index, type="CHALLENGE",
+                                   difficulty="EASY", name=f"{cell_index}번칸")
+        TeamBoardState.objects.create(team=self.team, position=cell)
+        return ch, cell
+
+    def _unpublish(self, ch):
+        self.auth("root")
+        return self.client.patch(
+            f"/api/v1/admin/challenges/{ch.challenge_id}/visibility",
+            {"is_published": False, "reason": "출제 오류"}, format="json",
+        )
+
+    def test_opened_team_keeps_access_after_unpublish(self):
+        from apps.board.models import TeamChallengeAccess
+        from apps.board.services import (
+            get_current_cell_candidates,
+            open_current_cell_challenge,
+        )
+        ch, _ = self._board_challenge_setup()
+        get_current_cell_candidates(self.team)
+        open_current_cell_challenge(self.team, ch.challenge_id)
+
+        res = self._unpublish(ch)
+        self.assertEqual(res.data["data"]["affected_team_count"], 1)
+        self.assertTrue(
+            TeamChallengeAccess.objects.filter(team=self.team, challenge=ch).exists()
+        )
+
+    def test_challenge_visibility_invalid_body(self):
+        self.auth("root")
+        ch = Challenge.objects.create(title="웹3", category="WEB", difficulty="EASY",
+                                      score=100, flag_hash="x", is_published=True)
+        url = f"/api/v1/admin/challenges/{ch.challenge_id}/visibility"
+        for body in [{}, {"is_published": True}, {"reason": "x"},
+                     {"is_published": "yes", "reason": "x"}]:
+            self.assertEqual(self.client.patch(url, body, format="json").status_code, 400)
+
+    def test_challenge_visibility_not_found(self):
+        self.auth("root")
+        res = self.client.patch(
+            f"/api/v1/admin/challenges/{uuid.uuid4()}/visibility",
+            {"is_published": False, "reason": "x"}, format="json",
+        )
+        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.data["code"], "CHALLENGE_NOT_FOUND")
+
+    def test_challenge_visibility_participant_blocked(self):
+        self.auth("player")
+        ch = Challenge.objects.create(title="웹4", category="WEB", difficulty="EASY",
+                                      score=100, flag_hash="x", is_published=True)
+        res = self.client.patch(
+            f"/api/v1/admin/challenges/{ch.challenge_id}/visibility",
+            {"is_published": False, "reason": "x"}, format="json",
+        )
+        self.assertEqual(res.status_code, 403)
+
+
 @override_settings(CACHES=LOCMEM)
 class AdminDashboardTests(TestCase):
     def setUp(self):
