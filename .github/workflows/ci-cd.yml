@@ -20,3 +20,22 @@ jobs:
     uses: MSG-CTF/jm_devsecops/.github/workflows/reusable-ci.yml@v3.3.1
     with:
       smoke_test_path: /admin/login/
+
+  deploy-development:
+    name: deploy-development
+    needs: ci
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      id-token: write
+    uses: MSG-CTF/jm_devsecops/.github/workflows/reusable-vm-deploy-dev.yml@4dca3ac03e0c95c31deaa13d7e58565f74cc9533
+    with:
+      component: backend
+      commit_sha: ${{ github.sha }}
+      pipeline_ref: 4dca3ac03e0c95c31deaa13d7e58565f74cc9533
+      gcp_project_id: project-325bdf5b-3d83-4f27-9f6
+      workload_identity_provider: projects/269174025178/locations/global/workloadIdentityPools/github-vm-cd-dev/providers/github-vm-cd-provider
+      deployer_service_account: github-vm-deployer-dev@project-325bdf5b-3d83-4f27-9f6.iam.gserviceaccount.com
+      vm_zone: asia-northeast3-a
+      vm_name: backend-dev-vm
+      public_domain: msg2.mjsec.kr
