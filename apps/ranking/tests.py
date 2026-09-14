@@ -159,6 +159,15 @@ class CalculateDynamicScoreTest(SimpleTestCase):
         result = calculate_dynamic_score(Decimal("1000"), Decimal("600"), 70, 10)
         self.assertEqual(result, 992)
 
+    def test_never_exceeds_decimal_initial_score(self):
+        result = calculate_dynamic_score(
+            Decimal("1000.50"),
+            Decimal("600"),
+            70,
+            1,
+        )
+        self.assertEqual(result, Decimal("1000.50"))
+
 
 class BuildMemberRankingTest(SimpleTestCase):
 
