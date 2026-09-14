@@ -1,18 +1,30 @@
-def resolve_last_solved_at(jeopardy_solved_at, koth_solved_at):
+def resolve_last_solved_at(
+    jeopardy_solved_at,
+    koth_solved_at,
+    signature_solved_at=None,
+):
     if jeopardy_solved_at is not None:
         return jeopardy_solved_at
 
-    return koth_solved_at
+    if koth_solved_at is not None:
+        return koth_solved_at
+
+    return signature_solved_at
 
 def build_team_ranking(team_data, limit=None):
     result = []
 
     for row in team_data:
-        total = row["jeopardy_score"] + row["koth_score"]
+        total = (
+            row["jeopardy_score"]
+            + row["koth_score"]
+            + row.get("signature_score", 0)
+        )
 
         last_solved_at = resolve_last_solved_at(
             row["jeopardy_solved_at"],
-            row["koth_solved_at"]
+            row["koth_solved_at"],
+            row.get("signature_solved_at"),
         )
 
         result.append({

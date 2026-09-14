@@ -7,6 +7,7 @@ from django.db.models import Sum
 from apps.accounts.models import Team
 from apps.koth.models import KothSolve
 from apps.ranking.scoring import calculate_dynamic_score
+from apps.signature.models import SignatureSolve
 
 from .models import Solve
 
@@ -56,7 +57,7 @@ def update_dynamic_score_and_team_scores(challenge):
 
 
 def get_team_total_score(team_id):
-    """Return the same Jeopardy + KOTH score used by ranking and leaderboard."""
+    """Return the same Jeopardy + KOTH + signature score used by ranking."""
     jeopardy_score = (
         Solve.objects.filter(team_id=team_id).aggregate(
             total=Sum("challenge__current_score")
@@ -69,4 +70,10 @@ def get_team_total_score(team_id):
         ]
         or Decimal("0")
     )
-    return jeopardy_score + koth_score
+    signature_score = (
+        SignatureSolve.objects.filter(team_id=team_id).aggregate(
+            total=Sum("earned_score")
+        )["total"]
+        or Decimal("0")
+    )
+    return jeopardy_score + koth_score + signature_score
