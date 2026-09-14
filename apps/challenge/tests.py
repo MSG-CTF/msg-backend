@@ -498,7 +498,13 @@ class ConcurrentChallengeSubmitTests(TransactionTestCase):
     def test_submit_and_roulette_finish_when_roulette_locks_board_first(self):
         self._assert_submit_and_roulette_finish("roulette")
 
-    def _assert_submit_and_roulette_finish(self, first_action):
+    def test_submit_and_cell_25_roulette_finish_when_submit_locks_board_first(self):
+        self._assert_submit_and_roulette_finish("submit", cell_index=25)
+
+    def test_submit_and_cell_25_roulette_finish_when_roulette_locks_board_first(self):
+        self._assert_submit_and_roulette_finish("roulette", cell_index=25)
+
+    def _assert_submit_and_roulette_finish(self, first_action, cell_index=16):
         team = Team.objects.create(team_name="submit-and-roulette")
         user = User.objects.create_user(
             login_id="roulette-leader", nickname="roulette-leader", team=team,
@@ -511,7 +517,7 @@ class ConcurrentChallengeSubmitTests(TransactionTestCase):
             flag_hash=hash_flag("MSG{concurrent}"), is_published=True,
         )
         challenge_cell = Cell.objects.create(cell_index=1, type=Cell.CellType.CHALLENGE, name="previous")
-        roulette_cell = Cell.objects.create(cell_index=2, type=Cell.CellType.ROULETTE, name="roulette")
+        roulette_cell = Cell.objects.create(cell_index=cell_index, type=Cell.CellType.ROULETTE, name="roulette")
         access = TeamChallengeAccess.objects.create(team=team, challenge=challenge, source_cell=challenge_cell)
         state = TeamBoardState.objects.create(team=team, position=roulette_cell, dice_rolls_left=1)
         first_locked = Event()
@@ -562,6 +568,7 @@ class ConcurrentChallengeSubmitTests(TransactionTestCase):
         with patch("apps.board.services.random.choice", return_value=50):
             with ThreadPoolExecutor(max_workers=2) as pool:
                 results = list(pool.map(request_action, ["submit", "roulette"]))
+        self.assertEqual(len(results), 2)
         bodies = {}
         for action, status, body in results:
             self.assertEqual(status, 200, body)

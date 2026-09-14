@@ -387,6 +387,7 @@ def roll_dice(team):
 
 
 def confirm_dice_roll(team):
+    get_or_create_board_state(team)
     with transaction.atomic():
         state = TeamBoardState.objects.select_for_update().get(team=team)
         pending = PendingDiceRoll.objects.filter(team=team).first()
@@ -860,7 +861,7 @@ def discard_chance_card(team, card_id):
         raise CardIdRequired()
 
     with transaction.atomic():
-        held = list(_held_cards_queryset(team).select_for_update().select_related("card"))
+        held = list(_held_cards_queryset(team).select_for_update(of=("self",)).select_related("card"))
         if len(held) < 2:
             raise NoCardToDiscard()
 
@@ -1109,14 +1110,14 @@ def use_chance_card(team, card_id, payload):
         state = TeamBoardState.objects.select_for_update().get(team=team)
         draw = (
             _held_cards_queryset(team)
-            .select_for_update()
+            .select_for_update(of=("self",))
             .select_related("card")
             .filter(card_id=card_id)
             .first()
         )
         if draw is None:
             draw = (
-                TeamChanceCard.objects.select_for_update()
+                TeamChanceCard.objects.select_for_update(of=("self",))
                 .select_related("card")
                 .filter(team=team, card_id=card_id)
                 .first()

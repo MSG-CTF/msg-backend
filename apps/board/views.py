@@ -1,4 +1,5 @@
 import uuid
+from collections.abc import Mapping
 
 from django.conf import settings
 from django.db import DatabaseError
@@ -8,7 +9,7 @@ from rest_framework.generics import ListAPIView
 from rest_framework.permissions import AllowAny
 from rest_framework.views import APIView
 
-from apps.common.exceptions import UserHasNoTeam
+from apps.common.exceptions import InvalidRequest, UserHasNoTeam
 from apps.common.permissions import IsAuthenticated
 from apps.common.response import ok
 
@@ -46,8 +47,17 @@ def _get_team(request):
 
 
 def _assert_no_body(request):
-    if request.data:
+    # DRF represents an absent body as {}. Preserve that compatibility while
+    # rejecting JSON arrays, scalars, and null, even when they are falsy.
+    if request.data != {}:
         raise RequestBodyNotAllowed()
+
+
+def _request_object(request):
+    data = request.data
+    if not isinstance(data, Mapping):
+        raise InvalidRequest("요청 본문은 JSON 객체여야 합니다.")
+    return data
 
 
 def _serialize_active_challenge(access):
@@ -138,7 +148,7 @@ class CellOpenView(APIView):
     @idempotent
     def post(self, request, *args, **kwargs):
         team = _get_team(request)
-        challenge_id = request.data.get("challenge_id")
+        challenge_id = _request_object(request).get("challenge_id")
         if challenge_id is None:
             raise ChallengeIdRequired()
         try:
@@ -225,7 +235,7 @@ class AirportMoveView(APIView):
     @idempotent
     def post(self, request, *args, **kwargs):
         team = _get_team(request)
-        destination_index = request.data.get("destination_index")
+        destination_index = _request_object(request).get("destination_index")
         return ok(move_team_via_airport(team, destination_index))
 
 
@@ -262,7 +272,7 @@ class ChanceDiscardView(APIView):
     @idempotent
     def post(self, request, *args, **kwargs):
         team = _get_team(request)
-        card_id = request.data.get("card_id")
+        card_id = _request_object(request).get("card_id")
         return ok(discard_chance_card(team, card_id))
 
 
@@ -274,8 +284,9 @@ class ChanceUseView(APIView):
     @idempotent
     def post(self, request, *args, **kwargs):
         team = _get_team(request)
-        card_id = request.data.get("card_id")
-        return ok(use_chance_card(team, card_id, request.data))
+        payload = _request_object(request)
+        card_id = payload.get("card_id")
+        return ok(use_chance_card(team, card_id, payload))
 
 
 class ChanceConfirmView(APIView):
@@ -286,7 +297,7 @@ class ChanceConfirmView(APIView):
     @idempotent
     def post(self, request, *args, **kwargs):
         team = _get_team(request)
-        choice = request.data.get("choice")
+        choice = _request_object(request).get("choice")
         return ok(confirm_chance_choice(team, choice))
 
 

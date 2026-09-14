@@ -17,4 +17,8 @@ Do not run `seed_board` to update an existing game: that command resets board pr
 
 ## Verification
 
-Run `python manage.py test apps.board apps.challenge apps.adminpanel`. Tests cover the fixed layout, both roulette cells and duplicate rewards, the five-card catalog and flows, removal of escape routes, and migration of an existing game. The migration test uses historical models and checks that team progress and mileage remain intact.
+Run `python manage.py test apps --noinput` against PostgreSQL. Tests cover the fixed layout, both roulette cells and duplicate rewards, the five-card catalog and flows, removal of escape routes, and migration of an existing game. The migration test uses historical models, checks that team progress and mileage remain intact, and continues through the real board API after conversion.
+
+Migration tests register cleanup before downgrading and restore all saved latest migration leaves, including when setup or assertions fail. Runtime tests exercise concurrent requests, cache failures, transaction rollback, and shared-card row-lock contention. See [PR #72 validation](board-pr72-validation.md) for the scenarios and reviewer criteria.
+
+Card use/discard locks the team's inventory rows without locking shared card definitions. A fresh team's dice-confirm request without a pending roll returns `409 NO_PENDING_ROLL`. Endpoints that take JSON objects reject arrays, scalars, and null with `400 INVALID_REQUEST`; bodyless actions reject supplied non-object JSON with `400 REQUEST_BODY_NOT_ALLOWED`, including falsy values. An absent body and the existing empty-object form remain accepted by bodyless actions.
