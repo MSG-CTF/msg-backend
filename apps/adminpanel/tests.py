@@ -798,6 +798,69 @@ class AdminTests(TestCase):
         )
         self.assertEqual(res.status_code, 403)
 
+    def test_account_create_with_new_team(self):
+        self.auth("root")
+        res = self.client.post(
+            "/api/v1/admin/accounts",
+            {"login_id": "newteam", "password": "pw12345678", "nickname": "새팀장",
+             "team_name": "새로운팀", "is_leader": True},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 200)
+        d = res.data["data"]
+        self.assertEqual(d["team_name"], "새로운팀")
+        self.assertIsNotNone(d["team_id"])
+        self.assertTrue(d["is_leader"])
+        team = Team.objects.get(team_name="새로운팀")
+        self.assertEqual(str(team.team_id), d["team_id"])
+        self.assertEqual(team.mileage, 0)
+
+    def test_account_create_duplicate_team_name(self):
+        self.auth("root")
+        res = self.client.post(
+            "/api/v1/admin/accounts",
+            {"login_id": "dup", "password": "pw12345678", "nickname": "x",
+             "team_name": self.team.team_name},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.data["code"], "TEAM_NAME_TAKEN")
+        self.assertFalse(User.objects.filter(login_id="dup").exists())
+
+    def test_account_create_team_id_and_name_together(self):
+        self.auth("root")
+        res = self.client.post(
+            "/api/v1/admin/accounts",
+            {"login_id": "both", "password": "pw12345678", "nickname": "x",
+             "team_id": str(self.team.team_id), "team_name": "또다른팀"},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 400)
+
+    def test_account_create_blank_team_name(self):
+        self.auth("root")
+        for name in ["", "   "]:
+            with self.subTest(name=name):
+                res = self.client.post(
+                    "/api/v1/admin/accounts",
+                    {"login_id": "blank", "password": "pw12345678", "nickname": "x",
+                     "team_name": name},
+                    format="json",
+                )
+                self.assertEqual(res.status_code, 400)
+
+    def test_new_team_not_created_when_login_id_taken(self):
+        """계정 생성이 실패하면 팀도 남지 않는다."""
+        self.auth("root")
+        res = self.client.post(
+            "/api/v1/admin/accounts",
+            {"login_id": "player", "password": "pw12345678", "nickname": "x",
+             "team_name": "롤백될팀"},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 409)
+        self.assertFalse(Team.objects.filter(team_name="롤백될팀").exists())
+
 @override_settings(CACHES=LOCMEM)
 class AdminDashboardTests(TestCase):
     def setUp(self):
