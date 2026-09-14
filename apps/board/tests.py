@@ -477,28 +477,84 @@ class BoardApiTestCase(TestCase):
 
         self.assertEqual(response.json()["data"]["blocked_reason"], "CHALLENGE_NOT_SELECTED")
 
-    def test_dice_status_timer_running(self):
+    def test_dice_status_allows_roll_while_challenge_timer_running(self):
         cell = self.set_position(2, consumed=True)
         challenge = Challenge.objects.filter(difficulty=cell.difficulty).first()
-        TeamChallengeAccess.objects.create(team=self.team, challenge=challenge, source_cell=cell)
+        access = TeamChallengeAccess.objects.create(team=self.team, challenge=challenge, source_cell=cell)
+        self.state.active_challenge_access = access
+        self.state.save(update_fields=["active_challenge_access"])
 
         response = self.client.get("/api/v1/board/dice/status")
 
-        self.assertEqual(response.json()["data"]["blocked_reason"], "TIMER_RUNNING")
+        data = response.json()["data"]
+        self.assertTrue(data["can_roll"])
+        self.assertTrue(data["timer_running"])
+        self.assertIsNone(data["blocked_reason"])
 
-    def test_dice_status_timer_running_releases_after_solve_deadline(self):
-        # 15분이 지나면 문제를 풀지 않았어도 TIMER_RUNNING이 풀려야 한다 (미해결 시 영구 차단 회귀 방지).
+        self.state.dice_rolls_left = 0
+        self.state.save(update_fields=["dice_rolls_left"])
+        data = self.client.get("/api/v1/board/dice/status").data["data"]
+        self.assertTrue(data["timer_running"])
+        self.assertFalse(data["can_roll"])
+        self.assertEqual(data["blocked_reason"], "NO_ROLL_LEFT")
+        response = self.post_idem("/api/v1/board/dice/roll", key="empty-during-timer")
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["code"], "NO_ROLL_LEFT")
+
+    def test_three_rolls_can_be_spent_without_waiting_for_challenge_or_recharge(self):
+        self.state.delete()
+        now = timezone.now().replace(microsecond=0)
+        recharge_at = now + timedelta(minutes=15)
+        with patch("apps.board.services.timezone.now", return_value=now):
+            for roll_number, position in enumerate((3, 5, 7), start=1):
+                with patch("apps.board.services.random.randint", return_value=1):
+                    response = self.post_idem(
+                        "/api/v1/board/dice/roll", key=f"consecutive-roll-{roll_number}",
+                    )
+                self.assertEqual(response.status_code, 200, response.data)
+                self.assertEqual(response.data["data"]["current_position"], position)
+
+                current = self.client.get("/api/v1/board/cell/current").data["data"]
+                if current["type"] == "CHALLENGE":
+                    opened = self.post_idem(
+                        "/api/v1/board/cell/open",
+                        {"challenge_id": current["challenge_candidates"][0]["challenge_id"]},
+                        key=f"consecutive-open-{roll_number}",
+                    )
+                    self.assertEqual(opened.status_code, 200, opened.data)
+
+                status = self.client.get("/api/v1/board/dice/status").data["data"]
+                self.assertEqual(status["dice_rolls_left"], 3 - roll_number)
+                self.assertEqual(status["next_dice_reset_at"], recharge_at)
+                self.assertEqual(status["can_roll"], roll_number < 3)
+                self.assertEqual(status["blocked_reason"], None if roll_number < 3 else "NO_ROLL_LEFT")
+
+            fourth = self.post_idem("/api/v1/board/dice/roll", key="consecutive-roll-4")
+            self.assertEqual(fourth.status_code, 409)
+            self.assertEqual(fourth.data["code"], "NO_ROLL_LEFT")
+            replay = self.post_idem("/api/v1/board/dice/roll", key="consecutive-roll-3")
+            self.assertEqual(replay.data, response.data)
+
+        self.assertEqual(DiceRoll.objects.filter(team=self.team).count(), 3)
+        accesses = TeamChallengeAccess.objects.filter(team=self.team)
+        self.assertEqual(accesses.count(), 2)
+        self.assertTrue(all(access.status == TeamChallengeAccess.Status.OPENED for access in accesses))
+
+    def test_dice_status_after_solve_deadline(self):
         cell = self.set_position(2, consumed=True)
         challenge = Challenge.objects.filter(difficulty=cell.difficulty).first()
         access = TeamChallengeAccess.objects.create(team=self.team, challenge=challenge, source_cell=cell)
         access.opened_at = timezone.now() - timedelta(seconds=SOLVE_LIMIT_SECONDS + 1)
         access.save(update_fields=["opened_at"])
+        self.state.active_challenge_access = access
+        self.state.save(update_fields=["active_challenge_access"])
 
         response = self.client.get("/api/v1/board/dice/status")
 
         data = response.json()["data"]
         self.assertIsNone(data["blocked_reason"])
         self.assertTrue(data["can_roll"])
+        self.assertFalse(data["timer_running"])
 
     def test_dice_roll_succeeds_after_challenge_timer_expires(self):
         cell = self.set_position(2, consumed=True)

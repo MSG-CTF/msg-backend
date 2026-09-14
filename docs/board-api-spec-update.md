@@ -7,6 +7,10 @@ Source: [Notion Board API](https://app.notion.com/p/3ab0f19c72be80ab9e57e3776b67
 - The catalog contains five cards: reroll, roll twice and choose, move offset, free travel, and extra roll.
 - Quarantine state, escape endpoints, and the two retired card effects have been removed.
 
+## Consecutive dice rolls
+
+Teams may spend all three stored rolls without waiting for the 15-minute challenge reward window or dice recharge. A challenge must still be selected on arrival before the next roll. The `timer_running` field reports the current challenge reward window independently of `can_roll`; it no longer produces a `TIMER_RUNNING` block. Empty dice, an unconfirmed roll, and board completion still block rolling. Further rolls preserve the existing recharge deadline, and opened challenges remain available after moving.
+
 ## Existing databases
 
 Apply `python manage.py migrate` with the new release. Migration `board.0004_align_board_api_spec` updates cell 16 in place and translates pending landings on it. It also updates special-cell labels and the move-offset description.
