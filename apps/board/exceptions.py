@@ -87,12 +87,6 @@ class ChallengeNotSelected(APIError):
     message = "문제 칸에서 문제를 먼저 선택해야 합니다."
 
 
-class Quarantined(APIError):
-    status_code = status.HTTP_409_CONFLICT
-    code = "QUARANTINED"
-    message = "무인도 상태에서는 주사위를 굴릴 수 없습니다."
-
-
 class BoardCompleted(APIError):
     status_code = status.HTTP_409_CONFLICT
     code = "BOARD_COMPLETED"
@@ -187,27 +181,3 @@ class PendingRollUnresolved(APIError):
     status_code = status.HTTP_409_CONFLICT
     code = "PENDING_CONFIRM"
     message = "이전 주사위 결과를 먼저 확정해야 합니다."
-
-
-class NotQuarantined(APIError):
-    status_code = status.HTTP_409_CONFLICT
-    code = "NOT_QUARANTINED"
-    message = "무인도 상태가 아닙니다."
-
-
-class QuarantineCodeRequired(APIError):
-    status_code = status.HTTP_400_BAD_REQUEST
-    code = "QUARANTINE_CODE_REQUIRED"
-    message = "code가 필요합니다."
-
-
-class QuarantineCodeInvalid(APIError):
-    status_code = status.HTTP_404_NOT_FOUND
-    code = "QUARANTINE_CODE_INVALID"
-    message = "존재하지 않는 탈출 코드입니다."
-
-
-class QuarantineCodeAlreadyUsed(APIError):
-    status_code = status.HTTP_409_CONFLICT
-    code = "QUARANTINE_CODE_ALREADY_USED"
-    message = "이미 사용된 탈출 코드입니다."

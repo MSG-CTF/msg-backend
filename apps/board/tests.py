@@ -18,7 +18,6 @@ from apps.board.models import (
     DiceRoll,
     IdempotencyRequest,
     PendingDiceRoll,
-    QuarantineEscapeCode,
     TeamBoardState,
     TeamCellCandidate,
     TeamCellConsumption,
@@ -214,9 +213,7 @@ class BoardApiTestCase(TestCase):
         self.state.position_id = 1
         self.state.dice_rolls_left = 1
         self.state.active_challenge_access = None
-        self.state.is_quarantined = False
         self.state.next_dice_reset_at = None
-        self.state.quarantine_released_at = None
         self.state.airport_move_used = False
         self.state.has_passed_start = False
         self.state.save(
@@ -224,9 +221,7 @@ class BoardApiTestCase(TestCase):
                 "position",
                 "dice_rolls_left",
                 "active_challenge_access",
-                "is_quarantined",
                 "next_dice_reset_at",
-                "quarantine_released_at",
                 "airport_move_used",
                 "has_passed_start",
                 "updated_at",
@@ -258,6 +253,100 @@ class BoardApiTestCase(TestCase):
         self.assertEqual(body["code"], "SUCCESS")
         self.assertEqual(body["data"]["total_cell_count"], 36)
         self.assertEqual(len(body["data"]["cells"]), 36)
+        cells = body["data"]["cells"]
+        self.assertEqual([cell["cell_index"] for cell in cells], list(range(1, 37)))
+        self.assertEqual(
+            {cell["cell_index"]: (cell["type"], cell["name"], cell["difficulty"])
+             for cell in cells if cell["type"] != "CHALLENGE"},
+            {
+                1: ("START", "출발", None), 7: ("CHANCE", "찬스", None),
+                16: ("ROULETTE", "룰렛", None), 21: ("AIRPORT", "세계여행", None),
+                25: ("ROULETTE", "룰렛", None), 30: ("CHANCE", "황금열쇠", None),
+            },
+        )
+
+    def test_landing_on_sixteen_is_roulette_and_does_not_lock_dice(self):
+        self.set_position(14, consumed=True)
+        self.mark_challenge_solved(self.state.position)
+        self.state.dice_rolls_left = 3
+        self.state.save(update_fields=["dice_rolls_left"])
+        with patch("apps.board.services.random.randint", side_effect=[1, 1]):
+            response = self.post_idem("/api/v1/board/dice/roll", key="land-on-sixteen")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["data"]["current_position"], 16)
+        self.assertEqual(response.data["data"]["board_event_code"], "ROULETTE")
+        status = self.client.get("/api/v1/board/dice/status").data["data"]
+        self.assertEqual(set(status), {
+            "can_roll", "dice_rolls_left", "timer_running", "blocked_reason",
+            "server_time", "next_dice_reset_at",
+        })
+        self.assertTrue(status["can_roll"])
+        self.assertIsNone(status["blocked_reason"])
+        self.assertEqual(self.client.get("/api/v1/board/cell/current").data["data"]["type"], "ROULETTE")
+        with patch("apps.board.services.random.randint", side_effect=[1, 1]):
+            self.assertEqual(self.post_idem("/api/v1/board/dice/roll", key="leave-sixteen").status_code, 200)
+
+    def test_removed_escape_routes_are_unavailable(self):
+        for path in ("/api/v1/board/quarantine/escape", "/board/_debug/release_quarantine"):
+            with self.subTest(path=path):
+                self.assertEqual(self.post_idem(path, {"code": "OLD-CODE"}).status_code, 404)
+
+    def test_retired_cards_are_not_available_or_counted_as_held(self):
+        legacy = ChanceCard.objects.create(
+            card_id="card_move_to_quarantine", name="retired", effect="FORCE_MOVE_TO_QUARANTINE",
+            usage_timing="PRE_ROLL",
+        )
+        retired = TeamChanceCard.objects.create(team=self.team, card=legacy, source_cell_id=7)
+        self.draw_card("card_extra_roll", source_cell_index=30)
+        catalog = self.client.get("/api/v1/board/chance/catalog").data["data"]
+        self.assertEqual(catalog["total_count"], 5)
+        self.assertNotIn(legacy.pk, [card["card_id"] for card in catalog["cards"]])
+        held = self.client.get("/api/v1/board/me").data["data"]["chance_cards"]
+        self.assertEqual([card["card_id"] for card in held], ["card_extra_roll"])
+        self.assertTrue(held[0]["usable_now"])
+        response = self.post_idem("/api/v1/board/chance/use", {"card_id": legacy.pk})
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.data["code"], "CHANCE_CARD_NOT_FOUND")
+        retired.refresh_from_db()
+        self.assertIsNone(retired.used_at)
+        self.assertEqual(self.post_idem(
+            "/api/v1/board/chance/use", {"card_id": "card_extra_roll"}, key="supported-card",
+        ).status_code, 200)
+
+    def test_chance_draw_never_selects_retired_definitions(self):
+        ChanceCard.objects.create(
+            card_id="card_quarantine_defense", name="retired", effect="QUARANTINE_ESCAPE_FREE",
+            usage_timing="QUARANTINE_STATE",
+        )
+        self.set_position(7, consumed=True)
+        with patch("apps.board.services.random.choice", side_effect=lambda cards: cards[0]) as choice:
+            response = self.post_idem("/api/v1/board/chance/now")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual({card.pk for card in choice.call_args.args[0]}, {
+            "card_reroll", "card_roll_twice_choose", "card_move_offset", "card_free_travel", "card_extra_roll",
+        })
+
+    def test_each_roulette_cell_awards_once_and_isolates_teams(self):
+        for cell_index, reward in ((16, 50), (25, 200)):
+            with self.subTest(cell_index=cell_index):
+                self.set_position(cell_index, consumed=True)
+                with patch("apps.board.services.random.choice", return_value=reward):
+                    response = self.post_idem("/api/v1/board/roulette/spin", key=f"spin-{cell_index}")
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.data["data"]["mileage_gained"], reward)
+                duplicate = self.post_idem("/api/v1/board/roulette/spin", key=f"repeat-{cell_index}")
+                self.assertEqual(duplicate.status_code, 409)
+                self.assertEqual(duplicate.data["code"], "ROULETTE_ALREADY_SPUN")
+        self.team.refresh_from_db()
+        self.assertEqual(self.team.mileage, 250)
+        self.assertEqual(set(MileageHistory.objects.filter(team=self.team, type="ROULETTE").values_list("reason", flat=True)), {
+            "ROULETTE_CELL:16", "ROULETTE_CELL:25",
+        })
+        other_state = get_or_create_board_state(self.other_team)
+        other_state.position_id = 16
+        other_state.save(update_fields=["position"])
+        self.as_other_leader()
+        self.assertEqual(self.post_idem("/api/v1/board/roulette/spin", key="other-team-spin").status_code, 200)
 
     def test_board_returns_load_failed_when_not_seeded(self):
         TeamBoardState.objects.all().delete()
@@ -295,8 +384,8 @@ class BoardApiTestCase(TestCase):
         self.assertEqual(
             set(data.keys()),
             {
-                "position", "type", "is_quarantined", "dice_rolls_left", "next_dice_reset_at",
-                "quarantine_attempts_left", "airport_move_used", "has_passed_start",
+                "position", "type", "dice_rolls_left", "next_dice_reset_at",
+                "airport_move_used", "has_passed_start",
                 "board_completed", "consumed_cell_indexes", "cell_states", "chance_cards",
                 "active_challenge",
             },
@@ -423,15 +512,6 @@ class BoardApiTestCase(TestCase):
 
         self.assertEqual(response.status_code, 200)
 
-    def test_dice_status_quarantined(self):
-        self.state.is_quarantined = True
-        self.state.save(update_fields=["is_quarantined"])
-
-        response = self.client.get("/api/v1/board/dice/status")
-
-        data = response.json()["data"]
-        self.assertEqual(data["blocked_reason"], "QUARANTINED")
-        self.assertTrue(data["is_quarantined"])
 
     def test_dice_status_board_completed(self):
         for cell_index in range(1, 37):
@@ -553,12 +633,6 @@ class BoardApiTestCase(TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["code"], "CHALLENGE_NOT_SELECTED")
 
-    def test_dice_roll_blocked_while_quarantined(self):
-        self.state.is_quarantined = True
-        self.state.save(update_fields=["is_quarantined"])
-        response = self.post_idem("/api/v1/board/dice/roll")
-        self.assertEqual(response.status_code, 409)
-        self.assertEqual(response.json()["code"], "QUARANTINED")
 
     def test_dice_roll_creates_pending_when_post_roll_card_held(self):
         self.draw_card("card_reroll")
@@ -871,13 +945,13 @@ class BoardApiTestCase(TestCase):
 
     # ---------------------------------------------------------------- chance/catalog
 
-    def test_chance_catalog_returns_seven_cards_without_auth(self):
+    def test_chance_catalog_returns_five_cards_without_auth(self):
         self.client.credentials()
         response = self.client.get("/api/v1/board/chance/catalog")
 
         self.assertEqual(set(response.json()), {"code", "message", "data"})
         data = response.json()["data"]
-        self.assertEqual(data["total_count"], 7)
+        self.assertEqual(data["total_count"], 5)
         cards = {
             card["card_id"]: (card["name"], card["effect"], card["usage_timing"])
             for card in data["cards"]
@@ -890,8 +964,6 @@ class BoardApiTestCase(TestCase):
                 "card_move_offset": ("주변 칸 이동", "MOVE_OFFSET", "POST_ROLL"),
                 "card_free_travel": ("세계여행", "FREE_MOVE", "PRE_ROLL"),
                 "card_extra_roll": ("주사위 보너스", "GRANT_EXTRA_ROLL", "PRE_ROLL"),
-                "card_quarantine_defense": ("무인도 방어", "QUARANTINE_ESCAPE_FREE", "QUARANTINE_STATE"),
-                "card_move_to_quarantine": ("무인도 이동", "FORCE_MOVE_TO_QUARANTINE", "PRE_ROLL"),
             },
         )
         roll_twice = next(card for card in data["cards"] if card["card_id"] == "card_roll_twice_choose")
@@ -1205,15 +1277,13 @@ class BoardApiTestCase(TestCase):
             TeamChallengeAccess.objects.filter(team=self.team, challenge_id=challenge_id).exists()
         )
 
-    def test_all_seven_cards_complete_their_api_flow_once(self):
+    def test_all_five_cards_complete_their_api_flow_once(self):
         for card_id in (
             "card_reroll",
             "card_roll_twice_choose",
             "card_move_offset",
             "card_free_travel",
             "card_extra_roll",
-            "card_quarantine_defense",
-            "card_move_to_quarantine",
         ):
             with self.subTest(card_id=card_id):
                 self.reset_card_scenario()
@@ -1250,16 +1320,6 @@ class BoardApiTestCase(TestCase):
                 elif card_id == "card_extra_roll":
                     self.state.dice_rolls_left = 0
                     self.state.save(update_fields=["dice_rolls_left"])
-                    response = self.post_idem(
-                        "/api/v1/board/chance/use", {"card_id": card_id}, key=f"{card_id}-use"
-                    )
-                elif card_id == "card_quarantine_defense":
-                    self.state.is_quarantined = True
-                    self.state.save(update_fields=["is_quarantined"])
-                    response = self.post_idem(
-                        "/api/v1/board/chance/use", {"card_id": card_id}, key=f"{card_id}-use"
-                    )
-                else:
                     response = self.post_idem(
                         "/api/v1/board/chance/use", {"card_id": card_id}, key=f"{card_id}-use"
                     )
@@ -1308,65 +1368,6 @@ class BoardApiTestCase(TestCase):
         draw.refresh_from_db()
         self.assertIsNotNone(draw.used_at)
 
-    def test_chance_use_quarantine_defense_escapes_immediately(self):
-        self.state.is_quarantined = True
-        self.state.quarantine_released_at = timezone.now() + timedelta(minutes=15)
-        self.state.save(update_fields=["is_quarantined", "quarantine_released_at"])
-        self.draw_card("card_quarantine_defense")
-
-        response = self.post_idem(
-            "/api/v1/board/chance/use", {"card_id": "card_quarantine_defense"}
-        )
-
-        self.assertEqual(response.status_code, 200)
-        data = response.json()["data"]
-        self.assertFalse(data["is_quarantined"])
-        self.assertEqual(data["dice_rolls_left"], 2)
-        self.state.refresh_from_db()
-        self.assertFalse(self.state.is_quarantined)
-        self.assertEqual(self.state.dice_rolls_left, 2)
-
-    def test_chance_use_quarantine_defense_keeps_quarantine_consumed_for_next_skip(self):
-        start_cell = self.set_position(14)
-        self.mark_challenge_solved(start_cell)
-        with patch("apps.board.services.random.randint", side_effect=[1, 1]):
-            enter_response = self.post_idem("/api/v1/board/dice/roll", key="enter-quarantine")
-        self.assertEqual(enter_response.status_code, 200)
-        self.state.refresh_from_db()
-        self.assertTrue(self.state.is_quarantined)
-        self.assertTrue(TeamCellConsumption.objects.filter(team=self.team, cell_id=16).exists())
-
-        self.draw_card("card_quarantine_defense")
-        escape_response = self.post_idem(
-            "/api/v1/board/chance/use", {"card_id": "card_quarantine_defense"}, key="escape-card"
-        )
-        self.assertEqual(escape_response.status_code, 200)
-
-        self.state.position_id = 14
-        self.state.dice_rolls_left = 1
-        self.state.save(update_fields=["position", "dice_rolls_left"])
-        with patch("apps.board.services.random.randint", side_effect=[1, 1]):
-            response = self.post_idem("/api/v1/board/dice/roll", key="roll-after-card-escape")
-
-        data = response.json()["data"]
-        self.assertEqual(data["current_position"], 17)
-        self.assertEqual(data["skipped_cells"], [16])
-        self.state.refresh_from_db()
-        self.assertFalse(self.state.is_quarantined)
-
-    def test_chance_use_move_to_consumed_quarantine_does_not_lock_again(self):
-        quarantine_cell = Cell.objects.get(type=Cell.CellType.QUARANTINE)
-        TeamCellConsumption.objects.create(team=self.team, cell=quarantine_cell)
-        self.draw_card("card_move_to_quarantine")
-
-        response = self.post_idem(
-            "/api/v1/board/chance/use", {"card_id": "card_move_to_quarantine"}
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.state.refresh_from_db()
-        self.assertEqual(self.state.position_id, quarantine_cell.cell_index)
-        self.assertFalse(self.state.is_quarantined)
 
     def test_chance_use_unknown_card_not_found(self):
         response = self.post_idem("/api/v1/board/chance/use", {"card_id": "card_reroll"})
@@ -1598,98 +1599,3 @@ class BoardApiTestCase(TestCase):
 
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["code"], "NOT_TEAM_LEADER")
-
-    # ---------------------------------------------------------------- quarantine/escape
-
-    def enter_quarantine(self):
-        self.state.is_quarantined = True
-        self.state.quarantine_released_at = timezone.now() + timedelta(minutes=15)
-        self.state.save(update_fields=["is_quarantined", "quarantine_released_at"])
-
-    def test_quarantine_escape_with_valid_code_succeeds(self):
-        self.enter_quarantine()
-        QuarantineEscapeCode.objects.create(code="AAAAAAAA")
-
-        response = self.post_idem("/api/v1/board/quarantine/escape", {"code": "AAAAAAAA"})
-
-        self.assertEqual(response.status_code, 200)
-        self.assertFalse(response.json()["data"]["is_quarantined"])
-        self.state.refresh_from_db()
-        self.assertFalse(self.state.is_quarantined)
-        escape_code = QuarantineEscapeCode.objects.get(code="AAAAAAAA")
-        self.assertEqual(escape_code.used_by_team, self.team)
-        self.assertIsNotNone(escape_code.used_at)
-
-    def test_quarantine_escape_code_keeps_quarantine_consumed_for_next_skip(self):
-        start_cell = self.set_position(14)
-        self.mark_challenge_solved(start_cell)
-        with patch("apps.board.services.random.randint", side_effect=[1, 1]):
-            enter_response = self.post_idem("/api/v1/board/dice/roll", key="enter-quarantine")
-        self.assertEqual(enter_response.status_code, 200)
-        self.state.refresh_from_db()
-        self.assertTrue(self.state.is_quarantined)
-        self.assertTrue(TeamCellConsumption.objects.filter(team=self.team, cell_id=16).exists())
-
-        QuarantineEscapeCode.objects.create(code="BBBBBBBB")
-        escape_response = self.post_idem(
-            "/api/v1/board/quarantine/escape", {"code": "BBBBBBBB"}, key="escape-code"
-        )
-        self.assertEqual(escape_response.status_code, 200)
-
-        self.state.position_id = 14
-        self.state.dice_rolls_left = 1
-        self.state.save(update_fields=["position", "dice_rolls_left"])
-        with patch("apps.board.services.random.randint", side_effect=[1, 1]):
-            response = self.post_idem("/api/v1/board/dice/roll", key="roll-after-code-escape")
-
-        data = response.json()["data"]
-        self.assertEqual(data["current_position"], 17)
-        self.assertEqual(data["skipped_cells"], [16])
-        self.state.refresh_from_db()
-        self.assertFalse(self.state.is_quarantined)
-
-    def test_quarantine_escape_code_cannot_be_reused_by_another_team(self):
-        self.enter_quarantine()
-        QuarantineEscapeCode.objects.create(
-            code="AAAAAAAA", used_by_team=self.other_team, used_at=timezone.now()
-        )
-
-        response = self.post_idem("/api/v1/board/quarantine/escape", {"code": "AAAAAAAA"})
-
-        self.assertEqual(response.status_code, 409)
-        self.assertEqual(response.json()["code"], "QUARANTINE_CODE_ALREADY_USED")
-        self.state.refresh_from_db()
-        self.assertTrue(self.state.is_quarantined)
-
-    def test_quarantine_escape_unknown_code_not_found(self):
-        self.enter_quarantine()
-
-        response = self.post_idem("/api/v1/board/quarantine/escape", {"code": "NOPE0000"})
-
-        self.assertEqual(response.status_code, 404)
-        self.assertEqual(response.json()["code"], "QUARANTINE_CODE_INVALID")
-
-    def test_quarantine_escape_requires_code(self):
-        self.enter_quarantine()
-
-        response = self.post_idem("/api/v1/board/quarantine/escape", {})
-
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.json()["code"], "QUARANTINE_CODE_REQUIRED")
-
-    def test_quarantine_escape_requires_being_quarantined(self):
-        QuarantineEscapeCode.objects.create(code="AAAAAAAA")
-
-        response = self.post_idem("/api/v1/board/quarantine/escape", {"code": "AAAAAAAA"})
-
-        self.assertEqual(response.status_code, 409)
-        self.assertEqual(response.json()["code"], "NOT_QUARANTINED")
-
-    def test_quarantine_escape_forbidden_for_non_leader(self):
-        self.enter_quarantine()
-        QuarantineEscapeCode.objects.create(code="AAAAAAAA")
-        self.as_member()
-
-        response = self.post_idem("/api/v1/board/quarantine/escape", {"code": "AAAAAAAA"})
-
-        self.assertEqual(response.status_code, 403)

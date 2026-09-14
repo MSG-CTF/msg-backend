@@ -25,9 +25,9 @@ FIRST_CELL_INDEX = 1
 
 SPECIAL_CELLS = {
     1: (Cell.CellType.START, "출발"),
-    7: (Cell.CellType.CHANCE, "황금열쇠"),
-    16: (Cell.CellType.QUARANTINE, "무인도"),
-    21: (Cell.CellType.AIRPORT, "기차"),
+    7: (Cell.CellType.CHANCE, "찬스"),
+    16: (Cell.CellType.ROULETTE, "룰렛"),
+    21: (Cell.CellType.AIRPORT, "세계여행"),
     25: (Cell.CellType.ROULETTE, "룰렛"),
     30: (Cell.CellType.CHANCE, "황금열쇠"),
 }
@@ -128,7 +128,7 @@ CHANCE_CARDS = [
     {
         "card_id": "card_move_offset",
         "name": "주변 칸 이동",
-        "description": "현재 위치에서 앞/뒤 1~3칸을 추가로 이동합니다.",
+        "description": "굴린 뒤 확정 전인 도착 후보에서 앞/뒤 1~3칸 추가 이동합니다.",
         "effect": "MOVE_OFFSET",
         "usage_timing": ChanceCard.UsageTiming.POST_ROLL,
     },
@@ -144,20 +144,6 @@ CHANCE_CARDS = [
         "name": "주사위 보너스",
         "description": "주사위를 굴릴 수 있는 횟수가 1회 늘어납니다.",
         "effect": "GRANT_EXTRA_ROLL",
-        "usage_timing": ChanceCard.UsageTiming.PRE_ROLL,
-    },
-    {
-        "card_id": "card_quarantine_defense",
-        "name": "무인도 방어",
-        "description": "탈출 시도 소모 없이 즉시 무인도에서 탈출합니다.",
-        "effect": "QUARANTINE_ESCAPE_FREE",
-        "usage_timing": ChanceCard.UsageTiming.QUARANTINE_STATE,
-    },
-    {
-        "card_id": "card_move_to_quarantine",
-        "name": "무인도 이동",
-        "description": "즉시 무인도 칸으로 강제 이동합니다.",
-        "effect": "FORCE_MOVE_TO_QUARANTINE",
         "usage_timing": ChanceCard.UsageTiming.PRE_ROLL,
     },
 ]

@@ -14,7 +14,6 @@ from apps.board.views import (
     DiceRollView,
     DiceStatusView,
     OpenedChallengesView,
-    QuarantineEscapeView,
     RouletteSpinView,
 )
 
@@ -34,6 +33,5 @@ urlpatterns = [
     path("dice/roll", DiceRollView.as_view(), name="dice-roll"),
     path("dice/confirm", DiceConfirmView.as_view(), name="dice-confirm"),
     path("airport/move", AirportMoveView.as_view(), name="airport-move"),
-    path("quarantine/escape", QuarantineEscapeView.as_view(), name="quarantine-escape"),
     path("roulette/spin", RouletteSpinView.as_view(), name="roulette-spin"),
 ]

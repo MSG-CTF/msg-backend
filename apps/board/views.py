@@ -24,10 +24,8 @@ from .services import (
     compute_blocked_reason,
     confirm_chance_choice,
     confirm_dice_roll,
-    debug_force_release_quarantine,
     discard_chance_card,
     draw_chance_card,
-    escape_quarantine_with_code,
     get_current_cell_candidates,
     get_opened_challenges_summary,
     get_or_create_board_state,
@@ -99,10 +97,8 @@ class BoardMeView(APIView):
             {
                 "position": state.position_id,
                 "type": state.position.type,
-                "is_quarantined": state.is_quarantined,
                 "dice_rolls_left": state.dice_rolls_left,
                 "next_dice_reset_at": state.next_dice_reset_at,
-                "quarantine_attempts_left": state.quarantine_attempts_left,
                 "airport_move_used": state.airport_move_used,
                 "has_passed_start": state.has_passed_start,
                 "board_completed": is_board_completed(team),
@@ -167,7 +163,7 @@ class ChanceCardCatalogView(ListAPIView):
     """GET /api/v1/board/chance/catalog — 인증 불필요."""
 
     permission_classes = [AllowAny]
-    queryset = ChanceCard.objects.all()
+    queryset = ChanceCard.objects.filter(card_id__in=ChanceCard.CardId.values)
     serializer_class = ChanceCardSerializer
 
     def list(self, request, *args, **kwargs):
@@ -189,12 +185,10 @@ class DiceStatusView(APIView):
             {
                 "can_roll": blocked_reason is None,
                 "dice_rolls_left": state.dice_rolls_left,
-                "is_quarantined": state.is_quarantined,
                 "timer_running": blocked_reason == "TIMER_RUNNING",
                 "blocked_reason": blocked_reason,
                 "server_time": timezone.now(),
                 "next_dice_reset_at": state.next_dice_reset_at,
-                "quarantine_released_at": state.quarantine_released_at,
             }
         )
 
@@ -329,18 +323,6 @@ class DebugSolveActiveChallengeView(APIView):
         )
 
 
-class QuarantineEscapeView(APIView):
-    """POST /api/v1/board/quarantine/escape — 팀장만."""
-
-    permission_classes = [IsAuthenticated, IsTeamLeader]
-
-    @idempotent
-    def post(self, request, *args, **kwargs):
-        team = _get_team(request)
-        code = request.data.get("code")
-        return ok(escape_quarantine_with_code(team, code))
-
-
 class RouletteSpinView(APIView):
     """POST /api/v1/board/roulette/spin — 팀장만."""
 
@@ -351,16 +333,3 @@ class RouletteSpinView(APIView):
         _assert_no_body(request)
         team = _get_team(request)
         return ok(spin_roulette(team))
-
-
-class DebugReleaseQuarantineView(APIView):
-    """POST /board/_debug/release_quarantine — 로컬 프리뷰 전용. 15분 잠금을 즉시 해제한다."""
-
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request, *args, **kwargs):
-        if not settings.DEBUG:
-            raise Http404
-        team = _get_team(request)
-        state = debug_force_release_quarantine(team)
-        return ok({"is_quarantined": state.is_quarantined})

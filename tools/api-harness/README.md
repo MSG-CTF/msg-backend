@@ -154,7 +154,7 @@ enum_rules:
     values: [PARTICIPANT, ADMIN]        # leaf 이름만으로 전역 매칭 (문맥 없이도 안전한 필드)
   - leaf: type
     parents: [cell, cells]              # leaf가 이 상위 키(배열이면 배열 키) 아래 있을 때만 매칭
-    values: [START, CHALLENGE, CHANCE, AIRPORT, QUARANTINE, ROULETTE]
+    values: [START, CHALLENGE, CHANCE, AIRPORT, ROULETTE]
 ```
 
 `leaf`/`parents`로 나눈 이유: `status`나 `type`처럼 여러 도메인에서 재사용되는 흔한 필드명은
