@@ -33,7 +33,6 @@ from .exceptions import (
     NotTeamLeader,
     PendingRollUnresolved,
     RouletteAlreadySpun,
-    TimerRunning,
 )
 from apps.challenge.models import Challenge
 
@@ -168,8 +167,7 @@ def compute_blocked_reason(team, state):
         access = TeamChallengeAccess.objects.filter(team=team, source_cell=cell).first()
         if access is None:
             return "CHALLENGE_NOT_SELECTED"
-        if is_challenge_timer_running(access):
-            return "TIMER_RUNNING"
+        # The solve reward window does not prevent spending remaining rolls.
 
     if PendingDiceRoll.objects.filter(team=team).exists():
         return "PENDING_CONFIRM"
@@ -295,8 +293,6 @@ def _assert_can_roll(team, state):
         access = TeamChallengeAccess.objects.filter(team=team, source_cell=cell).first()
         if access is None:
             raise ChallengeNotSelected()
-        if is_challenge_timer_running(access):
-            raise TimerRunning()
 
     if PendingDiceRoll.objects.filter(team=team).exists():
         raise PendingRollUnresolved()

@@ -31,6 +31,7 @@ from .services import (
     get_opened_challenges_summary,
     get_or_create_board_state,
     is_board_completed,
+    is_challenge_timer_running,
     move_team_via_airport,
     solve_active_challenge,
     open_current_cell_challenge,
@@ -190,12 +191,18 @@ class DiceStatusView(APIView):
         team = _get_team(request)
         state = get_or_create_board_state(team)
         blocked_reason = compute_blocked_reason(team, state)
+        active_access = state.active_challenge_access
+        timer_running = bool(
+            active_access is not None
+            and active_access.source_cell_id == state.position_id
+            and is_challenge_timer_running(active_access)
+        )
 
         return ok(
             {
                 "can_roll": blocked_reason is None,
                 "dice_rolls_left": state.dice_rolls_left,
-                "timer_running": blocked_reason == "TIMER_RUNNING",
+                "timer_running": timer_running,
                 "blocked_reason": blocked_reason,
                 "server_time": timezone.now(),
                 "next_dice_reset_at": state.next_dice_reset_at,
@@ -315,7 +322,7 @@ class DebugSolveActiveChallengeView(APIView):
     """POST /board/_debug/solve — 로컬 프리뷰 전용. 실제 플래그 제출 API가 아니다.
 
     /api/v1 명세에 없고 DEBUG=True일 때만 열린다. 진행 중인 문제를 강제로 CLEARED 처리해
-    TIMER_RUNNING 상태를 수동 테스트에서 빠르게 벗어나게 해준다.
+    활성 문제를 완료하고 추가 주사위 보상을 수동 테스트한다.
     """
 
     permission_classes = [IsAuthenticated]
