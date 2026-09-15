@@ -6,7 +6,6 @@ from apps.board.models import (
     ChanceCard,
     DiceRoll,
     PendingDiceRoll,
-    QuarantineEscapeCode,
     TeamBoardState,
     TeamCellCandidate,
     TeamCellConsumption,
@@ -46,13 +45,6 @@ class BoardChallengeAdmin(admin.ModelAdmin):
     list_filter = ["club_name"]
 
 
-@admin.register(QuarantineEscapeCode)
-class QuarantineEscapeCodeAdmin(admin.ModelAdmin):
-    list_display = ["code", "used_by_team", "used_at"]
-    list_filter = ["used_by_team"]
-    search_fields = ["code"]
-
-
 @admin.register(TeamChallengeAccess)
 class TeamChallengeAccessAdmin(admin.ModelAdmin):
     list_display = ["id", "team", "challenge", "source_cell", "status", "opened_at", "cleared_at"]
@@ -72,7 +64,6 @@ class TeamBoardStateAdmin(admin.ModelAdmin):
         "position",
         "dice_rolls_left",
         "active_challenge_access",
-        "is_quarantined",
         "updated_at",
     ]
 

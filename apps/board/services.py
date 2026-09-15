@@ -29,14 +29,9 @@ from .exceptions import (
     NotAirportCell,
     NotChallengeCell,
     NotChanceCell,
-    NotQuarantined,
     NotRouletteCell,
     NotTeamLeader,
     PendingRollUnresolved,
-    Quarantined,
-    QuarantineCodeAlreadyUsed,
-    QuarantineCodeInvalid,
-    QuarantineCodeRequired,
     RouletteAlreadySpun,
     TimerRunning,
 )
@@ -47,7 +42,6 @@ from .models import (
     ChanceCard,
     DiceRoll,
     PendingDiceRoll,
-    QuarantineEscapeCode,
     TeamBoardState,
     TeamCellCandidate,
     TeamCellConsumption,
@@ -70,7 +64,6 @@ ROULETTE_REWARDS = (50, 100, 150, 200)
 ROULETTE_REASON_PREFIX = "ROULETTE_CELL"
 DICE_RECHARGE_INTERVAL = timedelta(minutes=15)
 MAX_DICE_ROLLS = 3
-QUARANTINE_LOCK_INTERVAL = timedelta(minutes=15)
 
 
 DEFAULT_TEAM_NAME = "test-team"
@@ -99,7 +92,6 @@ def get_or_create_board_state(team):
             defaults={"position": start_cell},
         )
         state = apply_pending_dice_recharge(state)
-        state = apply_pending_quarantine_release(state)
     return state
 
 
@@ -149,53 +141,6 @@ def _consume_dice_roll(state):
     state.save(update_fields=["dice_rolls_left", "next_dice_reset_at", "updated_at"])
 
 
-def apply_pending_quarantine_release(state):
-    if not state.is_quarantined or state.quarantine_released_at is None:
-        return state
-    if timezone.now() < state.quarantine_released_at:
-        return state
-
-    state.is_quarantined = False
-    state.quarantine_released_at = None
-    state.save(update_fields=["is_quarantined", "quarantine_released_at", "updated_at"])
-    return state
-
-
-def escape_quarantine_with_code(team, code):
-    if not code:
-        raise QuarantineCodeRequired()
-
-    state = get_or_create_board_state(team)
-    if not state.is_quarantined:
-        raise NotQuarantined()
-
-    with transaction.atomic():
-        escape_code = QuarantineEscapeCode.objects.select_for_update().filter(code=code).first()
-        if escape_code is None:
-            raise QuarantineCodeInvalid()
-        if escape_code.used_by_team_id is not None:
-            raise QuarantineCodeAlreadyUsed()
-
-        escape_code.used_by_team = team
-        escape_code.used_at = timezone.now()
-        escape_code.save(update_fields=["used_by_team", "used_at"])
-
-        state.is_quarantined = False
-        state.quarantine_released_at = None
-        state.save(update_fields=["is_quarantined", "quarantine_released_at", "updated_at"])
-
-    return {"is_quarantined": False}
-
-
-def debug_force_release_quarantine(team):
-    """로컬 프리뷰 전용. 15분 잠금을 기다리지 않고 즉시 무인도에서 풀어준다."""
-    state = get_or_create_board_state(team)
-    state.is_quarantined = False
-    state.quarantine_released_at = None
-    state.save(update_fields=["is_quarantined", "quarantine_released_at", "updated_at"])
-    return state
-
-
 def get_consumed_indexes(team):
     return set(TeamCellConsumption.objects.filter(team=team).values_list("cell_id", flat=True))
 
@@ -215,8 +160,6 @@ def is_challenge_timer_running(access):
 
 
 def compute_blocked_reason(team, state):
-    if state.is_quarantined:
-        return "QUARANTINED"
     if is_board_completed(team):
         return "BOARD_COMPLETED"
 
@@ -265,13 +208,6 @@ def consume_cell(team, cell):
     return created
 
 
-def enter_quarantine_if_landed(state, cell, is_first_visit):
-    if cell.type != Cell.CellType.QUARANTINE or not is_first_visit:
-        return
-    state.is_quarantined = True
-    state.quarantine_released_at = timezone.now() + QUARANTINE_LOCK_INTERVAL
-
-
 def compute_start_reward(passed_start, landed_on_start):
     return {
         "mileage_gained": START_PASS_MILEAGE_REWARD if passed_start else 0,
@@ -280,15 +216,14 @@ def compute_start_reward(passed_start, landed_on_start):
 
 
 def finalize_landing(team, state, cell, passed_start, landed_on_start):
-    """칸 도착을 확정한다: 위치 갱신, 칸 소모, 무인도 진입, START 보상 지급."""
+    """칸 도착을 확정한다: 위치 갱신, 칸 소모, START 보상 지급."""
     state.position = cell
     if passed_start:
         state.has_passed_start = True
-    is_first_visit = consume_cell(team, cell)
-    enter_quarantine_if_landed(state, cell, is_first_visit)
+    consume_cell(team, cell)
 
     reward = compute_start_reward(passed_start, landed_on_start)
-    update_fields = ["position", "is_quarantined", "quarantine_released_at", "updated_at"]
+    update_fields = ["position", "updated_at"]
     if passed_start:
         update_fields.append("has_passed_start")
     if reward["roll_gained"]:
@@ -352,8 +287,6 @@ def get_usable_post_roll_card(team):
 
 
 def _assert_can_roll(team, state):
-    if state.is_quarantined:
-        raise Quarantined()
     if is_board_completed(team):
         raise BoardCompleted()
 
@@ -454,6 +387,7 @@ def roll_dice(team):
 
 
 def confirm_dice_roll(team):
+    get_or_create_board_state(team)
     with transaction.atomic():
         state = TeamBoardState.objects.select_for_update().get(team=team)
         pending = PendingDiceRoll.objects.filter(team=team).first()
@@ -852,10 +786,6 @@ def build_cell_states(team):
 def _card_usable_now(card, state, blocked_reason, has_pending):
     if card.effect == "GRANT_EXTRA_ROLL" and state.dice_rolls_left >= MAX_DICE_ROLLS:
         return False
-    if card.usage_timing == ChanceCard.UsageTiming.QUARANTINE_STATE:
-        return state.is_quarantined
-    if state.is_quarantined:
-        return False
     if card.usage_timing == ChanceCard.UsageTiming.POST_ROLL:
         return has_pending
     # PRE_ROLL
@@ -868,11 +798,16 @@ def _card_usable_now(card, state, blocked_reason, has_pending):
 
 def _held_cards_queryset(team):
     """아직 쓰지도 버리지도 않은, 현재 보유 중인 찬스카드."""
-    return TeamChanceCard.objects.filter(team=team, used_at__isnull=True, discarded_at__isnull=True)
+    return TeamChanceCard.objects.filter(
+        team=team, card_id__in=ChanceCard.CardId.values,
+        used_at__isnull=True, discarded_at__isnull=True,
+    )
 
 
 def build_chance_cards_view(team, state):
-    draws = TeamChanceCard.objects.select_related("card").filter(team=team).order_by("drawn_at")
+    draws = TeamChanceCard.objects.select_related("card").filter(
+        team=team, card_id__in=ChanceCard.CardId.values,
+    ).order_by("drawn_at")
     blocked_reason = compute_blocked_reason(team, state)
     has_pending = PendingDiceRoll.objects.filter(team=team).exists()
     awaiting_discard = _held_cards_queryset(team).count() >= 2
@@ -909,7 +844,7 @@ def draw_chance_card(team):
         if TeamChanceCard.objects.filter(team=team, source_cell=cell).exists():
             raise NotChanceCell()
 
-        card = random.choice(list(ChanceCard.objects.all()))
+        card = random.choice(list(ChanceCard.objects.filter(card_id__in=ChanceCard.CardId.values)))
         draw = TeamChanceCard.objects.create(team=team, source_cell=cell, card=card)
 
         consume_cell(team, cell)
@@ -926,7 +861,7 @@ def discard_chance_card(team, card_id):
         raise CardIdRequired()
 
     with transaction.atomic():
-        held = list(_held_cards_queryset(team).select_for_update().select_related("card"))
+        held = list(_held_cards_queryset(team).select_for_update(of=("self",)).select_related("card"))
         if len(held) < 2:
             raise NoCardToDiscard()
 
@@ -1145,64 +1080,20 @@ def _effect_grant_extra_roll(team, state, draw, payload):
     }
 
 
-def _effect_quarantine_escape_free(team, state, draw, payload):
-    state.is_quarantined = False
-    state.quarantine_released_at = None
-    grant_dice_roll(state, 1)
-    state.save(update_fields=[
-        "is_quarantined",
-        "quarantine_released_at",
-        "dice_rolls_left",
-        "next_dice_reset_at",
-        "updated_at",
-    ])
-
-    draw.used_at = timezone.now()
-    draw.save(update_fields=["used_at"])
-
-    return {
-        "card_id": draw.card_id,
-        "effect": draw.card.effect,
-        "is_quarantined": False,
-        "dice_rolls_left": state.dice_rolls_left,
-        "used": True,
-    }
-
-
-def _effect_force_move_to_quarantine(team, state, draw, payload):
-    quarantine_cell = Cell.objects.get(type=Cell.CellType.QUARANTINE)
-    current_position = state.position_id
-
-    draw.used_at = timezone.now()
-    draw.save(update_fields=["used_at"])
-
-    finalize_landing(team, state, quarantine_cell, passed_start=False, landed_on_start=False)
-
-    return {
-        "card_id": draw.card_id,
-        "effect": draw.card.effect,
-        "from_index": current_position,
-        "to_index": quarantine_cell.cell_index,
-        "movement_path": [quarantine_cell.cell_index],
-        "skipped_cells": [],
-        "used": True,
-    }
-
-
 _EFFECT_HANDLERS = {
     "RE_ROLL": _effect_reroll,
     "ROLL_TWICE_CHOOSE": _effect_roll_twice_choose,
     "MOVE_OFFSET": _effect_move_offset,
     "FREE_MOVE": _effect_free_move,
     "GRANT_EXTRA_ROLL": _effect_grant_extra_roll,
-    "QUARANTINE_ESCAPE_FREE": _effect_quarantine_escape_free,
-    "FORCE_MOVE_TO_QUARANTINE": _effect_force_move_to_quarantine,
 }
 
 
 def use_chance_card(team, card_id, payload):
     if not card_id:
         raise CardIdRequired()
+    if card_id not in ChanceCard.CardId.values:
+        raise ChanceCardNotFound()
 
     existing_draw = _held_cards_queryset(team).filter(card_id=card_id).first()
     if existing_draw is None:
@@ -1219,14 +1110,14 @@ def use_chance_card(team, card_id, payload):
         state = TeamBoardState.objects.select_for_update().get(team=team)
         draw = (
             _held_cards_queryset(team)
-            .select_for_update()
+            .select_for_update(of=("self",))
             .select_related("card")
             .filter(card_id=card_id)
             .first()
         )
         if draw is None:
             draw = (
-                TeamChanceCard.objects.select_for_update()
+                TeamChanceCard.objects.select_for_update(of=("self",))
                 .select_related("card")
                 .filter(team=team, card_id=card_id)
                 .first()

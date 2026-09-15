@@ -1,4 +1,5 @@
 import uuid
+from collections.abc import Mapping
 
 from django.conf import settings
 from django.db import DatabaseError
@@ -8,7 +9,7 @@ from rest_framework.generics import ListAPIView
 from rest_framework.permissions import AllowAny
 from rest_framework.views import APIView
 
-from apps.common.exceptions import UserHasNoTeam
+from apps.common.exceptions import InvalidRequest, UserHasNoTeam
 from apps.common.permissions import IsAuthenticated
 from apps.common.response import ok
 
@@ -24,10 +25,8 @@ from .services import (
     compute_blocked_reason,
     confirm_chance_choice,
     confirm_dice_roll,
-    debug_force_release_quarantine,
     discard_chance_card,
     draw_chance_card,
-    escape_quarantine_with_code,
     get_current_cell_candidates,
     get_opened_challenges_summary,
     get_or_create_board_state,
@@ -48,8 +47,17 @@ def _get_team(request):
 
 
 def _assert_no_body(request):
-    if request.data:
+    # DRF represents an absent body as {}. Preserve that compatibility while
+    # rejecting JSON arrays, scalars, and null, even when they are falsy.
+    if request.data != {}:
         raise RequestBodyNotAllowed()
+
+
+def _request_object(request):
+    data = request.data
+    if not isinstance(data, Mapping):
+        raise InvalidRequest("요청 본문은 JSON 객체여야 합니다.")
+    return data
 
 
 def _serialize_active_challenge(access):
@@ -99,10 +107,8 @@ class BoardMeView(APIView):
             {
                 "position": state.position_id,
                 "type": state.position.type,
-                "is_quarantined": state.is_quarantined,
                 "dice_rolls_left": state.dice_rolls_left,
                 "next_dice_reset_at": state.next_dice_reset_at,
-                "quarantine_attempts_left": state.quarantine_attempts_left,
                 "airport_move_used": state.airport_move_used,
                 "has_passed_start": state.has_passed_start,
                 "board_completed": is_board_completed(team),
@@ -142,7 +148,7 @@ class CellOpenView(APIView):
     @idempotent
     def post(self, request, *args, **kwargs):
         team = _get_team(request)
-        challenge_id = request.data.get("challenge_id")
+        challenge_id = _request_object(request).get("challenge_id")
         if challenge_id is None:
             raise ChallengeIdRequired()
         try:
@@ -167,7 +173,7 @@ class ChanceCardCatalogView(ListAPIView):
     """GET /api/v1/board/chance/catalog — 인증 불필요."""
 
     permission_classes = [AllowAny]
-    queryset = ChanceCard.objects.all()
+    queryset = ChanceCard.objects.filter(card_id__in=ChanceCard.CardId.values)
     serializer_class = ChanceCardSerializer
 
     def list(self, request, *args, **kwargs):
@@ -189,12 +195,10 @@ class DiceStatusView(APIView):
             {
                 "can_roll": blocked_reason is None,
                 "dice_rolls_left": state.dice_rolls_left,
-                "is_quarantined": state.is_quarantined,
                 "timer_running": blocked_reason == "TIMER_RUNNING",
                 "blocked_reason": blocked_reason,
                 "server_time": timezone.now(),
                 "next_dice_reset_at": state.next_dice_reset_at,
-                "quarantine_released_at": state.quarantine_released_at,
             }
         )
 
@@ -231,7 +235,7 @@ class AirportMoveView(APIView):
     @idempotent
     def post(self, request, *args, **kwargs):
         team = _get_team(request)
-        destination_index = request.data.get("destination_index")
+        destination_index = _request_object(request).get("destination_index")
         return ok(move_team_via_airport(team, destination_index))
 
 
@@ -268,7 +272,7 @@ class ChanceDiscardView(APIView):
     @idempotent
     def post(self, request, *args, **kwargs):
         team = _get_team(request)
-        card_id = request.data.get("card_id")
+        card_id = _request_object(request).get("card_id")
         return ok(discard_chance_card(team, card_id))
 
 
@@ -280,8 +284,9 @@ class ChanceUseView(APIView):
     @idempotent
     def post(self, request, *args, **kwargs):
         team = _get_team(request)
-        card_id = request.data.get("card_id")
-        return ok(use_chance_card(team, card_id, request.data))
+        payload = _request_object(request)
+        card_id = payload.get("card_id")
+        return ok(use_chance_card(team, card_id, payload))
 
 
 class ChanceConfirmView(APIView):
@@ -292,7 +297,7 @@ class ChanceConfirmView(APIView):
     @idempotent
     def post(self, request, *args, **kwargs):
         team = _get_team(request)
-        choice = request.data.get("choice")
+        choice = _request_object(request).get("choice")
         return ok(confirm_chance_choice(team, choice))
 
 
@@ -329,18 +334,6 @@ class DebugSolveActiveChallengeView(APIView):
         )
 
 
-class QuarantineEscapeView(APIView):
-    """POST /api/v1/board/quarantine/escape — 팀장만."""
-
-    permission_classes = [IsAuthenticated, IsTeamLeader]
-
-    @idempotent
-    def post(self, request, *args, **kwargs):
-        team = _get_team(request)
-        code = request.data.get("code")
-        return ok(escape_quarantine_with_code(team, code))
-
-
 class RouletteSpinView(APIView):
     """POST /api/v1/board/roulette/spin — 팀장만."""
 
@@ -351,16 +344,3 @@ class RouletteSpinView(APIView):
         _assert_no_body(request)
         team = _get_team(request)
         return ok(spin_roulette(team))
-
-
-class DebugReleaseQuarantineView(APIView):
-    """POST /board/_debug/release_quarantine — 로컬 프리뷰 전용. 15분 잠금을 즉시 해제한다."""
-
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request, *args, **kwargs):
-        if not settings.DEBUG:
-            raise Http404
-        team = _get_team(request)
-        state = debug_force_release_quarantine(team)
-        return ok({"is_quarantined": state.is_quarantined})

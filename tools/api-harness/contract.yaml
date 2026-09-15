@@ -63,7 +63,7 @@ enum_rules:
     values: [CHALLENGE_SOLVE, START_BONUS, ROULETTE, KOTH_REWARD, ADMIN_GRANT, REFUND, PURCHASE, ADMIN_DEDUCT]
   - leaf: type
     parents: [cell, cells]
-    values: [START, CHALLENGE, CHANCE, AIRPORT, QUARANTINE, ROULETTE]
+    values: [START, CHALLENGE, CHANCE, AIRPORT, ROULETTE]
   # KOTH 문제 공개 상태. 동아리가 아니라 문제 단위로 관리한다(한 동아리의 문제 둘이 서로 다른
   # open_group에 들어갈 수 있음).
   - leaf: status
