@@ -44,6 +44,7 @@ from .exceptions import (
     PaymentTokenInvalid,
     TeamNotFound,
     TeamAlreadyHasLeader,
+    TeamNameTaken,
 )
 
 from apps.instances.models import (
@@ -188,13 +189,25 @@ def account_create(request):
     if role == Role.ADMIN and is_leader:
         raise InvalidRequest("관리자 계정은 팀장이 될 수 없습니다")
 
-    team = None
     team_id = request.data.get("team_id")
+    team_name = request.data.get("team_name")
+    if team_id and team_name:
+        raise InvalidRequest("team_id 와 team_name 은 함께 보낼 수 없습니다")
+
+    team = None
     if team_id:
         try:
             team = Team.objects.get(pk=team_id)
         except (Team.DoesNotExist, ValidationError, ValueError):
             raise TeamNotFound()
+    elif team_name is not None:
+        if not isinstance(team_name, str) or not team_name.strip():
+            raise InvalidRequest("team_name 은 1자 이상이어야 합니다")
+        team_name = team_name.strip()
+        if len(team_name) > 100:
+            raise InvalidRequest("team_name 은 100자 이하여야 합니다")
+        if Team.objects.filter(team_name=team_name).exists():
+            raise TeamNameTaken()
 
     if User.objects.filter(login_id=login_id).exists():
         raise LoginIdTaken()
@@ -204,6 +217,8 @@ def account_create(request):
 
     try:
         with transaction.atomic():
+            if team is None and team_name:
+                team = Team.objects.create(team_name=team_name)
             user = User.objects.create_user(
                 login_id=login_id,
                 password=password,
@@ -213,8 +228,11 @@ def account_create(request):
                 is_leader=is_leader,
             )
     except IntegrityError as exc:
-        if "uq_users_one_leader_per_team" in str(exc):
+        text = str(exc)
+        if "uq_users_one_leader_per_team" in text:
             raise TeamAlreadyHasLeader()
+        if "team_name" in text:
+            raise TeamNameTaken()
         raise LoginIdTaken()
 
     return ok(
