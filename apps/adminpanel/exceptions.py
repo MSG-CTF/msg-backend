@@ -70,3 +70,8 @@ class TeamAlreadyHasLeader(APIError):
     status_code = status.HTTP_409_CONFLICT
     code = "TEAM_ALREADY_HAS_LEADER"
     message = "이미 팀장이 있는 팀입니다"
+
+class InsufficientDice(APIError):
+    status_code = status.HTTP_400_BAD_REQUEST
+    code = "INSUFFICIENT_DICE"
+    message = "회수할 주사위 횟수가 부족합니다"

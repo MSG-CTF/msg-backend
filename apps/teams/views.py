@@ -15,6 +15,7 @@ from apps.common.response import ok
 from apps.common.utils import num
 from apps.challenge.models import Solve
 from apps.koth.models import KothSolve
+from apps.signature.models import SignatureSolve
 
 from .models import MileageHistory, PaymentToken, PaymentTokenStatus
 
@@ -33,6 +34,10 @@ def team_me(request):
 
     jeopardy_score = team.team_score
     koth_score = team.koth_solves.aggregate(total=Sum("earned_score"))["total"] or Decimal("0")
+    signature_score = (
+        team.signature_solves.aggregate(total=Sum("earned_score"))["total"]
+        or Decimal("0")
+    )
 
     members = [
         {
@@ -48,9 +53,10 @@ def team_me(request):
         {
             "team_id": str(team.team_id),
             "team_name": team.team_name,
-            "team_score": num(jeopardy_score + koth_score),
+            "team_score": num(jeopardy_score + koth_score + signature_score),
             "jeopardy_score": num(jeopardy_score),
             "koth_score": num(koth_score),
+            "signature_score": num(signature_score),
             "mileage": team.mileage,
             "is_banned": team.is_banned,
             "ban_reason": team.ban_reason,
@@ -163,6 +169,29 @@ def solves(request):
             "earned_mileage": 0,
             "is_extra_dice_granted": False,
             "solved_by": None,
+            "solved_at": row.solved_at,
+        })
+
+    for row in (
+        SignatureSolve.objects.filter(team=team)
+        .select_related("challenge", "solved_by_user")
+        .order_by("-solved_at", "-solve_id")
+    ):
+        items.append({
+            "source_type": "SIGNATURE",
+            "signature_id": str(row.challenge_id),
+            "challenge_title": row.challenge.title,
+            "earned_score": num(row.earned_score),
+            "earned_mileage": 0,
+            "is_extra_dice_granted": False,
+            "solved_by": (
+                {
+                    "user_id": str(row.solved_by_user_id),
+                    "nickname": row.solved_by_user.nickname,
+                }
+                if row.solved_by_user_id
+                else None
+            ),
             "solved_at": row.solved_at,
         })
 

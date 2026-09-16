@@ -4,7 +4,6 @@ from django.urls import path, include
 
 from apps.board.views import (
     BoardView,
-    DebugReleaseQuarantineView,
     DebugSolveActiveChallengeView,
 )
 from apps.common.health import healthz
@@ -20,6 +19,7 @@ urlpatterns = [
     path("api/v1/", include("apps.challenge.urls")),
     path("api/v1/", include("apps.instances.urls")),
     path("api/v1/", include("apps.leaderboard.urls")),
+    path("api/v1/", include("apps.signature.urls")),
     path("api/v1/board", BoardView.as_view(), name="board"),
     path("api/v1/board/", include("apps.board.urls")),
     path("api/v1/", include("apps.koth.urls")),
@@ -30,10 +30,5 @@ if settings.DEBUG:
     urlpatterns += [
         # /api/v1 명세 밖, 로컬 프리뷰 전용.
         path("board/_debug/solve", DebugSolveActiveChallengeView.as_view(), name="board-debug-solve"),
-        path(
-            "board/_debug/release_quarantine",
-            DebugReleaseQuarantineView.as_view(),
-            name="board-debug-release-quarantine",
-        ),
     ]
 

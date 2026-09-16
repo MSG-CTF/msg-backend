@@ -2,6 +2,7 @@ import threading
 import uuid
 
 from datetime import timedelta
+from decimal import Decimal
 from django.db import connections
 from django.utils import timezone
 from django.core.cache import cache
@@ -15,6 +16,7 @@ from apps.accounts.models import (
     Team,
     User,
 )
+from apps.board.models import Cell, TeamChallengeAccess
 from apps.teams.models import (
     MileageHistory,
     MileageType,
@@ -456,6 +458,152 @@ class AdminTests(TestCase):
         self.assertEqual(res.status_code, 404)
         self.assertEqual(res.data["code"], "TEAM_NOT_FOUND")
 
+    def test_board_dice_grant(self):
+        from apps.board.models import Cell, TeamBoardState
+        self.auth("root")
+        cell, _ = Cell.objects.get_or_create(cell_index=1, defaults={"type": "START", "name": "출발"})
+        state = TeamBoardState.objects.create(team=self.team, position=cell, dice_rolls_left=0)
+        res = self.client.post(
+            f"/api/v1/admin/teams/{self.team.team_id}/board/dice",
+            {"amount": 2, "reason": "주사위 소실 보정"}, format="json",
+        )
+        self.assertEqual(res.status_code, 200)
+        d = res.data["data"]
+        self.assertEqual(d["previous_dice_rolls_left"], 0)
+        self.assertEqual(d["dice_rolls_left"], 2)
+        self.assertEqual(d["adjusted_by"], "root")
+        state.refresh_from_db()
+        self.assertEqual(state.dice_rolls_left, 2)
+
+    def test_board_dice_deduct(self):
+        from apps.board.models import Cell, TeamBoardState
+        self.auth("root")
+        cell, _ = Cell.objects.get_or_create(cell_index=1, defaults={"type": "START", "name": "출발"})
+        TeamBoardState.objects.create(team=self.team, position=cell, dice_rolls_left=3)
+        res = self.client.post(
+            f"/api/v1/admin/teams/{self.team.team_id}/board/dice",
+            {"amount": -2, "reason": "회수"}, format="json",
+        )
+        self.assertEqual(res.data["data"]["dice_rolls_left"], 1)
+
+    def test_board_dice_insufficient(self):
+        from apps.board.models import Cell, TeamBoardState
+        self.auth("root")
+        cell, _ = Cell.objects.get_or_create(cell_index=1, defaults={"type": "START", "name": "출발"})
+        TeamBoardState.objects.create(team=self.team, position=cell, dice_rolls_left=1)
+        res = self.client.post(
+            f"/api/v1/admin/teams/{self.team.team_id}/board/dice",
+            {"amount": -5, "reason": "x"}, format="json",
+        )
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data["code"], "INSUFFICIENT_DICE")
+        self.assertEqual(res.data["data"]["current_dice_rolls_left"], 1)
+        self.assertEqual(res.data["data"]["requested_amount"], 5)
+
+    def _dice_state(self, rolls, next_reset_at=None):
+        from apps.board.models import Cell, TeamBoardState
+        cell, _ = Cell.objects.get_or_create(
+            cell_index=1, defaults={"type": "START", "name": "출발"}
+        )
+        state, _ = TeamBoardState.objects.get_or_create(
+            team=self.team, defaults={"position": cell}
+        )
+        TeamBoardState.objects.filter(pk=state.pk).update(
+            dice_rolls_left=rolls, next_dice_reset_at=next_reset_at
+        )
+        state.refresh_from_db()
+        return state
+
+    def _adjust(self, amount):
+        self.auth("root")
+        return self.client.post(
+            f"/api/v1/admin/teams/{self.team.team_id}/board/dice",
+            {"amount": amount, "reason": "운영 보정"}, format="json",
+        )
+
+    def test_board_dice_deduct_restarts_recharge(self):
+        """상한이던 팀에서 회수하면 충전이 다시 시작된다."""
+        from apps.board.models import TeamBoardState
+        self._dice_state(3, None)
+        res = self._adjust(-1)
+        self.assertEqual(res.status_code, 200)
+        state = TeamBoardState.objects.get(team=self.team)
+        self.assertEqual(state.dice_rolls_left, 2)
+        self.assertIsNotNone(state.next_dice_reset_at)
+
+    def test_board_dice_grant_to_cap_stops_recharge(self):
+        """지급으로 상한에 닿으면 충전이 멈춘다."""
+        from apps.board.models import TeamBoardState
+        self._dice_state(2, timezone.now() + timedelta(minutes=10))
+        res = self._adjust(1)
+        self.assertEqual(res.status_code, 200)
+        state = TeamBoardState.objects.get(team=self.team)
+        self.assertEqual(state.dice_rolls_left, 3)
+        self.assertIsNone(state.next_dice_reset_at)
+
+    def test_board_dice_grant_does_not_exceed_board_cap(self):
+        """보드 보상과 같이 보유 상한을 넘겨 지급하지 않는다."""
+        from apps.board.models import TeamBoardState
+        from apps.board.services import MAX_DICE_ROLLS
+        self._dice_state(2, timezone.now() + timedelta(minutes=10))
+        res = self._adjust(5)
+        self.assertEqual(res.status_code, 200)
+        d = res.data["data"]
+        self.assertEqual(d["dice_rolls_left"], MAX_DICE_ROLLS)
+        self.assertEqual(d["amount"], MAX_DICE_ROLLS - 2)
+        state = TeamBoardState.objects.get(team=self.team)
+        self.assertEqual(state.dice_rolls_left, MAX_DICE_ROLLS)
+        self.assertIsNone(state.next_dice_reset_at)
+
+    def test_board_dice_grant_keeps_existing_recharge_deadline(self):
+        """충전 대기 중 지급을 받아도 남은 시간이 늘어나지 않는다."""
+        from apps.board.models import TeamBoardState
+        deadline = (timezone.now() + timedelta(minutes=10)).replace(microsecond=0)
+        self._dice_state(0, deadline)
+        res = self._adjust(1)
+        self.assertEqual(res.status_code, 200)
+        state = TeamBoardState.objects.get(team=self.team)
+        self.assertEqual(state.dice_rolls_left, 1)
+        self.assertEqual(state.next_dice_reset_at.replace(microsecond=0), deadline)
+
+    def test_board_dice_applies_pending_recharge_before_adjusting(self):
+        """밀린 자동 충전을 먼저 반영한 뒤 조정한다."""
+        from apps.board.models import TeamBoardState
+        self._dice_state(0, timezone.now() - timedelta(minutes=1))
+        res = self._adjust(1)
+        self.assertEqual(res.status_code, 200)
+        d = res.data["data"]
+        self.assertEqual(d["previous_dice_rolls_left"], 1)
+        self.assertEqual(d["dice_rolls_left"], 2)
+        self.assertEqual(TeamBoardState.objects.get(team=self.team).dice_rolls_left, 2)
+
+    def test_board_dice_zero_rejected(self):
+        self.auth("root")
+        res = self.client.post(
+            f"/api/v1/admin/teams/{self.team.team_id}/board/dice",
+            {"amount": 0, "reason": "x"}, format="json",
+        )
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data["code"], "INVALID_AMOUNT")
+
+    def test_board_dice_out_of_range(self):
+        self.auth("root")
+        res = self.client.post(
+            f"/api/v1/admin/teams/{self.team.team_id}/board/dice",
+            {"amount": 21, "reason": "x"}, format="json",
+        )
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data["code"], "INVALID_REQUEST")
+
+    def test_board_dice_team_not_found(self):
+        self.auth("root")
+        res = self.client.post(
+            f"/api/v1/admin/teams/{uuid.uuid4()}/board/dice",
+            {"amount": 1, "reason": "x"}, format="json",
+        )
+        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.data["code"], "TEAM_NOT_FOUND")
+
     def test_account_create_participant_blocked(self):
         self.auth("player")
         res = self.client.post(
@@ -553,6 +701,112 @@ class AdminTests(TestCase):
         payload = decode_token(login.data["data"]["access_token"], ACCESS)
         self.assertFalse(payload["is_leader"])
 
+    def test_challenge_visibility_toggle(self):
+        self.auth("root")
+        ch = Challenge.objects.create(title="웹1", category="WEB", difficulty="EASY",
+                                      score=100, flag_hash="x", is_published=True)
+        res = self.client.patch(
+            f"/api/v1/admin/challenges/{ch.challenge_id}/visibility",
+            {"is_published": False, "reason": "서버 오류로 비공개"}, format="json",
+        )
+        self.assertEqual(res.status_code, 200)
+        d = res.data["data"]
+        self.assertTrue(d["previous_is_published"])
+        self.assertFalse(d["is_published"])
+        self.assertEqual(d["changed_by"], "root")
+        self.assertEqual(
+            set(d),
+            {"challenge_id", "title", "previous_is_published", "is_published",
+             "affected_team_count", "changed_at", "changed_by"},
+        )
+        ch.refresh_from_db()
+        self.assertFalse(ch.is_published)
+
+    def test_challenge_visibility_affected_team_count(self):
+        from apps.board.services import (
+            get_current_cell_candidates,
+            open_current_cell_challenge,
+        )
+        ch, _ = self._board_challenge_setup()
+        get_current_cell_candidates(self.team)
+        open_current_cell_challenge(self.team, ch.challenge_id)
+
+        res = self._unpublish(ch)
+        self.assertEqual(res.data["data"]["affected_team_count"], 1)
+
+    def _board_challenge_setup(self, published=True, cell_index=2, number=1):
+        from apps.board.models import BoardChallenge, Cell, TeamBoardState
+        Cell.objects.get_or_create(
+            cell_index=1, defaults={"type": "START", "name": "출발"}
+        )
+        ch = Challenge.objects.create(title=f"보드{number}", category="WEB", difficulty="EASY",
+                                      score=100, flag_hash="x", is_published=published)
+        BoardChallenge.objects.create(challenge=ch, challenge_number=number)
+        cell = Cell.objects.create(cell_index=cell_index, type="CHALLENGE",
+                                   difficulty="EASY", name=f"{cell_index}번칸")
+        TeamBoardState.objects.create(team=self.team, position=cell)
+        return ch, cell
+
+    def _unpublish(self, ch):
+        self.auth("root")
+        return self.client.patch(
+            f"/api/v1/admin/challenges/{ch.challenge_id}/visibility",
+            {"is_published": False, "reason": "출제 오류"}, format="json",
+        )
+
+    def test_opened_team_keeps_access_after_unpublish(self):
+        from apps.board.models import TeamChallengeAccess
+        from apps.board.services import (
+            get_current_cell_candidates,
+            open_current_cell_challenge,
+        )
+        ch, _ = self._board_challenge_setup()
+        get_current_cell_candidates(self.team)
+        open_current_cell_challenge(self.team, ch.challenge_id)
+
+        res = self._unpublish(ch)
+        self.assertEqual(res.data["data"]["affected_team_count"], 1)
+        self.assertTrue(
+            TeamChallengeAccess.objects.filter(team=self.team, challenge=ch).exists()
+        )
+
+    def test_challenge_visibility_invalid_body(self):
+        self.auth("root")
+        ch = Challenge.objects.create(title="웹3", category="WEB", difficulty="EASY",
+                                      score=100, flag_hash="x", is_published=True)
+        url = f"/api/v1/admin/challenges/{ch.challenge_id}/visibility"
+        for body in [{}, {"is_published": True}, {"reason": "x"},
+                     {"is_published": "yes", "reason": "x"}]:
+            self.assertEqual(self.client.patch(url, body, format="json").status_code, 400)
+
+    def test_challenge_visibility_not_found(self):
+        self.auth("root")
+        res = self.client.patch(
+            f"/api/v1/admin/challenges/{uuid.uuid4()}/visibility",
+            {"is_published": False, "reason": "x"}, format="json",
+        )
+        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.data["code"], "CHALLENGE_NOT_FOUND")
+
+    def test_challenge_visibility_participant_blocked(self):
+        self.auth("player")
+        ch = Challenge.objects.create(title="웹4", category="WEB", difficulty="EASY",
+                                      score=100, flag_hash="x", is_published=True)
+        res = self.client.patch(
+            f"/api/v1/admin/challenges/{ch.challenge_id}/visibility",
+            {"is_published": False, "reason": "x"}, format="json",
+        )
+        self.assertEqual(res.status_code, 403)
+
+
+    def test_board_dice_participant_blocked(self):
+        self.auth("player")
+        res = self.client.post(
+            f"/api/v1/admin/teams/{self.team.team_id}/board/dice",
+            {"amount": 1, "reason": "x"}, format="json",
+        )
+        self.assertEqual(res.status_code, 403)
+
 @override_settings(CACHES=LOCMEM)
 class AdminDashboardTests(TestCase):
     def setUp(self):
@@ -644,6 +898,222 @@ class AdminChallengeTests(TestCase):
         self.client.credentials(
             HTTP_AUTHORIZATION=f"Bearer {res.data['data']['access_token']}"
         )
+
+    def challenge_body(self, **overrides):
+        body = {
+            "challenge_slug": "sql-injection-basic",
+            "title": "SQL Injection 기초",
+            "category": "WEB",
+            "difficulty": "EASY",
+            "description": "취약점을 찾아 플래그를 획득하세요.",
+            "flag": "MSG{admin_create_test}",
+        }
+        body.update(overrides)
+        return body
+
+    def test_challenge_create_uses_defaults_and_hashes_flag(self):
+        from apps.challenge.services import is_correct_flag
+
+        res = self.client.post(
+            "/api/v1/admin/challenges",
+            self.challenge_body(),
+            format="json",
+        )
+
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data["code"], "SUCCESS")
+        challenge = Challenge.objects.get(challenge_id=res.data["data"]["challenge_id"])
+        self.assertEqual(challenge.challenge_slug, "sql-injection-basic")
+        self.assertEqual(res.data["data"]["challenge_slug"], "sql-injection-basic")
+        self.assertEqual(challenge.initial_score, 1000)
+        self.assertEqual(challenge.minimum_score, 600)
+        self.assertEqual(challenge.decay, 70)
+        self.assertEqual(challenge.score, challenge.initial_score)
+        self.assertEqual(challenge.current_score, challenge.initial_score)
+        self.assertFalse(challenge.is_published)
+        self.assertNotEqual(challenge.flag_hash, "MSG{admin_create_test}")
+        self.assertTrue(is_correct_flag("MSG{admin_create_test}", challenge.flag_hash))
+        self.assertNotIn("flag", res.data["data"])
+        self.assertNotIn("flag_hash", res.data["data"])
+
+    def test_challenge_create_accepts_custom_scoring(self):
+        res = self.client.post(
+            "/api/v1/admin/challenges",
+            self.challenge_body(initial_score=1500, minimum_score=750, decay=80),
+            format="json",
+        )
+
+        self.assertEqual(res.status_code, 200)
+        challenge = Challenge.objects.get(challenge_id=res.data["data"]["challenge_id"])
+        self.assertEqual(challenge.initial_score, 1500)
+        self.assertEqual(challenge.minimum_score, 750)
+        self.assertEqual(challenge.decay, 80)
+        self.assertEqual(challenge.score, 1500)
+        self.assertEqual(challenge.current_score, 1500)
+
+    def test_challenge_create_rejects_invalid_scoring(self):
+        invalid_values = [
+            {"initial_score": 599, "minimum_score": 600},
+            {"minimum_score": -1},
+            {"decay": 0},
+            {"initial_score": 1000.50},
+            {"minimum_score": 600.50},
+        ]
+
+        for values in invalid_values:
+            with self.subTest(values=values):
+                res = self.client.post(
+                    "/api/v1/admin/challenges",
+                    self.challenge_body(**values),
+                    format="json",
+                )
+                self.assertEqual(res.status_code, 400)
+                self.assertEqual(res.data["code"], "INVALID_REQUEST")
+        self.assertEqual(Challenge.objects.count(), 0)
+
+    def test_challenge_create_and_first_solve_never_exceeds_initial_score(self):
+        created = self.client.post(
+            "/api/v1/admin/challenges",
+            self.challenge_body(
+                initial_score=1000,
+                minimum_score=600,
+                decay=70,
+            ),
+            format="json",
+        )
+        self.assertEqual(created.status_code, 200)
+
+        challenge = Challenge.objects.get(
+            challenge_id=created.data["data"]["challenge_id"]
+        )
+        challenge.is_published = True
+        challenge.save(update_fields=["is_published"])
+        cell = Cell.objects.create(
+            cell_index=1,
+            type=Cell.CellType.CHALLENGE,
+            difficulty=Cell.Difficulty.EASY,
+            name="registered-challenge",
+        )
+        TeamChallengeAccess.objects.create(
+            team=self.team,
+            challenge=challenge,
+            source_cell=cell,
+        )
+
+        self.auth("player")
+        submitted = self.client.post(
+            f"/api/v1/challenges/{challenge.challenge_id}/submit",
+            {"flag": "MSG{admin_create_test}"},
+            format="json",
+        )
+
+        self.assertEqual(submitted.status_code, 200)
+        challenge.refresh_from_db()
+        self.assertLessEqual(challenge.current_score, challenge.initial_score)
+        self.assertEqual(challenge.current_score, challenge.initial_score)
+
+    def test_max_score_challenges_can_be_solved_by_same_team(self):
+        maximum_score = 9_999_999_999
+
+        for index in range(2):
+            flag = f"MSG{{max_score_{index}}}"
+            self.auth("root")
+            created = self.client.post(
+                "/api/v1/admin/challenges",
+                self.challenge_body(
+                    challenge_slug=f"max-score-{index}",
+                    title=f"Max score challenge {index}",
+                    flag=flag,
+                    initial_score=maximum_score,
+                    minimum_score=maximum_score,
+                    decay=70,
+                ),
+                format="json",
+            )
+            self.assertEqual(created.status_code, 200)
+
+            challenge = Challenge.objects.get(
+                challenge_id=created.data["data"]["challenge_id"]
+            )
+            challenge.is_published = True
+            challenge.save(update_fields=["is_published"])
+            cell = Cell.objects.create(
+                cell_index=index + 1,
+                type=Cell.CellType.CHALLENGE,
+                difficulty=Cell.Difficulty.EASY,
+                name=f"max-score-challenge-{index}",
+            )
+            TeamChallengeAccess.objects.create(
+                team=self.team,
+                challenge=challenge,
+                source_cell=cell,
+            )
+
+            self.auth("player")
+            submitted = self.client.post(
+                f"/api/v1/challenges/{challenge.challenge_id}/submit",
+                {"flag": flag},
+                format="json",
+            )
+            self.assertEqual(submitted.status_code, 200)
+
+        self.team.refresh_from_db()
+        self.assertEqual(self.team.team_score, Decimal("19999999998.00"))
+
+    def test_challenge_create_rejects_invalid_and_duplicate_slug(self):
+        invalid_slugs = ["Web-Notebook", "web_notebook", "web notebook", "-web", "web-"]
+        for slug in invalid_slugs:
+            with self.subTest(slug=slug):
+                res = self.client.post(
+                    "/api/v1/admin/challenges",
+                    self.challenge_body(challenge_slug=slug),
+                    format="json",
+                )
+                self.assertEqual(res.status_code, 400)
+                self.assertEqual(res.data["code"], "INVALID_REQUEST")
+
+        first = self.client.post(
+            "/api/v1/admin/challenges",
+            self.challenge_body(challenge_slug="web-notebook"),
+            format="json",
+        )
+        duplicate = self.client.post(
+            "/api/v1/admin/challenges",
+            self.challenge_body(challenge_slug="web-notebook", title="다른 문제"),
+            format="json",
+        )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(duplicate.status_code, 400)
+        self.assertEqual(duplicate.data["code"], "INVALID_REQUEST")
+        self.assertEqual(Challenge.objects.filter(challenge_slug="web-notebook").count(), 1)
+
+    def test_challenge_create_rejects_missing_and_unknown_fields(self):
+        missing = self.client.post(
+            "/api/v1/admin/challenges",
+            {"title": "필드 부족"},
+            format="json",
+        )
+        unknown = self.client.post(
+            "/api/v1/admin/challenges",
+            self.challenge_body(is_published=True),
+            format="json",
+        )
+
+        self.assertEqual(missing.status_code, 400)
+        self.assertEqual(unknown.status_code, 400)
+        self.assertEqual(Challenge.objects.count(), 0)
+
+    def test_challenge_create_participant_blocked(self):
+        self.auth("player")
+        res = self.client.post(
+            "/api/v1/admin/challenges",
+            self.challenge_body(),
+            format="json",
+        )
+        self.assertEqual(res.status_code, 403)
+        self.assertEqual(res.data["code"], "FORBIDDEN")
+        self.assertFalse(Challenge.objects.exists())
 
     def test_challenge_list_counts(self):
         from apps.challenge.models import Challenge, Solve

@@ -47,7 +47,6 @@ class Cell(models.Model):
         CHALLENGE = "CHALLENGE"
         CHANCE = "CHANCE"
         AIRPORT = "AIRPORT"
-        QUARANTINE = "QUARANTINE"
         ROULETTE = "ROULETTE"
 
     class Difficulty(models.TextChoices):
@@ -71,12 +70,18 @@ class Cell(models.Model):
 class ChanceCard(models.Model):
     """ERD: chance_cards — 찬스칸 도착 시 뽑는 카드의 종류 정의 (GET /api/v1/board/chance/catalog)"""
 
+    class CardId(models.TextChoices):
+        REROLL = "card_reroll"
+        ROLL_TWICE_CHOOSE = "card_roll_twice_choose"
+        MOVE_OFFSET = "card_move_offset"
+        FREE_TRAVEL = "card_free_travel"
+        EXTRA_ROLL = "card_extra_roll"
+
     class UsageTiming(models.TextChoices):
         PRE_ROLL = "PRE_ROLL"
         POST_ROLL = "POST_ROLL"
-        QUARANTINE_STATE = "QUARANTINE_STATE"
 
-    card_id = models.CharField(max_length=50, primary_key=True)
+    card_id = models.CharField(max_length=50, primary_key=True, choices=CardId.choices)
     name = models.CharField(max_length=100)
     description = models.CharField(max_length=500, blank=True)
     effect = models.CharField(max_length=50)
@@ -329,10 +334,7 @@ class TeamBoardState(models.Model):
         blank=True,
         related_name="active_board_states",
     )
-    is_quarantined = models.BooleanField(default=False)
     next_dice_reset_at = models.DateTimeField(null=True, blank=True)
-    quarantine_released_at = models.DateTimeField(null=True, blank=True)
-    quarantine_attempts_left = models.PositiveSmallIntegerField(default=0)
     airport_move_used = models.BooleanField(default=False)
     has_passed_start = models.BooleanField(default=False)
     updated_at = models.DateTimeField(auto_now=True)
@@ -342,29 +344,6 @@ class TeamBoardState(models.Model):
 
     def __str__(self):
         return f"{self.team_id}: {self.position_id}"
-
-
-class QuarantineEscapeCode(models.Model):
-    """ERD: quarantine_escape_codes — 무인도 탈출 코드 150개(75팀 × 2), 선착순 1회용.
-
-    특정 팀에 배정되지 않은 공용 풀. POST /api/v1/board/quarantine/escape 에서 검증한다.
-    """
-
-    code = models.CharField(max_length=20, primary_key=True)
-    used_by_team = models.ForeignKey(
-        "accounts.Team",
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name="quarantine_escape_codes",
-    )
-    used_at = models.DateTimeField(null=True, blank=True)
-
-    class Meta:
-        db_table = "quarantine_escape_codes"
-
-    def __str__(self):
-        return self.code
 
 
 class DiceRoll(models.Model):

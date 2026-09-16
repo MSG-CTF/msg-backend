@@ -15,7 +15,13 @@ from apps.common.utils import num
 from apps.common.jwt import hash_token
 from apps.common.idempotency import run_idempotent
 from apps.challenge.models import Challenge, Solve
-from apps.board.models import TeamBoardState
+from apps.challenge.services import hash_flag
+from apps.board.models import TeamBoardState, TeamChallengeAccess
+from apps.board.services import (
+    MAX_DICE_ROLLS,
+    apply_pending_dice_recharge,
+    get_or_create_board_state,
+)
 from apps.timer.models import Contest
 
 from apps.teams.models import (
@@ -28,6 +34,7 @@ from apps.teams.models import (
 from .exceptions import (
     AlreadyBanned,
     AlreadyRefunded,
+    InsufficientDice,
     InsufficientMileage,
     InvalidAmount,
     LoginIdTaken,
@@ -57,6 +64,7 @@ from apps.instances.services import (
     mark_instance_replaced,
     scheduler_auth_header,
 )
+from .serializers import ChallengeCreateSerializer
 
 SORT_FIELDS = {
     "score": "-team_score",
@@ -69,6 +77,8 @@ MAX_PAGE = 10_000
 MAX_BAN_REASON_LENGTH = 500
 MILEAGE_TYPES = set(MileageType.values)
 
+DICE_ADJUST_MIN = -20
+DICE_ADJUST_MAX = 20
 
 def _page_number(raw, default, maximum=None):
     if raw in (None, ""):
@@ -135,6 +145,13 @@ def team_list(request):
         
 
     return ok({"teams": teams, "total_count": total_count, "page": page, "size": size})
+
+def _get_team(team_id):
+    try:
+        return Team.objects.get(pk=team_id)
+    except (Team.DoesNotExist, ValidationError, ValueError):
+        raise TeamNotFound()
+
 
 def _get_team_for_update(team_id):
     try:
@@ -266,6 +283,42 @@ def _ban(request, team_id):
         message="팀 활동이 정지되었습니다",
     )
 
+@api_view(["PATCH"])
+@permission_classes([IsAdmin])
+def challenge_visibility(request, challenge_id):
+    is_published = request.data.get("is_published")
+    if not isinstance(is_published, bool):
+        raise InvalidRequest("is_published 는 boolean 이어야 합니다")
+
+    reason = request.data.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        raise InvalidRequest("필수 항목이 누락되었습니다: reason")
+    reason = reason.strip()
+    if len(reason) > 500:
+        raise InvalidRequest("reason 은 500자 이하여야 합니다")
+
+    try:
+        with transaction.atomic():
+            challenge = Challenge.objects.select_for_update().get(pk=challenge_id)
+            previous = challenge.is_published
+            challenge.is_published = is_published
+            challenge.save(update_fields=["is_published"])
+            affected_team_count = TeamChallengeAccess.objects.filter(challenge=challenge).count()
+    except (Challenge.DoesNotExist, ValidationError, ValueError):
+        return fail("CHALLENGE_NOT_FOUND", "존재하지 않는 문제 ID입니다.", 404)
+
+    return ok(
+        {
+            "challenge_id": str(challenge.challenge_id),
+            "title": challenge.title,
+            "previous_is_published": previous,
+            "is_published": challenge.is_published,
+            "affected_team_count": affected_team_count,
+            "changed_at": timezone.now().replace(microsecond=0),
+            "changed_by": request.user.login_id,
+        },
+        message="문제 공개 상태가 변경되었습니다",
+    )
 
 def _unban(request, team_id):
     with transaction.atomic():
@@ -942,10 +995,57 @@ CHALLENGE_SORT = {
 }
 
 
-@api_view(["GET"])
+def _challenge_create(request):
+    serializer = ChallengeCreateSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    data = serializer.validated_data
+
+    try:
+        with transaction.atomic():
+            challenge = Challenge.objects.create(
+                challenge_slug=data["challenge_slug"],
+                title=data["title"],
+                category=data["category"],
+                difficulty=data["difficulty"],
+                description=data.get("description"),
+                flag_hash=hash_flag(data["flag"]),
+                score=data["initial_score"],
+                initial_score=data["initial_score"],
+                minimum_score=data["minimum_score"],
+                decay=data["decay"],
+                current_score=data["initial_score"],
+                is_published=False,
+            )
+    except IntegrityError as error:
+        raise InvalidRequest("이미 사용 중인 challenge_slug입니다.") from error
+
+    return ok(
+        {
+            "challenge_id": str(challenge.challenge_id),
+            "challenge_slug": challenge.challenge_slug,
+            "title": challenge.title,
+            "category": challenge.category,
+            "difficulty": challenge.difficulty,
+            "description": challenge.description,
+            "score": num(challenge.score),
+            "initial_score": num(challenge.initial_score),
+            "minimum_score": num(challenge.minimum_score),
+            "decay": challenge.decay,
+            "current_score": num(challenge.current_score),
+            "is_published": challenge.is_published,
+            "created_at": challenge.created_at,
+        },
+        message="문제가 등록되었습니다.",
+    )
+
+
+@api_view(["GET", "POST"])
 @permission_classes([IsAdmin])
 def challenge_list(request):
-    """GET /api/v1/admin/challenges. 문제 목록 + 문제별 인스턴스 현황."""
+    """관리자 문제 등록 또는 문제별 인스턴스 현황 조회."""
+    if request.method == "POST":
+        return _challenge_create(request)
+
     sort = request.query_params.get("sort", "running")
     if sort not in CHALLENGE_SORT:
         raise InvalidRequest("정렬 기준이 올바르지 않습니다. (running, title, score 중 선택)")
@@ -986,6 +1086,7 @@ def challenge_list(request):
     challenges = [
         {
             "challenge_id": str(c.challenge_id),
+            "challenge_slug": c.challenge_slug,
             "title": c.title,
             "category": c.category,
             "difficulty": c.difficulty,
@@ -1000,4 +1101,54 @@ def challenge_list(request):
 
     return ok(
         {"challenges": challenges, "total_count": total_count, "page": page, "size": size}
+    )
+
+@api_view(["POST"])
+@permission_classes([IsAdmin])
+def board_dice(request, team_id):
+    amount = request.data.get("amount")
+    if not isinstance(amount, int) or isinstance(amount, bool):
+        raise InvalidRequest("amount 는 정수여야 합니다")
+    if amount == 0:
+        raise InvalidAmount("조정할 횟수는 0이 될 수 없습니다")
+    if not (DICE_ADJUST_MIN <= amount <= DICE_ADJUST_MAX):
+        raise InvalidRequest(f"amount 는 {DICE_ADJUST_MIN} ~ {DICE_ADJUST_MAX} 범위여야 합니다")
+
+    reason = request.data.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        raise InvalidRequest("필수 항목이 누락되었습니다: reason")
+    reason = reason.strip()
+    if len(reason) > 500:
+        raise InvalidRequest("reason 은 500자 이하여야 합니다")
+
+    with transaction.atomic():
+        # 보드와 같은 순서로 잠근다: 보드 상태 먼저, 팀은 잠그지 않는다.
+        team = _get_team(team_id)
+        get_or_create_board_state(team)
+        state = TeamBoardState.objects.select_for_update(of=("self",)).get(team=team)
+        apply_pending_dice_recharge(state)
+
+        previous = state.dice_rolls_left
+        if amount < 0 and previous + amount < 0:
+            raise InsufficientDice(
+                data={"current_dice_rolls_left": previous, "requested_amount": -amount}
+            )
+        # 보드 보상(grant_dice_roll)과 같은 규칙으로 보유 상한을 넘기지 않는다.
+        applied = max(0, min(amount, MAX_DICE_ROLLS - previous)) if amount > 0 else amount
+        state.dice_rolls_left = previous + applied
+        state.save(update_fields=["dice_rolls_left", "updated_at"])
+        # 조정 뒤 충전 시계를 보드와 같은 규칙으로 다시 맞춘다.
+        apply_pending_dice_recharge(state)
+
+    return ok(
+        {
+            "team_id": str(team.team_id),
+            "previous_dice_rolls_left": previous,
+            "amount": applied,
+            "dice_rolls_left": state.dice_rolls_left,
+            "reason": reason,
+            "adjusted_at": timezone.now().replace(microsecond=0),
+            "adjusted_by": request.user.login_id,
+        },
+        message="주사위 횟수가 조정되었습니다",
     )
