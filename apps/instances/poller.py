@@ -153,6 +153,11 @@ def match_challenge(artifact_data):
         return Challenge.objects.filter(challenge_id=challenge_id).first()
 
     slug = artifact_data.get("challenge_slug", "")
+    challenge = Challenge.objects.filter(challenge_slug=slug).first()
+    if challenge is not None:
+        return challenge
+
+    # 기존 데이터 중 Challenge에 slug가 없는 문제는 릴리스 이력으로 호환한다.
     release = (
         ChallengeRelease.objects
         .filter(challenge_slug=slug)

@@ -135,6 +135,16 @@ class PollerTestBase(TestCase):
 
 
 class RegisterBundleTests(PollerTestBase):
+    def test_registers_first_bundle_by_challenge_slug(self):
+        self.challenge.challenge_slug = "web-basic"
+        self.challenge.save(update_fields=["challenge_slug"])
+
+        status, release = register_bundle(bundle(revision=1))
+
+        self.assertEqual(status, "registered")
+        self.assertEqual(release.challenge_id, self.challenge.challenge_id)
+        self.assertEqual(release.registry_revision, 1)
+
     def test_registers_new_bundle_by_challenge_id_match(self):
         # slug 이력이 없으면 bundle의 문제명으로 문제를 찾아 등록한다
         status, release = register_bundle(
@@ -144,6 +154,22 @@ class RegisterBundleTests(PollerTestBase):
         self.assertEqual(release.challenge_id, self.challenge.challenge_id)
         self.assertEqual(release.version, 1)
         self.assertEqual(release.created_by, "release-poller")
+
+    def test_rejects_challenge_id_with_different_registered_slug(self):
+        self.challenge.challenge_slug = "registered-slug"
+        self.challenge.save(update_fields=["challenge_slug"])
+
+        status, detail = register_bundle(
+            bundle(
+                revision=1,
+                slug="different-slug",
+                challenge_id=self.challenge.challenge_id,
+            )
+        )
+
+        self.assertEqual(status, "invalid")
+        self.assertIn("challenge_slug", detail)
+        self.assertEqual(ChallengeRelease.objects.count(), 0)
 
     def test_matches_by_existing_release_slug_first(self):
         # 같은 slug의 릴리스가 있으면 제목과 무관하게 그 문제로 등록한다

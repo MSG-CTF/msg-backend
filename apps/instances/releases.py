@@ -202,6 +202,11 @@ def validate_release_payload(body):
 
 
 def check_slug_consistency(challenge, challenge_slug):
+    if challenge.challenge_slug and challenge.challenge_slug != challenge_slug:
+        raise ReleaseValidationError(
+            "challenge_slug가 등록된 문제의 challenge_slug와 일치하지 않습니다"
+        )
+
     # 첫 등록이 slug를 정하고, 이후 등록은 같은 slug만 허용한다. 백필 릴리스는 제외한다
     existing_slug = (
         ChallengeRelease.objects
