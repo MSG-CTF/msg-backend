@@ -1,6 +1,7 @@
 import io
 import json
 import logging
+import uuid
 import zipfile
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -58,6 +59,29 @@ def list_bundle_artifacts(token=None):
     ]
 
 
+def workflow_run_id(artifact):
+    workflow_run = artifact.get("workflow_run")
+    if not isinstance(workflow_run, dict):
+        raise ReleaseValidationError("artifact workflow_run 값이 올바르지 않습니다")
+
+    run_id = workflow_run.get("id")
+    if isinstance(run_id, bool) or not isinstance(run_id, int) or run_id <= 0:
+        raise ReleaseValidationError("artifact workflow_run.id 값이 올바르지 않습니다")
+    return run_id
+
+
+def get_workflow_run(artifact, token=None):
+    raw = github_request(
+        "/repos/" + settings.RELEASE_POLL_REPO
+        + "/actions/runs/" + str(workflow_run_id(artifact)),
+        token=token,
+    )
+    workflow_run = json.loads(raw.decode("utf-8"))
+    if not isinstance(workflow_run, dict):
+        raise ReleaseValidationError("workflow_run 응답 값이 올바르지 않습니다")
+    return workflow_run
+
+
 def download_bundle(artifact, token=None):
     # bundle zip을 내려받아 artifact-v2.json 내용을 dict로 돌려준다
     raw = github_request(
@@ -73,8 +97,61 @@ def download_bundle(artifact, token=None):
     raise ReleaseValidationError("bundle 안에 " + BUNDLE_FILE_NAME + " 파일이 없습니다")
 
 
+def expected_source_ref():
+    value = getattr(settings, "RELEASE_POLL_SOURCE_REF", "refs/heads/main")
+    return str(value or "").strip()
+
+
+def branch_from_source_ref(source_ref):
+    prefix = "refs/heads/"
+    if not source_ref.startswith(prefix):
+        raise ReleaseValidationError("RELEASE_POLL_SOURCE_REF는 refs/heads/* 형식이어야 합니다")
+    return source_ref[len(prefix):]
+
+
+def source_sha(artifact_data):
+    value = artifact_data.get("source_sha") or artifact_data.get("commit_sha")
+    if not isinstance(value, str) or not value.strip():
+        raise ReleaseValidationError("bundle source_sha 값이 올바르지 않습니다")
+    return value.strip()
+
+
+def validate_workflow_run_source(artifact, workflow_run):
+    expected_ref = expected_source_ref()
+    expected_branch = branch_from_source_ref(expected_ref)
+    artifact_run = artifact.get("workflow_run") or {}
+
+    if workflow_run.get("id") != workflow_run_id(artifact):
+        raise ReleaseValidationError("artifact와 workflow_run id가 일치하지 않습니다")
+    if workflow_run.get("status") != "completed" or workflow_run.get("conclusion") != "success":
+        raise ReleaseValidationError("성공한 workflow_run의 bundle만 등록할 수 있습니다")
+    if workflow_run.get("head_branch") != expected_branch:
+        raise ReleaseValidationError("workflow_run branch가 등록 허용 branch와 일치하지 않습니다")
+    if artifact_run.get("head_branch") and artifact_run.get("head_branch") != workflow_run.get("head_branch"):
+        raise ReleaseValidationError("artifact와 workflow_run branch가 일치하지 않습니다")
+    if artifact_run.get("head_sha") and artifact_run.get("head_sha") != workflow_run.get("head_sha"):
+        raise ReleaseValidationError("artifact와 workflow_run sha가 일치하지 않습니다")
+
+
+def validate_bundle_source(artifact, workflow_run, artifact_data):
+    validate_workflow_run_source(artifact, workflow_run)
+    expected_ref = expected_source_ref()
+    if artifact_data.get("source_ref") != expected_ref:
+        raise ReleaseValidationError("bundle source_ref가 등록 허용 ref와 일치하지 않습니다")
+    if source_sha(artifact_data) != workflow_run.get("head_sha"):
+        raise ReleaseValidationError("bundle source_sha와 workflow_run sha가 일치하지 않습니다")
+
+
 def match_challenge(artifact_data):
-    # slug가 이미 등록된 문제를 먼저 찾고, 없으면 bundle의 문제명으로 찾는다
+    challenge_id = artifact_data.get("challenge_id")
+    if challenge_id:
+        try:
+            uuid.UUID(str(challenge_id))
+        except (TypeError, ValueError):
+            return None
+
+        return Challenge.objects.filter(challenge_id=challenge_id).first()
+
     slug = artifact_data.get("challenge_slug", "")
     release = (
         ChallengeRelease.objects
@@ -85,9 +162,6 @@ def match_challenge(artifact_data):
     if release is not None:
         return release.challenge
 
-    candidates = list(Challenge.objects.filter(title=artifact_data.get("name", "")))
-    if len(candidates) == 1:
-        return candidates[0]
     return None
 
 
@@ -138,6 +212,8 @@ def poll_once(token=None):
 
     for artifact in artifacts:
         try:
+            workflow_run = get_workflow_run(artifact, token=token)
+            validate_workflow_run_source(artifact, workflow_run)
             artifact_data = download_bundle(artifact, token=token)
         except (HTTPError, URLError, TimeoutError, ValueError, zipfile.BadZipFile) as error:
             logger.warning("release poller bundle 다운로드 실패 %s: %s", artifact.get("name"), error)
@@ -145,6 +221,13 @@ def poll_once(token=None):
             continue
         except ReleaseValidationError as error:
             logger.warning("release poller bundle 형식 오류 %s: %s", artifact.get("name"), error.message)
+            summary["invalid"] += 1
+            continue
+
+        try:
+            validate_bundle_source(artifact, workflow_run, artifact_data)
+        except ReleaseValidationError as error:
+            logger.warning("release poller bundle 출처 오류 %s: %s", artifact.get("name"), error.message)
             summary["invalid"] += 1
             continue
 
