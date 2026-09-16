@@ -33,7 +33,7 @@ url_rules:
 # UUID 문자열이라 long_fields는 비운다.
 id_types:
   long_fields: []
-  string_fields: [card_id, token, team_id, club_id, koth_challenge_id, challenge_id, user_id, history_id, instance_id]
+  string_fields: [card_id, team_card_id, discarded_team_card_id, kept_team_card_id, token, team_id, club_id, koth_challenge_id, challenge_id, user_id, history_id, instance_id]
 
 # 타임스탬프 필드는 ISO-8601 UTC (끝에 Z) 형식이어야 한다.
 timestamp_must_be_iso_utc: true

@@ -43,11 +43,21 @@
 | --- | --- | --- |
 | `team_id`, `user_id`, `challenge_id`, `club_id`, `history_id`, `koth_challenge_id`, `instance_id` | `String(UUID)` | `"018f3f1e-0100-7a91-a30b-630000000001"` |
 | `card_id` | `String` | `"card_reroll"` (enum 성격) |
+| `team_card_id`, `discarded_team_card_id`, `kept_team_card_id` | `String(UUID)` | 팀이 뽑은 카드 한 장의 식별자 |
 | `token` (QR 결제) | `String` | `"pt_9f8a3c2e"` |
 
 `team_id`, `club_id`, `koth_challenge_id`는 2026-08-16 KOTH 템플릿 확정에 맞춰 UUID 문자열로 바뀌었다. 출제자 배포용 템플릿과 KOTH 명세가 모두 UUID를 쓴다.
 `challenge_id`는 2026-08-08 규약 개정으로 이미 UUID 문자열이었으나 이 표에는 반영되지 않고 있었다. `/api/v1/board/opened_challenges` 명세가 근거다.
 `user_id`, `history_id`도 UUID 문자열이다 (강지원 확인, 2026-08-16).
+
+## 보유 찬스카드 식별
+
+- `card_id`는 카드 종류, `team_card_id`는 실제 보유 카드 한 장을 가리킨다.
+- 뽑기 응답, `board/me.chance_cards`, 굴림 응답의 `usable_chance_card`, 사용·확정 응답에 `team_card_id`를 포함한다.
+- 사용·버리기는 `team_card_id`로 지정한다. 기존 `card_id` 요청도 지원하며, 둘 다 보내면 같은 카드 종류여야 한다.
+- 버리기 응답은 `discarded_team_card_id`와 `kept_team_card_id`로 같은 종류의 두 장도 구분한다.
+- 다른 팀의 카드·폐기한 카드·없는 UUID는 `CHANCE_CARD_NOT_FOUND`, 사용한 카드 재사용은 `CHANCE_CARD_ALREADY_USED`, 잘못된 UUID는 `INVALID_REQUEST`다.
+- 2장 보유 시 먼저 1장을 버리는 기존 규칙은 유지한다. 순차적으로 뽑은 같은 종류의 카드는 각각 1회씩 사용할 수 있다.
 
 ## Idempotency-Key
 

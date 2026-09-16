@@ -691,13 +691,15 @@ class BoardApiTestCase(TestCase):
 
 
     def test_dice_roll_creates_pending_when_post_roll_card_held(self):
-        self.draw_card("card_reroll")
+        draw = self.draw_card("card_reroll")
         with patch("apps.board.services.random.randint", side_effect=[1, 1]):
             response = self.post_idem("/api/v1/board/dice/roll")
 
         data = response.json()["data"]
         self.assertTrue(data["pending_confirm"])
-        self.assertEqual(data["usable_chance_card"], {"card_id": "card_reroll", "effect": "RE_ROLL"})
+        self.assertEqual(data["usable_chance_card"], {
+            "card_id": "card_reroll", "team_card_id": str(draw.pk), "effect": "RE_ROLL",
+        })
         self.state.refresh_from_db()
         self.assertEqual(self.state.position_id, 1)  # 아직 확정 전
         self.assertTrue(PendingDiceRoll.objects.filter(team=self.team).exists())
