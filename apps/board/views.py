@@ -61,6 +61,18 @@ def _request_object(request):
     return data
 
 
+def _team_card_id(payload):
+    if "team_card_id" not in payload:
+        return None
+    value = payload["team_card_id"]
+    if not isinstance(value, str):
+        raise InvalidRequest("team_card_id는 UUID 문자열이어야 합니다.")
+    try:
+        return uuid.UUID(value)
+    except ValueError:
+        raise InvalidRequest("team_card_id는 UUID 문자열이어야 합니다.")
+
+
 def _serialize_active_challenge(access):
     if access is None:
         return None
@@ -260,6 +272,7 @@ class ChanceNowView(APIView):
         return ok(
             {
                 "card_id": draw.card_id,
+                "team_card_id": str(draw.pk),
                 "name": draw.card.name,
                 "description": draw.card.description,
                 "effect": draw.card.effect,
@@ -279,8 +292,8 @@ class ChanceDiscardView(APIView):
     @idempotent
     def post(self, request, *args, **kwargs):
         team = _get_team(request)
-        card_id = _request_object(request).get("card_id")
-        return ok(discard_chance_card(team, card_id))
+        payload = _request_object(request)
+        return ok(discard_chance_card(team, payload.get("card_id"), team_card_id=_team_card_id(payload)))
 
 
 class ChanceUseView(APIView):
@@ -293,7 +306,7 @@ class ChanceUseView(APIView):
         team = _get_team(request)
         payload = _request_object(request)
         card_id = payload.get("card_id")
-        return ok(use_chance_card(team, card_id, payload))
+        return ok(use_chance_card(team, card_id, payload, team_card_id=_team_card_id(payload)))
 
 
 class ChanceConfirmView(APIView):
