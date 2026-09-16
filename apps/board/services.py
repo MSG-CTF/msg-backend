@@ -126,6 +126,9 @@ def grant_dice_roll(state, amount):
     """Return the actual reward, preserving the recharge deadline below capacity."""
     if amount <= 0:
         return 0
+    if is_board_completed(state.team_id):
+        state.next_dice_reset_at = None
+        return 0
     now = timezone.now()
     _update_dice_recharge(state, now)
     granted = max(0, min(amount, MAX_DICE_ROLLS - state.dice_rolls_left))
@@ -145,7 +148,9 @@ def get_consumed_indexes(team):
 
 
 def is_board_completed(team):
-    return TeamCellConsumption.objects.filter(team=team).count() >= BOARD_SIZE
+    return TeamCellConsumption.objects.filter(
+        team=team, cell_id__gt=START_CELL_INDEX, cell_id__lte=LAST_CELL_INDEX,
+    ).count() >= BOARD_SIZE - 1
 
 
 def challenge_solve_deadline(access):
@@ -207,8 +212,9 @@ def consume_cell(team, cell):
 
 
 def compute_start_reward(passed_start, landed_on_start):
+    reached_start = passed_start or landed_on_start
     return {
-        "mileage_gained": START_PASS_MILEAGE_REWARD if passed_start else 0,
+        "mileage_gained": START_PASS_MILEAGE_REWARD if reached_start else 0,
         "roll_gained": START_ROLL_BONUS if landed_on_start else 0,
     }
 
@@ -222,6 +228,9 @@ def finalize_landing(team, state, cell, passed_start, landed_on_start):
 
     reward = compute_start_reward(passed_start, landed_on_start)
     update_fields = ["position", "updated_at"]
+    if is_board_completed(team):
+        state.next_dice_reset_at = None
+        update_fields.append("next_dice_reset_at")
     if passed_start:
         update_fields.append("has_passed_start")
     if reward["roll_gained"]:
