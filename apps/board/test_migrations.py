@@ -181,3 +181,76 @@ class BoardMigrationCleanupTests(TransactionTestCase):
         self.assertEqual(len(result.failures), 1)
         self.assertEqual(result.errors, [])
         self.assert_latest_schema(targets)
+
+
+class StartCompletionMigrationTestCase(TransactionTestCase):
+    migrate_from = [("board", "0004_align_board_api_spec")]
+    migrate_to = [("board", "0005_exclude_start_from_completion")]
+
+    def setUp(self):
+        executor = MigrationExecutor(connection)
+        self.latest_migrations = executor.loader.graph.leaf_nodes()
+        self.addCleanup(self.restore_latest_schema)
+        executor.migrate(self.migrate_from)
+        self.old_apps = executor.loader.project_state(self.migrate_from).apps
+
+    def restore_latest_schema(self):
+        MigrationExecutor(connection).migrate(self.latest_migrations)
+
+    def test_only_start_consumption_and_completed_recharge_deadlines_change(self):
+        Team = self.old_apps.get_model("accounts", "Team")
+        Cell = self.old_apps.get_model("board", "Cell")
+        State = self.old_apps.get_model("board", "TeamBoardState")
+        Consumption = self.old_apps.get_model("board", "TeamCellConsumption")
+        Roll = self.old_apps.get_model("board", "DiceRoll")
+        Pending = self.old_apps.get_model("board", "PendingDiceRoll")
+        Cell.objects.bulk_create([
+            Cell(cell_index=index, type="START" if index == 1 else "CHALLENGE", name=str(index))
+            for index in range(1, 37)
+        ])
+        next_reset = timezone.now() - timedelta(minutes=5)
+        cases = []
+        for name, indexes, completed in (
+            ("complete-with-start", range(1, 37), True),
+            ("complete-without-start", range(2, 37), True),
+            ("incomplete-with-start", range(1, 36), False),
+            ("only-start", [1], False),
+        ):
+            team = Team.objects.create(team_name=name, mileage=450)
+            State.objects.create(
+                team=team, position_id=35, dice_rolls_left=2,
+                next_dice_reset_at=next_reset, has_passed_start=True,
+            )
+            Consumption.objects.bulk_create([
+                Consumption(team=team, cell_id=index) for index in indexes
+            ])
+            roll = Roll.objects.create(
+                team=team, dice_a=1, dice_b=1, rolled_number=2,
+                previous_position=33, current_position=35,
+            )
+            history = MileageHistory.objects.create(team_id=team.pk, type="START_BONUS", amount=100)
+            retained_ids = set(Consumption.objects.filter(team=team).exclude(cell_id=1).values_list("id", flat=True))
+            cases.append((team.pk, completed, retained_ids, roll.pk, history.pk))
+
+        pending = Pending.objects.create(
+            team_id=cases[2][0], dice_a=1, dice_b=1, rolled_number=2, previous_position=35,
+            candidate_position=1, movement_path=[36, 1], passed_start=True, board_event_code="NONE",
+        )
+        # Reapplying after a schema rollback must not reset game progress or balances.
+        for _ in range(2):
+            executor = MigrationExecutor(connection)
+            executor.migrate(self.migrate_to)
+            apps = executor.loader.project_state(self.migrate_to).apps
+            consumption = apps.get_model("board", "TeamCellConsumption").objects
+            self.assertFalse(consumption.filter(cell_id=1).exists())
+            for team_id, completed, retained_ids, roll_id, history_id in cases:
+                state = apps.get_model("board", "TeamBoardState").objects.get(team_id=team_id)
+                self.assertEqual(state.next_dice_reset_at, None if completed else next_reset)
+                self.assertEqual((state.position_id, state.dice_rolls_left, state.has_passed_start), (35, 2, True))
+                self.assertEqual(set(consumption.filter(team_id=team_id).values_list("id", flat=True)), retained_ids)
+                self.assertEqual(apps.get_model("accounts", "Team").objects.get(pk=team_id).mileage, 450)
+                self.assertTrue(apps.get_model("board", "DiceRoll").objects.filter(pk=roll_id).exists())
+                self.assertEqual(MileageHistory.objects.get(pk=history_id).amount, 100)
+            updated_pending = apps.get_model("board", "PendingDiceRoll").objects.get(pk=pending.pk)
+            self.assertEqual((updated_pending.candidate_position, updated_pending.movement_path), (1, [36, 1]))
+            MigrationExecutor(connection).migrate(self.migrate_from)

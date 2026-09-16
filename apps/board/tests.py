@@ -392,7 +392,7 @@ class BoardApiTestCase(TestCase):
         )
 
     def test_board_me_isolates_other_team(self):
-        TeamCellConsumption.objects.create(team=self.team, cell_id=1)
+        TeamCellConsumption.objects.create(team=self.team, cell_id=2)
         self.as_other_leader()
 
         response = self.client.get("/api/v1/board/me")
@@ -570,7 +570,7 @@ class BoardApiTestCase(TestCase):
 
 
     def test_dice_status_board_completed(self):
-        for cell_index in range(1, 37):
+        for cell_index in range(2, 37):
             TeamCellConsumption.objects.create(team=self.team, cell_id=cell_index)
 
         response = self.client.get("/api/v1/board/dice/status")

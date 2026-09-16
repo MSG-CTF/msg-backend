@@ -11,7 +11,17 @@ Source: [Notion Board API](https://app.notion.com/p/3ab0f19c72be80ab9e57e3776b67
 
 Teams may spend all three stored rolls without waiting for the 15-minute challenge reward window or dice recharge. A challenge must still be selected on arrival before the next roll. The `timer_running` field reports the current challenge reward window independently of `can_roll`; it no longer produces a `TIMER_RUNNING` block. Empty dice, an unconfirmed roll, and board completion still block rolling. Further rolls preserve the existing recharge deadline, and opened challenges remain available after moving.
 
+## START and board completion (#31)
+
+START (cell 1) is never consumed and can be visited repeatedly. Completion requires all 35 other cells (2–36). Consumed cells remain in `movement_path` when traversed. Crossing or landing on START grants 100 mileage and one roll once per finalized move, subject to the three-roll cap; retrying the same request does not repeat the reward. Once the last cell is consumed, `board_completed` is true, `can_roll` is false with `BOARD_COMPLETED`, and recharge and automatic dice rewards stop. The last move still costs one roll and any mileage reward is retained.
+
 ## Existing databases
+
+### START completion migration
+
+Migration `board.0005_exclude_start_from_completion` removes only legacy START consumption rows and clears recharge deadlines for completed teams. Existing positions, other consumed cells, dice balances, solves and reward history are preserved. Run `python manage.py migrate` when deploying; do not reseed an existing game. Reversing this data migration does not recreate invalid START consumption or restart completed teams' timers.
+
+### Board layout migration
 
 Apply `python manage.py migrate` with the new release. Migration `board.0004_align_board_api_spec` updates cell 16 in place and translates pending landings on it. It also updates special-cell labels and the move-offset description.
 
