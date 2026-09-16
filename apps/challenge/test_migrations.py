@@ -25,6 +25,10 @@ class MergeOpenedChallengesMigrationTests(TransactionTestCase):
     def restore_migrations(self, targets):
         MigrationExecutor(connection).migrate(targets)
 
+    def migrate_to_latest(self):
+        executor = MigrationExecutor(connection)
+        executor.migrate(executor.loader.graph.leaf_nodes())
+
     def test_merges_solved_and_unsolved_rows_with_and_without_board_access(self):
         Team = self.old_apps.get_model("accounts", "Team")
         Challenge = self.old_apps.get_model("challenge", "Challenge")
@@ -81,6 +85,8 @@ class MergeOpenedChallengesMigrationTests(TransactionTestCase):
                 if access_id:
                     self.assertEqual(access.pk, access_id)
 
+        # 현재 모델을 사용하는 서비스 호출 전에 DB 스키마도 최신 상태로 복원한다.
+        self.migrate_to_latest()
         summary = get_opened_challenges_summary(team.pk)
         self.assertEqual(summary["total_count"], 4)
         self.assertEqual(summary["solved_count"], 2)
@@ -152,6 +158,8 @@ class MergeOpenedChallengesMigrationTests(TransactionTestCase):
                 challenge_id=challenge_id, challenge_number=index, club_name="repaired-club",
             )
         MigrationExecutor(connection).migrate(self.migrate_to)
+        # 현재 모델을 사용하는 서비스 호출 전에 DB 스키마도 최신 상태로 복원한다.
+        self.migrate_to_latest()
         summary = get_opened_challenges_summary(team.pk)
         self.assertEqual(summary["total_count"], 4)
         self.assertEqual(summary["solved_count"], 3)

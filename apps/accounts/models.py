@@ -7,7 +7,7 @@ from django.db import models
 class Team(models.Model):
     team_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     team_name = models.CharField(max_length=100, unique=True)
-    team_score = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    team_score = models.DecimalField(max_digits=20, decimal_places=2, default=0)
     mileage = models.IntegerField(default=0)
     is_banned = models.BooleanField(default=False)
     ban_reason = models.CharField(max_length=500, null=True, blank=True)

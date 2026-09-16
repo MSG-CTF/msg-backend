@@ -2,6 +2,7 @@ import threading
 import uuid
 
 from datetime import timedelta
+from decimal import Decimal
 from django.db import connections
 from django.utils import timezone
 from django.core.cache import cache
@@ -15,6 +16,7 @@ from apps.accounts.models import (
     Team,
     User,
 )
+from apps.board.models import Cell, TeamChallengeAccess
 from apps.teams.models import (
     MileageHistory,
     MileageType,
@@ -889,6 +891,222 @@ class AdminChallengeTests(TestCase):
         self.client.credentials(
             HTTP_AUTHORIZATION=f"Bearer {res.data['data']['access_token']}"
         )
+
+    def challenge_body(self, **overrides):
+        body = {
+            "challenge_slug": "sql-injection-basic",
+            "title": "SQL Injection 기초",
+            "category": "WEB",
+            "difficulty": "EASY",
+            "description": "취약점을 찾아 플래그를 획득하세요.",
+            "flag": "MSG{admin_create_test}",
+        }
+        body.update(overrides)
+        return body
+
+    def test_challenge_create_uses_defaults_and_hashes_flag(self):
+        from apps.challenge.services import is_correct_flag
+
+        res = self.client.post(
+            "/api/v1/admin/challenges",
+            self.challenge_body(),
+            format="json",
+        )
+
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data["code"], "SUCCESS")
+        challenge = Challenge.objects.get(challenge_id=res.data["data"]["challenge_id"])
+        self.assertEqual(challenge.challenge_slug, "sql-injection-basic")
+        self.assertEqual(res.data["data"]["challenge_slug"], "sql-injection-basic")
+        self.assertEqual(challenge.initial_score, 1000)
+        self.assertEqual(challenge.minimum_score, 600)
+        self.assertEqual(challenge.decay, 70)
+        self.assertEqual(challenge.score, challenge.initial_score)
+        self.assertEqual(challenge.current_score, challenge.initial_score)
+        self.assertFalse(challenge.is_published)
+        self.assertNotEqual(challenge.flag_hash, "MSG{admin_create_test}")
+        self.assertTrue(is_correct_flag("MSG{admin_create_test}", challenge.flag_hash))
+        self.assertNotIn("flag", res.data["data"])
+        self.assertNotIn("flag_hash", res.data["data"])
+
+    def test_challenge_create_accepts_custom_scoring(self):
+        res = self.client.post(
+            "/api/v1/admin/challenges",
+            self.challenge_body(initial_score=1500, minimum_score=750, decay=80),
+            format="json",
+        )
+
+        self.assertEqual(res.status_code, 200)
+        challenge = Challenge.objects.get(challenge_id=res.data["data"]["challenge_id"])
+        self.assertEqual(challenge.initial_score, 1500)
+        self.assertEqual(challenge.minimum_score, 750)
+        self.assertEqual(challenge.decay, 80)
+        self.assertEqual(challenge.score, 1500)
+        self.assertEqual(challenge.current_score, 1500)
+
+    def test_challenge_create_rejects_invalid_scoring(self):
+        invalid_values = [
+            {"initial_score": 599, "minimum_score": 600},
+            {"minimum_score": -1},
+            {"decay": 0},
+            {"initial_score": 1000.50},
+            {"minimum_score": 600.50},
+        ]
+
+        for values in invalid_values:
+            with self.subTest(values=values):
+                res = self.client.post(
+                    "/api/v1/admin/challenges",
+                    self.challenge_body(**values),
+                    format="json",
+                )
+                self.assertEqual(res.status_code, 400)
+                self.assertEqual(res.data["code"], "INVALID_REQUEST")
+        self.assertEqual(Challenge.objects.count(), 0)
+
+    def test_challenge_create_and_first_solve_never_exceeds_initial_score(self):
+        created = self.client.post(
+            "/api/v1/admin/challenges",
+            self.challenge_body(
+                initial_score=1000,
+                minimum_score=600,
+                decay=70,
+            ),
+            format="json",
+        )
+        self.assertEqual(created.status_code, 200)
+
+        challenge = Challenge.objects.get(
+            challenge_id=created.data["data"]["challenge_id"]
+        )
+        challenge.is_published = True
+        challenge.save(update_fields=["is_published"])
+        cell = Cell.objects.create(
+            cell_index=1,
+            type=Cell.CellType.CHALLENGE,
+            difficulty=Cell.Difficulty.EASY,
+            name="registered-challenge",
+        )
+        TeamChallengeAccess.objects.create(
+            team=self.team,
+            challenge=challenge,
+            source_cell=cell,
+        )
+
+        self.auth("player")
+        submitted = self.client.post(
+            f"/api/v1/challenges/{challenge.challenge_id}/submit",
+            {"flag": "MSG{admin_create_test}"},
+            format="json",
+        )
+
+        self.assertEqual(submitted.status_code, 200)
+        challenge.refresh_from_db()
+        self.assertLessEqual(challenge.current_score, challenge.initial_score)
+        self.assertEqual(challenge.current_score, challenge.initial_score)
+
+    def test_max_score_challenges_can_be_solved_by_same_team(self):
+        maximum_score = 9_999_999_999
+
+        for index in range(2):
+            flag = f"MSG{{max_score_{index}}}"
+            self.auth("root")
+            created = self.client.post(
+                "/api/v1/admin/challenges",
+                self.challenge_body(
+                    challenge_slug=f"max-score-{index}",
+                    title=f"Max score challenge {index}",
+                    flag=flag,
+                    initial_score=maximum_score,
+                    minimum_score=maximum_score,
+                    decay=70,
+                ),
+                format="json",
+            )
+            self.assertEqual(created.status_code, 200)
+
+            challenge = Challenge.objects.get(
+                challenge_id=created.data["data"]["challenge_id"]
+            )
+            challenge.is_published = True
+            challenge.save(update_fields=["is_published"])
+            cell = Cell.objects.create(
+                cell_index=index + 1,
+                type=Cell.CellType.CHALLENGE,
+                difficulty=Cell.Difficulty.EASY,
+                name=f"max-score-challenge-{index}",
+            )
+            TeamChallengeAccess.objects.create(
+                team=self.team,
+                challenge=challenge,
+                source_cell=cell,
+            )
+
+            self.auth("player")
+            submitted = self.client.post(
+                f"/api/v1/challenges/{challenge.challenge_id}/submit",
+                {"flag": flag},
+                format="json",
+            )
+            self.assertEqual(submitted.status_code, 200)
+
+        self.team.refresh_from_db()
+        self.assertEqual(self.team.team_score, Decimal("19999999998.00"))
+
+    def test_challenge_create_rejects_invalid_and_duplicate_slug(self):
+        invalid_slugs = ["Web-Notebook", "web_notebook", "web notebook", "-web", "web-"]
+        for slug in invalid_slugs:
+            with self.subTest(slug=slug):
+                res = self.client.post(
+                    "/api/v1/admin/challenges",
+                    self.challenge_body(challenge_slug=slug),
+                    format="json",
+                )
+                self.assertEqual(res.status_code, 400)
+                self.assertEqual(res.data["code"], "INVALID_REQUEST")
+
+        first = self.client.post(
+            "/api/v1/admin/challenges",
+            self.challenge_body(challenge_slug="web-notebook"),
+            format="json",
+        )
+        duplicate = self.client.post(
+            "/api/v1/admin/challenges",
+            self.challenge_body(challenge_slug="web-notebook", title="다른 문제"),
+            format="json",
+        )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(duplicate.status_code, 400)
+        self.assertEqual(duplicate.data["code"], "INVALID_REQUEST")
+        self.assertEqual(Challenge.objects.filter(challenge_slug="web-notebook").count(), 1)
+
+    def test_challenge_create_rejects_missing_and_unknown_fields(self):
+        missing = self.client.post(
+            "/api/v1/admin/challenges",
+            {"title": "필드 부족"},
+            format="json",
+        )
+        unknown = self.client.post(
+            "/api/v1/admin/challenges",
+            self.challenge_body(is_published=True),
+            format="json",
+        )
+
+        self.assertEqual(missing.status_code, 400)
+        self.assertEqual(unknown.status_code, 400)
+        self.assertEqual(Challenge.objects.count(), 0)
+
+    def test_challenge_create_participant_blocked(self):
+        self.auth("player")
+        res = self.client.post(
+            "/api/v1/admin/challenges",
+            self.challenge_body(),
+            format="json",
+        )
+        self.assertEqual(res.status_code, 403)
+        self.assertEqual(res.data["code"], "FORBIDDEN")
+        self.assertFalse(Challenge.objects.exists())
 
     def test_challenge_list_counts(self):
         from apps.challenge.models import Challenge, Solve
