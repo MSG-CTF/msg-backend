@@ -144,12 +144,7 @@ def _consume_dice_roll(state):
 
 
 def get_consumed_indexes(team):
-    # Ignore legacy START rows as well as preventing new ones in consume_cell.
-    return set(
-        TeamCellConsumption.objects.filter(team=team)
-        .exclude(cell_id=START_CELL_INDEX)
-        .values_list("cell_id", flat=True)
-    )
+    return set(TeamCellConsumption.objects.filter(team=team).values_list("cell_id", flat=True))
 
 
 def is_board_completed(team):
@@ -212,8 +207,6 @@ def roulette_reason(cell):
 
 
 def consume_cell(team, cell):
-    if cell.pk == START_CELL_INDEX:
-        return False
     _, created = TeamCellConsumption.objects.get_or_create(team=team, cell=cell)
     return created
 
@@ -222,7 +215,7 @@ def compute_start_reward(passed_start, landed_on_start):
     reached_start = passed_start or landed_on_start
     return {
         "mileage_gained": START_PASS_MILEAGE_REWARD if reached_start else 0,
-        "roll_gained": START_ROLL_BONUS if reached_start else 0,
+        "roll_gained": START_ROLL_BONUS if landed_on_start else 0,
     }
 
 

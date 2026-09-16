@@ -197,7 +197,7 @@ class StartCompletionMigrationTestCase(TransactionTestCase):
     def restore_latest_schema(self):
         MigrationExecutor(connection).migrate(self.latest_migrations)
 
-    def test_only_start_consumption_and_completed_recharge_deadlines_change(self):
+    def test_consumption_is_preserved_and_only_completed_recharge_deadlines_change(self):
         Team = self.old_apps.get_model("accounts", "Team")
         Cell = self.old_apps.get_model("board", "Cell")
         State = self.old_apps.get_model("board", "TeamBoardState")
@@ -229,7 +229,7 @@ class StartCompletionMigrationTestCase(TransactionTestCase):
                 previous_position=33, current_position=35,
             )
             history = MileageHistory.objects.create(team_id=team.pk, type="START_BONUS", amount=100)
-            retained_ids = set(Consumption.objects.filter(team=team).exclude(cell_id=1).values_list("id", flat=True))
+            retained_ids = set(Consumption.objects.filter(team=team).values_list("id", flat=True))
             cases.append((team.pk, completed, retained_ids, roll.pk, history.pk))
 
         pending = Pending.objects.create(
@@ -242,7 +242,7 @@ class StartCompletionMigrationTestCase(TransactionTestCase):
             executor.migrate(self.migrate_to)
             apps = executor.loader.project_state(self.migrate_to).apps
             consumption = apps.get_model("board", "TeamCellConsumption").objects
-            self.assertFalse(consumption.filter(cell_id=1).exists())
+            self.assertEqual(consumption.filter(cell_id=1).count(), 3)
             for team_id, completed, retained_ids, roll_id, history_id in cases:
                 state = apps.get_model("board", "TeamBoardState").objects.get(team_id=team_id)
                 self.assertEqual(state.next_dice_reset_at, None if completed else next_reset)

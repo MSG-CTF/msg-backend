@@ -392,7 +392,7 @@ class BoardApiTestCase(TestCase):
         )
 
     def test_board_me_isolates_other_team(self):
-        TeamCellConsumption.objects.create(team=self.team, cell_id=2)
+        TeamCellConsumption.objects.create(team=self.team, cell_id=1)
         self.as_other_leader()
 
         response = self.client.get("/api/v1/board/me")

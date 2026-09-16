@@ -7,8 +7,7 @@ def exclude_start_from_completion(apps, schema_editor):
     Consumption = apps.get_model("board", "TeamCellConsumption")
     State = apps.get_model("board", "TeamBoardState")
 
-    # START is repeatable. Keep all other progress, rolls and reward history.
-    Consumption.objects.using(alias).filter(cell_id=1).delete()
+    # START remains consumed after its first landing. Only completion excludes it.
     completed_teams = (
         Consumption.objects.using(alias)
         .filter(cell_id__gte=2, cell_id__lte=36)

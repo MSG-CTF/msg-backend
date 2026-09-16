@@ -13,13 +13,13 @@ Teams may spend all three stored rolls without waiting for the 15-minute challen
 
 ## START and board completion (#31)
 
-START (cell 1) is never consumed and can be visited repeatedly. Completion requires all 35 other cells (2–36). Consumed cells remain in `movement_path` when traversed. Crossing or landing on START grants 100 mileage and one roll once per finalized move, subject to the three-roll cap; retrying the same request does not repeat the reward. Once the last cell is consumed, `board_completed` is true, `can_roll` is false with `BOARD_COMPLETED`, and recharge and automatic dice rewards stop. The last move still costs one roll and any mileage reward is retained.
+START (cell 1) can be landed on exactly once per team and is consumed on that first finalized landing. The initial spawn on START does not consume it. Later landings skip START in the movement direction, and airport/free-travel destinations cannot select it after consumption. START remains in `consumed_cell_indexes` and `cell_states`, but completion requires only the 35 other cells (2–36). Consumed cells remain in `movement_path` when traversed. Crossing START grants 100 mileage per finalized move, even after START is consumed; the first exact landing also grants 100 mileage and one roll, subject to the three-roll cap. Passing alone grants no roll. Retrying the same request does not repeat rewards. Once the last non-START cell is consumed, `board_completed` is true, `can_roll` is false with `BOARD_COMPLETED`, and recharge and automatic dice rewards stop. The last move still costs one roll and any mileage reward is retained.
 
 ## Existing databases
 
 ### START completion migration
 
-Migration `board.0005_exclude_start_from_completion` removes only legacy START consumption rows and clears recharge deadlines for completed teams. Existing positions, other consumed cells, dice balances, solves and reward history are preserved. Run `python manage.py migrate` when deploying; do not reseed an existing game. Reversing this data migration does not recreate invalid START consumption or restart completed teams' timers.
+Migration `board.0005_exclude_start_from_completion` clears recharge deadlines for teams that consumed cells 2–36. All consumption rows, including START, positions, dice balances, solves and reward history are preserved. Run `python manage.py migrate` when deploying; do not reseed an existing game. Reversing this data migration does not restart completed teams' timers.
 
 ### Board layout migration
 
