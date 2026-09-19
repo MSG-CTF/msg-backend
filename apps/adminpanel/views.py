@@ -1277,10 +1277,11 @@ def settings_view(request):
                 raise InvalidRequest("ends_at 은 started_at 보다 뒤여야 합니다")
             contest.save(update_fields=["start_time", "end_time"])
 
-        for key, value in changes.items():
+        # 항목 순서가 다른 동시 요청이 서로의 잠금을 기다리지 않도록 항상 같은 순서로 저장한다.
+        for key in sorted(changes):
             AdminSetting.objects.update_or_create(
                 key=key,
-                defaults={"value": value, "updated_by": request.user.login_id},
+                defaults={"value": changes[key], "updated_by": request.user.login_id},
             )
 
         AdminSetting.objects.update_or_create(

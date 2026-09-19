@@ -2042,3 +2042,101 @@ class AdminEventTests(TestCase):
 
     def test_token_missing(self):
         self.assertEqual(self.client.get(self.url).status_code, 401)
+
+
+class SettingsLockOrderTest(TransactionTestCase):
+    """설정 저장이 항상 같은 키 순서로 잠기는지 확인한다."""
+
+    URL = "/api/v1/admin/settings"
+
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            login_id="root", password="pw1234", nickname="운영자",
+            team=None, role=Role.ADMIN,
+        )
+
+    def _client(self):
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f"Bearer {issue_access_token(self.admin)}")
+        return client
+
+    def _seed(self):
+        """교착은 기존 행을 UPDATE 할 때 생긴다. 미리 만들어 INSERT 경로를 피한다."""
+        self._client().patch(
+            self.URL,
+            {"board": {"dice_rolls_per_reset": 3, "solve_deadline_minutes": 15}},
+            format="json",
+        )
+
+    def test_writes_in_sorted_key_order(self):
+        """요청에 들어온 순서와 무관하게 키를 정렬한 순서로 저장한다."""
+        from apps.adminpanel.models import AdminSetting
+
+        written = []
+        real = AdminSetting.objects.update_or_create
+
+        def record(**kwargs):
+            written.append(kwargs["key"])
+            return real(**kwargs)
+
+        with patch.object(AdminSetting.objects, "update_or_create", record):
+            res = self._client().patch(
+                self.URL,
+                {"board": {"solve_deadline_minutes": 20, "dice_rolls_per_reset": 4}},
+                format="json",
+            )
+
+        self.assertEqual(res.status_code, 200)
+        setting_keys = [k for k in written if not k.startswith("_meta.")]
+        self.assertEqual(setting_keys, sorted(setting_keys))
+
+    def test_reversed_key_order_does_not_deadlock(self):
+        """항목 순서가 다른 두 요청이 겹쳐도 500 없이 처리된다."""
+        from apps.adminpanel.models import AdminSetting
+
+        self._seed()
+
+        bodies = [
+            {"board": {"dice_rolls_per_reset": 4, "solve_deadline_minutes": 20}},
+            {"board": {"solve_deadline_minutes": 30, "dice_rolls_per_reset": 2}},
+        ]
+        results = {}
+        errors = []
+        # 양쪽이 첫 키를 잠근 뒤에야 다음 키로 넘어가게 해 겹치는 시점을 맞춘다.
+        after_first_write = threading.Barrier(len(bodies))
+        seen = set()
+        guard = threading.Lock()
+        real = AdminSetting.objects.update_or_create
+
+        def hooked(**kwargs):
+            result = real(**kwargs)
+            ident = threading.get_ident()
+            with guard:
+                is_first = ident not in seen
+                seen.add(ident)
+            if is_first:
+                try:
+                    after_first_write.wait(timeout=2)
+                except threading.BrokenBarrierError:
+                    pass
+            return result
+
+        def send(index):
+            try:
+                res = self._client().patch(self.URL, bodies[index], format="json")
+                results[index] = res.status_code
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+            finally:
+                connections.close_all()
+
+        with patch.object(AdminSetting.objects, "update_or_create", hooked):
+            threads = [threading.Thread(target=send, args=(i,)) for i in range(len(bodies))]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=30)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), len(bodies))
+        self.assertEqual(sorted(results.values()), [200, 200])
