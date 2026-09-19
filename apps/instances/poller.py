@@ -44,19 +44,44 @@ def github_request(path, token=None, timeout=10):
 
 
 def list_bundle_artifacts(token=None):
-    # 문제 저장소의 Actions artifact 중 publish bundle만 최신순으로 돌려준다
-    raw = github_request(
-        "/repos/" + settings.RELEASE_POLL_REPO
-        + "/actions/artifacts?per_page=" + str(settings.RELEASE_POLL_LIMIT),
-        token=token,
-    )
-    artifacts = json.loads(raw.decode("utf-8")).get("artifacts", [])
-    return [
-        entry
-        for entry in artifacts
-        if entry.get("name", "").endswith(BUNDLE_NAME_SUFFIX)
-        and not entry.get("expired")
-    ]
+    # 문제 저장소의 Actions artifact 전체에서 publish bundle만 최신순으로 돌려준다
+    page_size = min(max(settings.RELEASE_POLL_LIMIT, 1), 100)
+    page = 1
+    bundles = []
+
+    while True:
+        raw = github_request(
+            "/repos/" + settings.RELEASE_POLL_REPO
+            + "/actions/artifacts?per_page=" + str(page_size)
+            + "&page=" + str(page),
+            token=token,
+        )
+        payload = json.loads(raw.decode("utf-8"))
+        artifacts = payload.get("artifacts", [])
+        if not isinstance(artifacts, list):
+            raise ReleaseValidationError(
+                "GitHub artifact 목록 형식이 올바르지 않습니다"
+            )
+
+        bundles.extend(
+            entry
+            for entry in artifacts
+            if entry.get("name", "").endswith(BUNDLE_NAME_SUFFIX)
+            and not entry.get("expired")
+        )
+
+        total_count = payload.get("total_count")
+        if isinstance(total_count, int):
+            if page * page_size >= total_count:
+                break
+        elif len(artifacts) < page_size:
+            break
+
+        if not artifacts:
+            break
+        page += 1
+
+    return bundles
 
 
 def workflow_run_id(artifact):

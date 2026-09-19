@@ -9,7 +9,7 @@ from django.test import TestCase, override_settings
 from apps.challenge.models import Challenge
 from apps.challenge.services import hash_flag
 from apps.instances.models import ChallengeRelease, ChallengeRuntimeConfig
-from apps.instances.poller import poll_once, register_bundle
+from apps.instances.poller import list_bundle_artifacts, poll_once, register_bundle
 
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 
@@ -117,6 +117,48 @@ def fake_urlopen(responses):
         return FakeResponse(queue.pop(0))
 
     return opener
+
+
+class ListBundleArtifactsTests(TestCase):
+    @override_settings(RELEASE_POLL_LIMIT=2)
+    def test_lists_unexpired_publish_bundles_across_all_pages(self):
+        responses = [
+            json.dumps(
+                {
+                    "total_count": 4,
+                    "artifacts": [
+                        {"id": 1, "name": "test-output", "expired": False},
+                        {
+                            "id": 2,
+                            "name": "web-a-publish-bundle",
+                            "expired": False,
+                        },
+                    ],
+                }
+            ).encode("utf-8"),
+            json.dumps(
+                {
+                    "total_count": 4,
+                    "artifacts": [
+                        {
+                            "id": 3,
+                            "name": "web-b-publish-bundle",
+                            "expired": False,
+                        },
+                        {
+                            "id": 4,
+                            "name": "web-old-publish-bundle",
+                            "expired": True,
+                        },
+                    ],
+                }
+            ).encode("utf-8"),
+        ]
+
+        with patch("apps.instances.poller.urlopen", fake_urlopen(responses)):
+            artifacts = list_bundle_artifacts(token="test-token")
+
+        self.assertEqual([artifact["id"] for artifact in artifacts], [2, 3])
 
 
 @override_settings(CACHES=LOCMEM)
