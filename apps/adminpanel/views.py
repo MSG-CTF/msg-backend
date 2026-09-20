@@ -93,6 +93,7 @@ SETTING_SPECS = {
 }
 SETTINGS_UPDATED_KEY = "_meta.updated"
 EVENT_TYPES = set(AdminEvent.EventType.values)
+EVENT_MESSAGE_MAX_LENGTH = AdminEvent._meta.get_field("message").max_length
 
 
 def _page_number(raw, default, maximum=None):
@@ -173,6 +174,21 @@ def _get_team_for_update(team_id):
         return Team.objects.select_for_update().get(pk=team_id)
     except (Team.DoesNotExist, ValidationError, ValueError):
         raise TeamNotFound()
+
+
+def _record_event(event_type, message, actor, *, severity=AdminEvent.Severity.INFO,
+                  team=None, challenge=None, instance_id=None):
+    """관리자 조작을 admin_events 에 남긴다. 호출부의 트랜잭션 안에서 불러 조작과 함께 커밋되게 한다."""
+    AdminEvent.objects.create(
+        type=event_type,
+        severity=severity,
+        message=message[:EVENT_MESSAGE_MAX_LENGTH],
+        team=team,
+        challenge=challenge,
+        instance_id=instance_id,
+        actor=actor,
+    )
+
 
 @api_view(["POST"])
 @permission_classes([IsAdmin])
@@ -303,6 +319,13 @@ def _ban(request, team_id):
         team.save(
             update_fields=["is_banned", "ban_reason", "banned_at", "banned_by", "updated_at"]
         )
+        _record_event(
+            AdminEvent.EventType.TEAM_BANNED,
+            f"팀 활동이 정지되었습니다: {reason}",
+            request.user.login_id,
+            severity=AdminEvent.Severity.WARNING,
+            team=team,
+        )
 
     return ok(
         {
@@ -336,6 +359,14 @@ def challenge_visibility(request, challenge_id):
             challenge.is_published = is_published
             challenge.save(update_fields=["is_published"])
             affected_team_count = TeamChallengeAccess.objects.filter(challenge=challenge).count()
+            _record_event(
+                AdminEvent.EventType.CHALLENGE_VISIBILITY_CHANGED,
+                f"문제 {'공개' if is_published else '비공개'} 전환"
+                f" (영향 팀 {affected_team_count}): {reason}",
+                request.user.login_id,
+                severity=AdminEvent.Severity.WARNING,
+                challenge=challenge,
+            )
     except (Challenge.DoesNotExist, ValidationError, ValueError):
         return fail("CHALLENGE_NOT_FOUND", "존재하지 않는 문제 ID입니다.", 404)
 
@@ -358,7 +389,12 @@ def _unban(request, team_id):
         if not team.is_banned:
             raise NotBanned(data={"team_id": str(team.team_id), "is_banned": False})
 
-        # 이력이 필요하면 admin_events 에 기록한다 (해당 앱 생성 후).
+        _record_event(
+            AdminEvent.EventType.TEAM_UNBANNED,
+            f"팀 활동 정지가 해제되었습니다 (정지 사유: {team.ban_reason})",
+            request.user.login_id,
+            team=team,
+        )
         team.is_banned = False
         team.ban_reason = None
         team.banned_at = None
@@ -422,6 +458,12 @@ def team_mileage(request, team_id):
         )
         team.mileage = previous + amount
         team.save(update_fields=["mileage", "updated_at"])
+        _record_event(
+            AdminEvent.EventType.MILEAGE_ADJUSTED,
+            f"마일리지 {amount:+d} ({previous} → {team.mileage}): {reason}",
+            request.user.login_id,
+            team=team,
+        )
 
         return {
             "team_id": str(team.team_id),
@@ -641,6 +683,13 @@ def payment_refund(request, history_id):
 
         purchase.is_refunded = True
         purchase.save(update_fields=["is_refunded"])
+        _record_event(
+            AdminEvent.EventType.PAYMENT_REFUNDED,
+            f"결제 환불 +{refunded_amount} (원 결제 {purchase.history_id})",
+            request.user.login_id,
+            severity=AdminEvent.Severity.WARNING,
+            team=team,
+        )
 
     return ok(
         {
@@ -788,6 +837,15 @@ def instance_force_delete(request, instance_id):
         instance.status = InstanceStatus.STOPPING
         instance.delete_reason = DeleteReason.ADMIN_FORCED
         instance.save(update_fields=["status", "delete_reason", "updated_at"])
+        _record_event(
+            AdminEvent.EventType.INSTANCE_FORCED,
+            "인스턴스 강제 종료",
+            request.user.login_id,
+            severity=AdminEvent.Severity.WARNING,
+            team=instance.team,
+            challenge=instance.challenge,
+            instance_id=instance.instance_id,
+        )
 
     return ok(
         {
@@ -846,6 +904,15 @@ def instance_force_reset(request, instance_id):
             team=instance.team,
             challenge=instance.challenge,
             replaced_instance=instance,
+        )
+        _record_event(
+            AdminEvent.EventType.INSTANCE_FORCED,
+            f"인스턴스 강제 재시작 (이전 {instance.instance_id})",
+            request.user.login_id,
+            severity=AdminEvent.Severity.WARNING,
+            team=instance.team,
+            challenge=instance.challenge,
+            instance_id=new_instance.instance_id,
         )
 
     return ok(
@@ -1288,6 +1355,17 @@ def settings_view(request):
             key=SETTINGS_UPDATED_KEY,
             defaults={"value": 0, "updated_by": request.user.login_id},
         )
+
+        changed = [f"{key}={changes[key]}" for key in sorted(changes)]
+        if contest_body:
+            changed.extend(f"contest.{name}" for name in sorted(contest_body))
+        # 빈 그룹만 보낸 요청은 아무것도 바꾸지 않으므로 이벤트도 남기지 않는다.
+        if changed:
+            _record_event(
+                AdminEvent.EventType.SETTINGS_CHANGED,
+                "설정 변경: " + ", ".join(changed),
+                request.user.login_id,
+            )
 
     return ok(_settings_payload(), message="설정이 변경되었습니다")
 
