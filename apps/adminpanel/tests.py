@@ -3,7 +3,7 @@ import uuid
 
 from datetime import timedelta
 from decimal import Decimal
-from django.db import connections
+from django.db import connections, transaction
 from django.utils import timezone
 from django.core.cache import cache
 from django.test import TestCase, TransactionTestCase, override_settings
@@ -2154,3 +2154,65 @@ class SettingsLockOrderTest(TransactionTestCase):
         self.assertEqual(errors, [])
         self.assertEqual(len(results), len(bodies))
         self.assertEqual(sorted(results.values()), [200, 200])
+
+
+class TeamLockNoKeyTest(TransactionTestCase):
+    """관리자 뷰가 팀 행을 잠근 동안에도 그 팀을 참조하는 행을 INSERT 할 수 있어야 한다.
+
+    외래키 INSERT 는 참조 행에 FOR KEY SHARE 를 건다. 팀을 FOR UPDATE 로 잡으면 이것이
+    막혀 admin_events 적재나 인스턴스 생성이 관리자 트랜잭션이 끝날 때까지 기다린다.
+    NO KEY UPDATE 는 값만 바꾼다는 뜻이라 KEY SHARE 와 충돌하지 않는다.
+    """
+
+    def setUp(self):
+        self.team = Team.objects.create(team_name="감자는외로워")
+
+    def test_fk_insert_not_blocked_by_admin_team_lock(self):
+        from django.db import OperationalError, connection
+        from apps.adminpanel.models import AdminEvent
+        from apps.adminpanel.views import _get_team_for_update
+
+        locked = threading.Event()
+        done = threading.Event()
+        errors = []
+
+        def holder():
+            try:
+                with transaction.atomic():
+                    _get_team_for_update(self.team.pk)
+                    locked.set()
+                    done.wait(timeout=10)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(("holder", exc))
+            finally:
+                connections.close_all()
+
+        def inserter():
+            try:
+                with transaction.atomic():
+                    with connection.cursor() as cursor:
+                        # 잠금에 막히면 무한정 기다리지 않고 1초 뒤 실패로 드러나게 한다.
+                        cursor.execute("SET LOCAL lock_timeout = '1000'")
+                    AdminEvent.objects.create(
+                        type=AdminEvent.EventType.TEAM_BANNED,
+                        message="잠금 검증",
+                        team=self.team,
+                        actor="root",
+                    )
+            except OperationalError as exc:
+                errors.append(("inserter", exc))
+            finally:
+                done.set()
+                connections.close_all()
+
+        holder_thread = threading.Thread(target=holder)
+        holder_thread.start()
+        self.assertTrue(locked.wait(timeout=5), "팀 잠금을 잡지 못했다")
+
+        inserter_thread = threading.Thread(target=inserter)
+        inserter_thread.start()
+        inserter_thread.join(timeout=15)
+        holder_thread.join(timeout=15)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(AdminEvent.objects.filter(team=self.team).count(), 1)
