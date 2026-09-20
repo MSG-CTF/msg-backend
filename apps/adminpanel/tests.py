@@ -2154,3 +2154,453 @@ class SettingsLockOrderTest(TransactionTestCase):
         self.assertEqual(errors, [])
         self.assertEqual(len(results), len(bodies))
         self.assertEqual(sorted(results.values()), [200, 200])
+
+
+class AdminBoardTestBase(TestCase):
+    """말 위치 이동과 칸 상태 수정이 함께 쓰는 보드 준비."""
+
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.team = Team.objects.create(team_name="감자는외로워", team_score=350)
+        self.admin = User.objects.create_user(
+            login_id="root", password="pw1234", nickname="운영자",
+            team=None, role=Role.ADMIN,
+        )
+        self.player = User.objects.create_user(
+            login_id="player", password="pw1234", nickname="참가자", team=self.team
+        )
+        self.start = Cell.objects.create(cell_index=1, type="START", name="출발")
+        self.challenge_cell = Cell.objects.create(
+            cell_index=2, type="CHALLENGE", difficulty="EASY", name="2번칸"
+        )
+        self.chance_cell = Cell.objects.create(cell_index=7, type="CHANCE", name="찬스")
+
+    def auth(self, login_id):
+        res = self.client.post(
+            "/api/v1/auth/login",
+            {"login_id": login_id, "password": "pw1234"}, format="json",
+        )
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {res.data['data']['access_token']}"
+        )
+
+    def open_challenge_on_cell(self):
+        """2번 칸에 도착해 문제를 연 상태를 만든다. 도착으로 칸이 소모되어야 OPENED 로 읽힌다."""
+        from apps.board.models import BoardChallenge, TeamBoardState
+        from apps.board.services import (
+            consume_cell,
+            get_current_cell_candidates,
+            open_current_cell_challenge,
+        )
+
+        challenge = Challenge.objects.create(
+            title="보드1", category="WEB", difficulty="EASY",
+            score=100, flag_hash="x", is_published=True,
+        )
+        BoardChallenge.objects.create(challenge=challenge, challenge_number=1)
+        TeamBoardState.objects.update_or_create(
+            team=self.team, defaults={"position": self.challenge_cell}
+        )
+        consume_cell(self.team, self.challenge_cell)
+        get_current_cell_candidates(self.team)
+        open_current_cell_challenge(self.team, challenge.challenge_id)
+        return challenge
+
+
+class AdminBoardPositionTests(AdminBoardTestBase):
+    def url(self, team_id=None):
+        return f"/api/v1/admin/teams/{team_id or self.team.team_id}/board/position"
+
+    def patch(self, body, team_id=None):
+        return self.client.patch(self.url(team_id), body, format="json")
+
+    def test_moves_piece_and_reports_previous_position(self):
+        from apps.board.models import TeamBoardState
+
+        self.auth("root")
+        TeamBoardState.objects.create(team=self.team, position=self.start)
+
+        res = self.patch({"position": 7, "reason": "주사위 중복 처리로 초과 이동됨"})
+
+        self.assertEqual(res.status_code, 200)
+        data = res.data["data"]
+        self.assertEqual(data["previous_position"], 1)
+        self.assertEqual(data["position"], 7)
+        self.assertEqual(data["type"], "CHANCE")
+        self.assertFalse(data["cell_consumed"])
+        self.assertEqual(data["moved_by"], "root")
+        self.assertEqual(
+            TeamBoardState.objects.get(team=self.team).position_id, 7
+        )
+
+    def test_consume_cell_marks_arrival_cell(self):
+        from apps.board.models import TeamBoardState, TeamCellConsumption
+
+        self.auth("root")
+        TeamBoardState.objects.create(team=self.team, position=self.start)
+
+        res = self.patch({"position": 7, "consume_cell": True, "reason": "보정"})
+
+        self.assertTrue(res.data["data"]["cell_consumed"])
+        self.assertTrue(
+            TeamCellConsumption.objects.filter(team=self.team, cell=7).exists()
+        )
+
+    def test_arrival_cell_effects_do_not_fire(self):
+        """이동만 하고 도착 칸 보상은 주지 않는다. START 로 옮겨도 마일리지와 주사위가 그대로다."""
+        from apps.board.models import TeamBoardState
+
+        self.auth("root")
+        TeamBoardState.objects.create(
+            team=self.team, position=self.chance_cell, dice_rolls_left=1
+        )
+        before = Team.objects.get(pk=self.team.pk).mileage
+
+        self.patch({"position": 1, "reason": "출발 칸으로 되돌림"})
+
+        state = TeamBoardState.objects.get(team=self.team)
+        self.assertEqual(state.position_id, 1)
+        self.assertEqual(state.dice_rolls_left, 1)
+        self.assertFalse(state.has_passed_start)
+        self.assertEqual(Team.objects.get(pk=self.team.pk).mileage, before)
+
+    def test_voids_unconfirmed_dice_roll(self):
+        """확정되지 않은 굴림을 남겨두면 팀이 확정할 때 교정한 위치가 덮어써진다."""
+        from apps.board.models import PendingDiceRoll, TeamBoardState
+
+        self.auth("root")
+        TeamBoardState.objects.create(team=self.team, position=self.start)
+        PendingDiceRoll.objects.create(
+            team=self.team, dice_a=3, dice_b=4, rolled_number=7,
+            previous_position=1, candidate_position=8, board_event_code="CHALLENGE",
+        )
+
+        res = self.patch({"position": 7, "reason": "주사위 중복 처리 보정"})
+
+        self.assertEqual(res.status_code, 200)
+        self.assertFalse(PendingDiceRoll.objects.filter(team=self.team).exists())
+
+    def test_closes_chance_card_awaiting_choice(self):
+        """굴림만 지우고 선택 대기 카드를 두면 이후 모든 확정이 영구히 막힌다."""
+        from apps.board.models import (
+            ChanceCard, PendingDiceRoll, TeamBoardState, TeamChanceCard,
+        )
+
+        self.auth("root")
+        TeamBoardState.objects.create(team=self.team, position=self.start)
+        card = ChanceCard.objects.create(
+            card_id="card_roll_twice_choose", name="두 번 굴리기",
+            effect="ROLL_TWICE_CHOOSE", usage_timing="PRE_ROLL", weight=1,
+        )
+        draw = TeamChanceCard.objects.create(
+            team=self.team, source_cell=self.chance_cell, card=card,
+            pending_first_number=5, pending_second_number=9,
+        )
+        PendingDiceRoll.objects.create(
+            team=self.team, dice_a=2, dice_b=3, rolled_number=5,
+            previous_position=1, candidate_position=6, board_event_code="CHALLENGE",
+        )
+
+        self.patch({"position": 7, "reason": "굴림 오작동 보정"})
+
+        draw.refresh_from_db()
+        self.assertIsNotNone(draw.used_at)
+        self.assertIsNone(draw.pending_first_number)
+        self.assertIsNone(draw.pending_second_number)
+
+    def test_rejects_non_object_body(self):
+        from apps.board.models import TeamBoardState
+
+        self.auth("root")
+        TeamBoardState.objects.create(team=self.team, position=self.start)
+        for body in [[], "x", 3]:
+            with self.subTest(body=body):
+                res = self.client.patch(self.url(), body, format="json")
+                self.assertEqual(res.status_code, 400)
+                self.assertEqual(res.data["code"], "INVALID_REQUEST")
+
+    def test_rejects_position_outside_board(self):
+        from apps.board.models import TeamBoardState
+
+        self.auth("root")
+        TeamBoardState.objects.create(team=self.team, position=self.start)
+        for position in [0, 37, -1]:
+            with self.subTest(position=position):
+                res = self.patch({"position": position, "reason": "x"})
+                self.assertEqual(res.status_code, 400)
+                self.assertEqual(res.data["code"], "INVALID_REQUEST")
+
+    def test_rejects_non_integer_position(self):
+        from apps.board.models import TeamBoardState
+
+        self.auth("root")
+        TeamBoardState.objects.create(team=self.team, position=self.start)
+        for position in ["7", 7.5, None, True]:
+            with self.subTest(position=position):
+                res = self.patch({"position": position, "reason": "x"})
+                self.assertEqual(res.status_code, 400)
+
+    def test_rejects_non_boolean_consume_cell(self):
+        from apps.board.models import TeamBoardState
+
+        self.auth("root")
+        TeamBoardState.objects.create(team=self.team, position=self.start)
+        res = self.patch({"position": 7, "consume_cell": "yes", "reason": "x"})
+        self.assertEqual(res.status_code, 400)
+
+    def test_requires_reason(self):
+        from apps.board.models import TeamBoardState
+
+        self.auth("root")
+        TeamBoardState.objects.create(team=self.team, position=self.start)
+        for reason in [None, "", "   "]:
+            with self.subTest(reason=reason):
+                body = {"position": 7}
+                if reason is not None:
+                    body["reason"] = reason
+                self.assertEqual(self.patch(body).status_code, 400)
+
+    def test_rejects_too_long_reason(self):
+        from apps.board.models import TeamBoardState
+
+        self.auth("root")
+        TeamBoardState.objects.create(team=self.team, position=self.start)
+        res = self.patch({"position": 7, "reason": "가" * 501})
+        self.assertEqual(res.status_code, 400)
+
+    def test_unknown_team(self):
+        self.auth("root")
+        res = self.patch({"position": 7, "reason": "x"}, team_id=uuid.uuid4())
+        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.data["code"], "TEAM_NOT_FOUND")
+
+    def test_requires_admin(self):
+        self.auth("player")
+        res = self.patch({"position": 7, "reason": "x"})
+        self.assertEqual(res.status_code, 403)
+
+    def test_requires_token(self):
+        res = self.patch({"position": 7, "reason": "x"})
+        self.assertEqual(res.status_code, 401)
+
+
+class AdminBoardCellStatusTests(AdminBoardTestBase):
+    def url(self, cell_index=2, team_id=None):
+        team = team_id or self.team.team_id
+        return f"/api/v1/admin/teams/{team}/board/cells/{cell_index}"
+
+    def patch(self, body, cell_index=2, team_id=None):
+        return self.client.patch(self.url(cell_index, team_id), body, format="json")
+
+    def test_marks_unvisited_cell_as_consumed(self):
+        from apps.board.models import TeamBoardState, TeamCellConsumption
+
+        self.auth("root")
+        TeamBoardState.objects.create(team=self.team, position=self.start)
+
+        res = self.patch({"status": "CONSUMED", "reason": "도착 판정 누락 보정"})
+
+        self.assertEqual(res.status_code, 200)
+        data = res.data["data"]
+        self.assertEqual(data["cell_index"], 2)
+        self.assertEqual(data["previous_status"], "UNVISITED")
+        self.assertEqual(data["status"], "CONSUMED")
+        self.assertEqual(data["changed_by"], "root")
+        self.assertTrue(
+            TeamCellConsumption.objects.filter(team=self.team, cell=2).exists()
+        )
+
+    def test_marks_opened_cell_as_cleared(self):
+        self.auth("root")
+        challenge = self.open_challenge_on_cell()
+
+        res = self.patch({"status": "CLEARED", "reason": "인스턴스 장애로 판정 누락"})
+
+        self.assertEqual(res.data["data"]["previous_status"], "OPENED")
+        self.assertEqual(res.data["data"]["status"], "CLEARED")
+        access = TeamChallengeAccess.objects.get(team=self.team, challenge=challenge)
+        self.assertEqual(access.status, TeamChallengeAccess.Status.CLEARED)
+        self.assertIsNotNone(access.cleared_at)
+
+    def test_reverts_cleared_cell_back_to_opened(self):
+        self.auth("root")
+        self.open_challenge_on_cell()
+        self.patch({"status": "CLEARED", "reason": "보정"})
+
+        res = self.patch({"status": "OPENED", "reason": "오판정 취소"})
+
+        self.assertEqual(res.data["data"]["previous_status"], "CLEARED")
+        access = TeamChallengeAccess.objects.get(team=self.team)
+        self.assertEqual(access.status, TeamChallengeAccess.Status.OPENED)
+        self.assertIsNone(access.cleared_at)
+
+    def test_unvisited_clears_progress_and_allows_reopening(self):
+        """되돌린 칸에서는 문제를 다시 열 수 있어야 한다."""
+        from apps.board.models import TeamCellCandidate, TeamCellConsumption
+        from apps.board.services import (
+            get_current_cell_candidates,
+            open_current_cell_challenge,
+        )
+
+        self.auth("root")
+        challenge = self.open_challenge_on_cell()
+
+        res = self.patch({"status": "UNVISITED", "reason": "잘못 열린 문제 취소"})
+
+        self.assertEqual(res.data["data"]["previous_status"], "OPENED")
+        self.assertEqual(res.data["data"]["status"], "UNVISITED")
+        self.assertFalse(TeamChallengeAccess.objects.filter(team=self.team).exists())
+        self.assertFalse(
+            TeamCellConsumption.objects.filter(team=self.team, cell=2).exists()
+        )
+        self.assertFalse(
+            TeamCellCandidate.objects.filter(team=self.team, cell=2).exists()
+        )
+
+        get_current_cell_candidates(self.team)
+        open_current_cell_challenge(self.team, challenge.challenge_id)
+        self.assertTrue(TeamChallengeAccess.objects.filter(team=self.team).exists())
+
+    def test_unvisited_clears_active_challenge_link(self):
+        from apps.board.models import TeamBoardState
+
+        self.auth("root")
+        self.open_challenge_on_cell()
+        self.assertIsNotNone(
+            TeamBoardState.objects.get(team=self.team).active_challenge_access_id
+        )
+
+        self.patch({"status": "UNVISITED", "reason": "취소"})
+
+        self.assertIsNone(
+            TeamBoardState.objects.get(team=self.team).active_challenge_access_id
+        )
+
+    def test_consumed_drops_challenge_access(self):
+        from apps.board.models import TeamCellConsumption
+
+        self.auth("root")
+        self.open_challenge_on_cell()
+
+        res = self.patch({"status": "CONSUMED", "reason": "문제 배정만 취소"})
+
+        self.assertEqual(res.data["data"]["status"], "CONSUMED")
+        self.assertFalse(TeamChallengeAccess.objects.filter(team=self.team).exists())
+        self.assertTrue(
+            TeamCellConsumption.objects.filter(team=self.team, cell=2).exists()
+        )
+
+    def test_rejects_cleared_without_opened_challenge(self):
+        from apps.board.models import TeamBoardState
+
+        self.auth("root")
+        TeamBoardState.objects.create(team=self.team, position=self.start)
+        for status in ["OPENED", "CLEARED"]:
+            with self.subTest(status=status):
+                res = self.patch({"status": status, "reason": "x"})
+                self.assertEqual(res.status_code, 400)
+                self.assertEqual(res.data["code"], "INVALID_REQUEST")
+
+    def test_does_not_touch_team_score(self):
+        self.auth("root")
+        self.open_challenge_on_cell()
+        before = Team.objects.get(pk=self.team.pk).team_score
+
+        self.patch({"status": "CLEARED", "reason": "보정"})
+
+        self.assertEqual(Team.objects.get(pk=self.team.pk).team_score, before)
+
+    def test_rejects_unknown_status(self):
+        from apps.board.models import TeamBoardState
+
+        self.auth("root")
+        TeamBoardState.objects.create(team=self.team, position=self.start)
+        for status in ["SOLVED", "", None, 3]:
+            with self.subTest(status=status):
+                res = self.patch({"status": status, "reason": "x"})
+                self.assertEqual(res.status_code, 400)
+
+    def test_rejects_cell_index_outside_board(self):
+        """음수와 문자도 404 가 아니라 400 으로 돌려준다."""
+        from apps.board.models import TeamBoardState
+
+        self.auth("root")
+        TeamBoardState.objects.create(team=self.team, position=self.start)
+        for cell_index in [0, 37, -1, "abc"]:
+            with self.subTest(cell_index=cell_index):
+                res = self.patch(
+                    {"status": "CONSUMED", "reason": "x"}, cell_index=cell_index
+                )
+                self.assertEqual(res.status_code, 400)
+                self.assertEqual(res.data["code"], "INVALID_REQUEST")
+
+    def test_requires_reason(self):
+        from apps.board.models import TeamBoardState
+
+        self.auth("root")
+        TeamBoardState.objects.create(team=self.team, position=self.start)
+        self.assertEqual(self.patch({"status": "CONSUMED"}).status_code, 400)
+
+    def test_rejects_non_object_body(self):
+        from apps.board.models import TeamBoardState
+
+        self.auth("root")
+        TeamBoardState.objects.create(team=self.team, position=self.start)
+        for body in [[], "x", 3]:
+            with self.subTest(body=body):
+                res = self.client.patch(self.url(), body, format="json")
+                self.assertEqual(res.status_code, 400)
+                self.assertEqual(res.data["code"], "INVALID_REQUEST")
+
+    def test_rejects_loose_cell_index_spellings(self):
+        """같은 칸에 여러 별칭이 생기면 감사 기준이 흔들린다."""
+        from apps.board.models import TeamBoardState
+
+        self.auth("root")
+        TeamBoardState.objects.create(team=self.team, position=self.start)
+        for cell_index in ["+7", "1_0", "７"]:
+            with self.subTest(cell_index=cell_index):
+                res = self.patch(
+                    {"status": "CONSUMED", "reason": "x"}, cell_index=cell_index
+                )
+                self.assertEqual(res.status_code, 400)
+                self.assertEqual(res.data["code"], "INVALID_REQUEST")
+
+    def test_reports_opened_cell_that_was_never_consumed(self):
+        """소모 기록 없이 문제만 열린 칸을 UNVISITED 로 보고하면 삭제 대상이 감춰진다."""
+        from apps.board.models import BoardChallenge, TeamBoardState
+        from apps.board.services import (
+            get_current_cell_candidates,
+            open_current_cell_challenge,
+        )
+
+        self.auth("root")
+        challenge = Challenge.objects.create(
+            title="보드2", category="WEB", difficulty="EASY",
+            score=100, flag_hash="x", is_published=True,
+        )
+        BoardChallenge.objects.create(challenge=challenge, challenge_number=2)
+        TeamBoardState.objects.create(team=self.team, position=self.challenge_cell)
+        get_current_cell_candidates(self.team)
+        open_current_cell_challenge(self.team, challenge.challenge_id)
+
+        res = self.patch({"status": "UNVISITED", "reason": "잘못 열린 문제 취소"})
+
+        self.assertEqual(res.data["data"]["previous_status"], "OPENED")
+        self.assertFalse(TeamChallengeAccess.objects.filter(team=self.team).exists())
+
+    def test_unknown_team(self):
+        self.auth("root")
+        res = self.patch({"status": "CONSUMED", "reason": "x"}, team_id=uuid.uuid4())
+        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.data["code"], "TEAM_NOT_FOUND")
+
+    def test_requires_admin(self):
+        self.auth("player")
+        res = self.patch({"status": "CONSUMED", "reason": "x"})
+        self.assertEqual(res.status_code, 403)
+
+    def test_requires_token(self):
+        res = self.patch({"status": "CONSUMED", "reason": "x"})
+        self.assertEqual(res.status_code, 401)
