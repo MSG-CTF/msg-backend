@@ -193,7 +193,7 @@ def account_create(request):
 
     team_id = request.data.get("team_id")
     team_name = request.data.get("team_name")
-    if team_id and team_name:
+    if "team_id" in request.data and "team_name" in request.data:
         raise InvalidRequest("team_id 와 team_name 은 함께 보낼 수 없습니다")
 
     team = None

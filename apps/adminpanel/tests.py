@@ -839,6 +839,20 @@ class AdminTests(TestCase):
         )
         self.assertEqual(res.status_code, 400)
 
+    def test_account_create_team_id_with_blank_team_name(self):
+        """team_name 이 비어 있어도 두 필드를 함께 보내면 거절한다."""
+        self.auth("root")
+        for name in ["", "   ", None]:
+            with self.subTest(name=name):
+                res = self.client.post(
+                    "/api/v1/admin/accounts",
+                    {"login_id": "blankpair", "password": "pw12345678", "nickname": "x",
+                     "team_id": str(self.team.team_id), "team_name": name},
+                    format="json",
+                )
+                self.assertEqual(res.status_code, 400)
+                self.assertFalse(User.objects.filter(login_id="blankpair").exists())
+
     def test_account_create_blank_team_name(self):
         self.auth("root")
         for name in ["", "   "]:
