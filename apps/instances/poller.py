@@ -25,7 +25,7 @@ BUNDLE_FILE_NAME = "artifact-v2.json"
 POLLER_CREATED_BY = "release-poller"
 
 
-def github_request(path, token=None, timeout=10):
+def github_request(path, token=None, timeout=10, max_bytes=None):
     # 공급망 artifact 조회용 GitHub API 호출. 응답 본문 bytes를 돌려준다
     base = settings.RELEASE_POLL_API_BASE.rstrip("/")
     if not base.startswith(("http://", "https://")):
@@ -40,11 +40,14 @@ def github_request(path, token=None, timeout=10):
     request = Request(base + path, headers=headers)
     # 위에서 scheme을 http와 https로 제한한 운영 설정만 사용한다
     with urlopen(request, timeout=timeout) as response:  # nosec B310
-        return response.read()
+        body = response.read() if max_bytes is None else response.read(max_bytes + 1)
+    if max_bytes is not None and len(body) > max_bytes:
+        raise ReleaseValidationError("GitHub artifact 크기가 허용 범위를 초과합니다")
+    return body
 
 
-def list_bundle_artifacts(token=None):
-    # 문제 저장소의 Actions artifact 전체에서 publish bundle만 최신순으로 돌려준다
+def list_artifacts_by_suffix(suffix, token=None):
+    # 문제 저장소의 Actions artifact 전체에서 지정한 bundle만 최신순으로 돌려준다
     page_size = min(max(settings.RELEASE_POLL_LIMIT, 1), 100)
     page = 1
     bundles = []
@@ -66,7 +69,7 @@ def list_bundle_artifacts(token=None):
         bundles.extend(
             entry
             for entry in artifacts
-            if entry.get("name", "").endswith(BUNDLE_NAME_SUFFIX)
+            if entry.get("name", "").endswith(suffix)
             and not entry.get("expired")
         )
 
@@ -82,6 +85,10 @@ def list_bundle_artifacts(token=None):
         page += 1
 
     return bundles
+
+
+def list_bundle_artifacts(token=None):
+    return list_artifacts_by_suffix(BUNDLE_NAME_SUFFIX, token=token)
 
 
 def workflow_run_id(artifact):
