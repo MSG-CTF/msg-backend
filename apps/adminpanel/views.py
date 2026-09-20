@@ -4,6 +4,7 @@ from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.db.models import Count, Prefetch, Q, Sum
 from django.utils import timezone
+from datetime import datetime
 
 from rest_framework.decorators import api_view, permission_classes
 
@@ -23,6 +24,7 @@ from apps.board.services import (
     get_or_create_board_state,
 )
 from apps.timer.models import Contest
+from .models import AdminEvent, AdminSetting
 
 from apps.teams.models import (
     MileageHistory,
@@ -46,6 +48,7 @@ from .exceptions import (
     TeamNotFound,
     TeamAlreadyHasLeader,
     TeamNameTaken,
+    ContestAlreadyStarted,
 )
 
 from apps.instances.models import (
@@ -79,6 +82,18 @@ MILEAGE_TYPES = set(MileageType.values)
 
 DICE_ADJUST_MIN = -20
 DICE_ADJUST_MAX = 20
+
+
+SETTING_SPECS = {
+    "board.dice_rolls_per_reset": (1, 20, 3),
+    "board.dice_reset_interval_minutes": (1, 1440, 15),
+    "board.solve_deadline_minutes": (1, 180, 15),
+    "flag.max_attempts": (1, 10, 3),
+    "flag.lock_seconds": (1, 3600, 30),
+}
+SETTINGS_UPDATED_KEY = "_meta.updated"
+EVENT_TYPES = set(AdminEvent.EventType.values)
+
 
 def _page_number(raw, default, maximum=None):
     if raw in (None, ""):
@@ -1159,3 +1174,165 @@ def board_dice(request, team_id):
         },
         message="주사위 횟수가 조정되었습니다",
     )
+
+
+def _parse_iso_utc(raw, field):
+    if not isinstance(raw, str):
+        raise InvalidRequest(f"{field} 는 ISO-8601 문자열이어야 합니다")
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        raise InvalidRequest(f"{field} 형식이 올바르지 않습니다")
+    if timezone.is_naive(parsed):
+        raise InvalidRequest(f"{field} 는 UTC 오프셋을 포함해야 합니다")
+    return parsed
+
+
+def _settings_payload():
+    stored = {row.key: row for row in AdminSetting.objects.all()}
+    grouped = {}
+    for key, (_, _, default) in SETTING_SPECS.items():
+        group, name = key.split(".", 1)
+        grouped.setdefault(group, {})[name] = stored[key].value if key in stored else default
+
+    contest = Contest.objects.filter(is_active=True).first()
+    if contest is None:
+        contest_data = {"status": "BEFORE", "started_at": None, "ends_at": None}
+    else:
+        contest_data = {
+            "status": contest.snapshot()["status"],
+            "started_at": contest.start_time,
+            "ends_at": contest.end_time,
+        }
+
+    marker = stored.get(SETTINGS_UPDATED_KEY)
+    return {
+        "contest": contest_data,
+        "board": grouped.get("board", {}),
+        "flag": grouped.get("flag", {}),
+        "updated_at": marker.updated_at if marker else None,
+        "updated_by": marker.updated_by if marker else None,
+    }
+
+
+@api_view(["GET", "PATCH"])
+@permission_classes([IsAdmin])
+def settings_view(request):
+    if request.method == "GET":
+        return ok(_settings_payload())
+
+    body = request.data
+    if not isinstance(body, dict) or not body:
+        raise InvalidRequest("변경할 설정이 없습니다")
+
+    unknown_groups = set(body) - {"board", "flag", "contest"}
+    if unknown_groups:
+        raise InvalidRequest(f"알 수 없는 항목입니다: {', '.join(sorted(unknown_groups))}")
+
+    changes = {}
+    for group in ("board", "flag"):
+        if group not in body:
+            continue
+        values = body[group]
+        if not isinstance(values, dict):
+            raise InvalidRequest(f"{group} 은 객체여야 합니다")
+        for name, value in values.items():
+            key = f"{group}.{name}"
+            if key not in SETTING_SPECS:
+                raise InvalidRequest(f"알 수 없는 설정입니다: {key}")
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise InvalidRequest(f"{key} 는 정수여야 합니다")
+            low, high, _ = SETTING_SPECS[key]
+            if not (low <= value <= high):
+                raise InvalidRequest(f"{key} 는 {low} ~ {high} 범위여야 합니다")
+            changes[key] = value
+
+    contest_body = None
+    if "contest" in body:
+        contest_body = body["contest"]
+        if not isinstance(contest_body, dict):
+            raise InvalidRequest("contest 는 객체여야 합니다")
+
+    with transaction.atomic():
+        if contest_body:
+            unknown = set(contest_body) - {"started_at", "ends_at"}
+            if unknown:
+                raise InvalidRequest(f"알 수 없는 설정입니다: {', '.join(sorted(unknown))}")
+
+            contest = Contest.objects.select_for_update().filter(is_active=True).first()
+            if contest is None:
+                raise InvalidRequest("활성화된 대회가 없습니다")
+
+            now = timezone.now()
+            started = contest.start_time <= now
+            if "started_at" in contest_body:
+                new_start = _parse_iso_utc(contest_body["started_at"], "started_at")
+                if started and new_start != contest.start_time:
+                    raise ContestAlreadyStarted()
+                contest.start_time = new_start
+            if "ends_at" in contest_body:
+                contest.end_time = _parse_iso_utc(contest_body["ends_at"], "ends_at")
+
+            if contest.end_time <= contest.start_time:
+                raise InvalidRequest("ends_at 은 started_at 보다 뒤여야 합니다")
+            contest.save(update_fields=["start_time", "end_time"])
+
+        # 항목 순서가 다른 동시 요청이 서로의 잠금을 기다리지 않도록 항상 같은 순서로 저장한다.
+        for key in sorted(changes):
+            AdminSetting.objects.update_or_create(
+                key=key,
+                defaults={"value": changes[key], "updated_by": request.user.login_id},
+            )
+
+        AdminSetting.objects.update_or_create(
+            key=SETTINGS_UPDATED_KEY,
+            defaults={"value": 0, "updated_by": request.user.login_id},
+        )
+
+    return ok(_settings_payload(), message="설정이 변경되었습니다")
+
+
+@api_view(["GET"])
+@permission_classes([IsAdmin])
+def event_list(request):
+    queryset = AdminEvent.objects.select_related("team", "challenge")
+
+    etype = request.query_params.get("type")
+    if etype:
+        if etype not in EVENT_TYPES:
+            return fail("INVALID_REQUEST", "이벤트 타입이 올바르지 않습니다.", 400)
+        queryset = queryset.filter(type=etype)
+
+    team_id = request.query_params.get("team_id")
+    if team_id:
+        try:
+            uuid.UUID(str(team_id))
+        except (ValueError, TypeError, AttributeError):
+            raise InvalidRequest("team_id 형식이 올바르지 않습니다")
+        queryset = queryset.filter(team_id=team_id)
+
+    page = _page_number(request.query_params.get("page"), 1, MAX_PAGE)
+    size = min(_page_number(request.query_params.get("size"), 50), MAX_PAGE_SIZE)
+
+    total_count = queryset.count()
+    offset = (page - 1) * size
+    rows = queryset[offset : offset + size]
+
+    events = [
+        {
+            "event_id": str(e.event_id),
+            "type": e.type,
+            "severity": e.severity,
+            "message": e.message,
+            "team_id": str(e.team_id) if e.team_id else None,
+            "team_name": e.team.team_name if e.team_id else None,
+            "challenge_id": str(e.challenge_id) if e.challenge_id else None,
+            "challenge_title": e.challenge.title if e.challenge_id else None,
+            "instance_id": str(e.instance_id) if e.instance_id else None,
+            "actor": e.actor,
+            "created_at": e.created_at,
+        }
+        for e in rows
+    ]
+
+    return ok({"events": events, "total_count": total_count, "page": page, "size": size})
