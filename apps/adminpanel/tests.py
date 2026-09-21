@@ -2453,6 +2453,42 @@ class AdminEventRecordingTests(TestCase):
         self.assertEqual(res.status_code, 400)
         self.assertEqual(self.events(), [])
 
+    # ---- 주사위 ----
+
+    def test_dice_adjust_records_applied_amount(self):
+        """상한에 잘린 실제 지급량이 남아야 요청량과 헷갈리지 않는다."""
+        from apps.adminpanel.models import AdminEvent
+        from apps.board.models import Cell, TeamBoardState
+
+        cell = Cell.objects.create(cell_index=1, type="START", name="출발")
+        TeamBoardState.objects.create(team=self.team, position=cell, dice_rolls_left=2)
+
+        res = self.client.post(
+            f"/api/v1/admin/teams/{self.team.team_id}/board/dice",
+            {"amount": 5, "reason": "주사위 소실 보정"}, format="json",
+        )
+
+        self.assertEqual(res.status_code, 200)
+        event = self.only_event(AdminEvent.EventType.DICE_ADJUSTED)
+        self.assertEqual(event.team_id, self.team.team_id)
+        self.assertIn("+1", event.message)
+        self.assertIn("(2 → 3)", event.message)
+        self.assertIn("주사위 소실 보정", event.message)
+
+    def test_failed_dice_adjust_leaves_no_event(self):
+        from apps.board.models import Cell, TeamBoardState
+
+        cell = Cell.objects.create(cell_index=1, type="START", name="출발")
+        TeamBoardState.objects.create(team=self.team, position=cell, dice_rolls_left=1)
+
+        res = self.client.post(
+            f"/api/v1/admin/teams/{self.team.team_id}/board/dice",
+            {"amount": -5, "reason": "회수"}, format="json",
+        )
+
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(self.events(), [])
+
     # ---- 공통 ----
 
     def test_long_reason_is_truncated_to_message_limit(self):

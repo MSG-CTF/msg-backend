@@ -1228,6 +1228,12 @@ def board_dice(request, team_id):
         state.save(update_fields=["dice_rolls_left", "updated_at"])
         # 조정 뒤 충전 시계를 보드와 같은 규칙으로 다시 맞춘다.
         apply_pending_dice_recharge(state)
+        _record_event(
+            AdminEvent.EventType.DICE_ADJUSTED,
+            f"주사위 {applied:+d} ({previous} → {state.dice_rolls_left}): {reason}",
+            request.user.login_id,
+            team=team,
+        )
 
     return ok(
         {
