@@ -77,6 +77,7 @@ from apps.instances.services import (
     isoformat_z,
     scheduler_auth_header,
 )
+from .resource_broker import fetch_resource_targets
 from .serializers import ChallengeCreateSerializer
 
 SORT_FIELDS = {
@@ -1648,4 +1649,75 @@ def board_cell_status(request, team_id, cell_index):
             "changed_by": request.user.login_id,
         },
         message="칸 상태가 변경되었습니다",
+    )
+
+
+def _usage_percent(usage, capacity, key):
+    """브로커의 null 은 미수집이다. 0 으로 바꾸면 안 되므로 그대로 null 을 돌려준다."""
+    used = (usage or {}).get(key)
+    total = (capacity or {}).get(key)
+    if used is None or not total:
+        return None
+    return round(used * 100 / total)
+
+
+def _node_from_target(target):
+    # RUNNING 은 전원 상태일 뿐이다. 배치 가능 여부는 세 플래그까지 봐야 한다.
+    healthy = (
+        target.get("status") == "RUNNING"
+        and target.get("enabled")
+        and target.get("account_enabled")
+        and target.get("runtime_ready")
+    )
+    usage = target.get("runtime_usage")
+    capacity = target.get("provider_capacity")
+    return {
+        "node_id": target.get("resource_target_id"),
+        "node_name": target.get("name"),
+        "status": "HEALTHY" if healthy else "DEGRADED",
+        "running_instances": (target.get("container_storage_usage") or {}).get(
+            "total_container_count"
+        ),
+        "cpu_usage_percent": _usage_percent(usage, capacity, "cpu_millicores"),
+        "memory_usage_percent": _usage_percent(usage, capacity, "memory_mib"),
+    }
+
+
+@api_view(["GET"])
+@permission_classes([IsAdmin])
+def admin_resources(request):
+    try:
+        generated_at, targets = fetch_resource_targets()
+    except SchedulerError as error:
+        return fail(error.code, error.message, error.status_code)
+    if not targets:
+        return ok(None, message="수집된 리소스 정보가 없습니다")
+
+    accounts = {}
+    for target in targets:
+        account = accounts.setdefault(
+            target.get("account_id"),
+            {
+                "account_id": target.get("account_id"),
+                "provider": target.get("provider"),
+                "scope_id": target.get("scope_id"),
+                "nodes": [],
+            },
+        )
+        account["nodes"].append(_node_from_target(target))
+
+    for account in accounts.values():
+        nodes = account["nodes"]
+        counts = [n["running_instances"] for n in nodes if n["running_instances"] is not None]
+        account["running_instances"] = sum(counts) if counts else None
+        account["status"] = (
+            "HEALTHY" if all(n["status"] == "HEALTHY" for n in nodes) else "DEGRADED"
+        )
+
+    return ok(
+        {
+            "accounts": list(accounts.values()),
+            "total_count": len(accounts),
+            "collected_at": generated_at,
+        }
     )
