@@ -2286,3 +2286,378 @@ class AdminTeamLockCoverageTests(TestCase):
         self.assert_team_no_key_lock(queries)
         self.team.refresh_from_db()
         self.assertEqual(self.team.mileage, 230)
+
+
+@override_settings(CACHES=LOCMEM)
+class AdminEventRecordingTests(TestCase):
+    """관리자 조작이 admin_events 에 남는지, 실패한 조작은 남지 않는지 확인한다."""
+
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.team = Team.objects.create(team_name="감자는외로워", team_score=0, mileage=200)
+        self.admin = User.objects.create_user(
+            login_id="root", password="pw1234", nickname="운영자",
+            team=None, role=Role.ADMIN,
+        )
+        self.player = User.objects.create_user(
+            login_id="player", password="pw1234", nickname="참가자", team=self.team
+        )
+        self.challenge = Challenge.objects.create(
+            title="웹 문제", category="WEB", difficulty="EASY",
+            score=500, flag_hash="x", is_published=True,
+        )
+        self.auth("root")
+
+    def auth(self, login_id):
+        res = self.client.post(
+            "/api/v1/auth/login",
+            {"login_id": login_id, "password": "pw1234"}, format="json",
+        )
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {res.data['data']['access_token']}"
+        )
+
+    def events(self, event_type=None):
+        from apps.adminpanel.models import AdminEvent
+        queryset = AdminEvent.objects.all()
+        if event_type:
+            queryset = queryset.filter(type=event_type)
+        return list(queryset)
+
+    def only_event(self, event_type):
+        rows = self.events(event_type)
+        self.assertEqual(len(rows), 1)
+        return rows[0]
+
+    def mileage(self, body, key=None):
+        return self.client.post(
+            f"/api/v1/admin/teams/{self.team.team_id}/mileage",
+            body, format="json",
+            HTTP_IDEMPOTENCY_KEY=key or uuid.uuid4().hex,
+        )
+
+    def purchase(self, amount=30):
+        PaymentToken.objects.create(
+            team=self.team, token_hash=hash_token("tok-p"),
+            status=PaymentTokenStatus.ACTIVE,
+            expires_at=timezone.now() + timedelta(hours=1),
+        )
+        res = self.client.post(
+            "/api/v1/admin/payment/checkout",
+            {"payment_token": "tok-p", "amount": amount, "item_name": "굿즈"},
+            format="json",
+        )
+        return res.data["data"]["history_id"]
+
+    def instance(self, status=InstanceStatus.RUNNING):
+        return Instance.objects.create(
+            user=self.player, team=self.team, challenge=self.challenge, status=status,
+        )
+
+    # ---- 팀 제재 ----
+
+    def test_ban_records_warning_event(self):
+        from apps.adminpanel.models import AdminEvent
+
+        res = self.client.post(
+            f"/api/v1/admin/teams/{self.team.team_id}/ban",
+            {"ban_reason": "플래그 공유"}, format="json",
+        )
+
+        self.assertEqual(res.status_code, 200)
+        event = self.only_event(AdminEvent.EventType.TEAM_BANNED)
+        self.assertEqual(event.severity, AdminEvent.Severity.WARNING)
+        self.assertEqual(event.team_id, self.team.team_id)
+        self.assertEqual(event.actor, "root")
+        self.assertIn("플래그 공유", event.message)
+
+    def test_unban_records_event_with_previous_reason(self):
+        from apps.adminpanel.models import AdminEvent
+
+        url = f"/api/v1/admin/teams/{self.team.team_id}/ban"
+        self.client.post(url, {"ban_reason": "플래그 공유"}, format="json")
+
+        res = self.client.delete(url)
+
+        self.assertEqual(res.status_code, 200)
+        event = self.only_event(AdminEvent.EventType.TEAM_UNBANNED)
+        self.assertEqual(event.team_id, self.team.team_id)
+        self.assertIn("플래그 공유", event.message)
+
+    def test_failed_ban_leaves_no_event(self):
+        """이미 정지된 팀을 다시 정지하면 409 이고 조작과 함께 이벤트도 롤백된다."""
+        url = f"/api/v1/admin/teams/{self.team.team_id}/ban"
+        self.client.post(url, {"ban_reason": "첫 정지"}, format="json")
+
+        res = self.client.post(url, {"ban_reason": "두 번째"}, format="json")
+
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(len(self.events()), 1)
+
+    # ---- 마일리지 ----
+
+    def test_mileage_records_once_across_idempotent_retry(self):
+        """같은 키로 재시도하면 캐시 응답이 나가고 이벤트는 한 건이어야 한다."""
+        from apps.adminpanel.models import AdminEvent
+
+        key = uuid.uuid4().hex
+        first = self.mileage({"amount": 50, "reason": "이벤트 보상"}, key=key)
+        second = self.mileage({"amount": 50, "reason": "이벤트 보상"}, key=key)
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        event = self.only_event(AdminEvent.EventType.MILEAGE_ADJUSTED)
+        self.assertEqual(event.team_id, self.team.team_id)
+        self.assertIn("+50", event.message)
+        self.assertIn("이벤트 보상", event.message)
+
+    def test_failed_mileage_leaves_no_event(self):
+        res = self.mileage({"amount": -999, "reason": "회수"})
+
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(self.events(), [])
+
+    # ---- 환불 ----
+
+    def test_refund_records_warning_event(self):
+        from apps.adminpanel.models import AdminEvent
+
+        hid = self.purchase(amount=30)
+        res = self.client.delete(f"/api/v1/admin/payment/{hid}/refund")
+
+        self.assertEqual(res.status_code, 200)
+        event = self.only_event(AdminEvent.EventType.PAYMENT_REFUNDED)
+        self.assertEqual(event.severity, AdminEvent.Severity.WARNING)
+        self.assertEqual(event.team_id, self.team.team_id)
+        self.assertIn("30", event.message)
+        self.assertIn(str(hid), event.message)
+
+    # ---- 문제 공개 ----
+
+    def test_visibility_change_records_event_with_challenge(self):
+        from apps.adminpanel.models import AdminEvent
+
+        res = self.client.patch(
+            f"/api/v1/admin/challenges/{self.challenge.challenge_id}/visibility",
+            {"is_published": False, "reason": "출제 오류"}, format="json",
+        )
+
+        self.assertEqual(res.status_code, 200)
+        event = self.only_event(AdminEvent.EventType.CHALLENGE_VISIBILITY_CHANGED)
+        self.assertEqual(event.severity, AdminEvent.Severity.WARNING)
+        self.assertEqual(event.challenge_id, self.challenge.challenge_id)
+        self.assertIsNone(event.team_id)
+        self.assertIn("비공개", event.message)
+        self.assertIn("출제 오류", event.message)
+
+    # ---- 인스턴스 ----
+
+    @patch("apps.adminpanel.views.call_scheduler_delete")
+    def test_force_delete_records_event(self, mock_delete):
+        from apps.adminpanel.models import AdminEvent
+
+        mock_delete.return_value = None
+        inst = self.instance()
+
+        res = self.client.delete(f"/api/v1/admin/instances/{inst.instance_id}")
+
+        self.assertEqual(res.status_code, 202)
+        event = self.only_event(AdminEvent.EventType.INSTANCE_FORCED)
+        self.assertEqual(event.severity, AdminEvent.Severity.WARNING)
+        self.assertEqual(event.instance_id, inst.instance_id)
+        self.assertEqual(event.team_id, self.team.team_id)
+        self.assertEqual(event.challenge_id, self.challenge.challenge_id)
+
+    @patch("apps.adminpanel.views.call_scheduler_delete")
+    def test_force_delete_scheduler_failure_leaves_no_event(self, mock_delete):
+        """스케줄러 실패는 예외가 아니라 fail 반환이라 트랜잭션이 커밋된다. 그래도 이벤트는 없어야 한다."""
+        from apps.instances.services import SchedulerError
+
+        mock_delete.side_effect = SchedulerError(
+            "SCHEDULER_UNAVAILABLE", "스케줄러에 연결할 수 없습니다", 503
+        )
+        inst = self.instance()
+
+        res = self.client.delete(f"/api/v1/admin/instances/{inst.instance_id}")
+
+        self.assertEqual(res.status_code, 503)
+        self.assertEqual(self.events(), [])
+
+    @patch("apps.adminpanel.views.call_scheduler_reset")
+    def test_force_reset_records_new_instance_id(self, mock_reset):
+        from apps.adminpanel.models import AdminEvent
+
+        old = self.instance()
+        new_id = uuid.uuid4()
+        mock_reset.return_value = {"instance_id": str(new_id), "status": "RESETTING"}
+
+        res = self.client.post(f"/api/v1/admin/instances/{old.instance_id}/reset")
+
+        self.assertEqual(res.status_code, 202)
+        event = self.only_event(AdminEvent.EventType.INSTANCE_FORCED)
+        self.assertEqual(event.instance_id, new_id)
+        self.assertIn(str(old.instance_id), event.message)
+
+    # ---- 설정 ----
+
+    def test_settings_change_records_changed_keys(self):
+        from apps.adminpanel.models import AdminEvent
+
+        res = self.client.patch(
+            "/api/v1/admin/settings",
+            {"board": {"dice_rolls_per_reset": 4}, "flag": {"max_attempts": 5}},
+            format="json",
+        )
+
+        self.assertEqual(res.status_code, 200)
+        event = self.only_event(AdminEvent.EventType.SETTINGS_CHANGED)
+        self.assertEqual(event.severity, AdminEvent.Severity.INFO)
+        self.assertIsNone(event.team_id)
+        self.assertIn("board.dice_rolls_per_reset=4", event.message)
+        self.assertIn("flag.max_attempts=5", event.message)
+
+    @patch("apps.adminpanel.views.call_scheduler_reset")
+    def test_force_reset_scheduler_failure_leaves_no_event(self, mock_reset):
+        from apps.instances.services import SchedulerError
+
+        mock_reset.side_effect = SchedulerError(
+            "SCHEDULER_UNAVAILABLE", "스케줄러에 연결할 수 없습니다", 503
+        )
+        old = self.instance()
+
+        res = self.client.post(f"/api/v1/admin/instances/{old.instance_id}/reset")
+
+        self.assertEqual(res.status_code, 503)
+        self.assertEqual(self.events(), [])
+
+    def test_failed_unban_leaves_no_event(self):
+        res = self.client.delete(f"/api/v1/admin/teams/{self.team.team_id}/ban")
+
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(self.events(), [])
+
+    def test_repeated_refund_leaves_single_event(self):
+        hid = self.purchase(amount=30)
+        self.client.delete(f"/api/v1/admin/payment/{hid}/refund")
+
+        res = self.client.delete(f"/api/v1/admin/payment/{hid}/refund")
+
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(len(self.events()), 1)
+
+    def test_settings_contest_only_change_records_event(self):
+        from apps.adminpanel.models import AdminEvent
+        from apps.timer.models import Contest
+
+        now = timezone.now()
+        Contest.objects.create(
+            name="본선", is_active=True,
+            start_time=now - timedelta(hours=1), end_time=now + timedelta(hours=5),
+        )
+        ends_at = (now + timedelta(hours=8)).replace(microsecond=0)
+
+        res = self.client.patch(
+            "/api/v1/admin/settings",
+            {"contest": {"ends_at": ends_at.isoformat().replace("+00:00", "Z")}},
+            format="json",
+        )
+
+        self.assertEqual(res.status_code, 200)
+        event = self.only_event(AdminEvent.EventType.SETTINGS_CHANGED)
+        self.assertEqual(event.message, "설정 변경: contest.ends_at")
+
+    def test_settings_noop_body_leaves_no_event(self):
+        """빈 그룹만 보내면 200 이지만 바뀐 게 없으므로 이벤트도 없어야 한다."""
+        res = self.client.patch("/api/v1/admin/settings", {"board": {}}, format="json")
+
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(self.events(), [])
+
+    def test_settings_failure_inside_transaction_leaves_no_event(self):
+        """활성 대회가 없어 트랜잭션 안에서 거절되면 설정과 이벤트가 함께 롤백된다."""
+        res = self.client.patch(
+            "/api/v1/admin/settings",
+            {"board": {"dice_rolls_per_reset": 4}, "contest": {"ends_at": "2030-01-01T00:00:00Z"}},
+            format="json",
+        )
+
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(self.events(), [])
+
+    # ---- 공통 ----
+
+    def test_long_reason_is_preserved_in_event_list(self):
+        """API에서 허용한 500자 사유를 감사 기록에서도 온전히 조회할 수 있어야 한다."""
+        from apps.adminpanel.models import AdminEvent
+
+        reason = "가" * 490 + "사유의마지막열글자끝"
+        self.assertEqual(len(reason), 500)
+        res = self.client.post(
+            f"/api/v1/admin/teams/{self.team.team_id}/ban",
+            {"ban_reason": reason}, format="json",
+        )
+
+        self.assertEqual(res.status_code, 200)
+        event = self.only_event(AdminEvent.EventType.TEAM_BANNED)
+        self.assertEqual(event.message, f"팀 활동이 정지되었습니다: {reason}")
+        response = self.client.get("/api/v1/admin/events")
+        self.assertEqual(response.data["data"]["events"][0]["message"], event.message)
+
+    def test_unban_keeps_full_reason_after_team_reason_is_cleared(self):
+        from apps.adminpanel.models import AdminEvent
+
+        reason = "가" * 500
+        url = f"/api/v1/admin/teams/{self.team.team_id}/ban"
+        self.client.post(url, {"ban_reason": reason}, format="json")
+
+        response = self.client.delete(url)
+
+        self.assertEqual(response.status_code, 200)
+        self.team.refresh_from_db()
+        self.assertIsNone(self.team.ban_reason)
+        event = self.only_event(AdminEvent.EventType.TEAM_UNBANNED)
+        self.assertIn(reason, event.message)
+
+    def test_visibility_keeps_full_reason(self):
+        from apps.adminpanel.models import AdminEvent
+
+        reason = "가" * 500
+        response = self.client.patch(
+            f"/api/v1/admin/challenges/{self.challenge.pk}/visibility",
+            {"is_published": False, "reason": reason}, format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        event = self.only_event(AdminEvent.EventType.CHALLENGE_VISIBILITY_CHANGED)
+        self.assertTrue(event.message.endswith(reason))
+
+    def test_event_write_failure_rolls_back_ban(self):
+        from django.db import DatabaseError
+
+        with patch("apps.adminpanel.views._record_event", side_effect=DatabaseError("audit unavailable")):
+            response = self.client.post(
+                f"/api/v1/admin/teams/{self.team.team_id}/ban",
+                {"ban_reason": "운영 보정"}, format="json",
+            )
+
+        self.assertEqual(response.status_code, 500)
+        self.team.refresh_from_db()
+        self.assertFalse(self.team.is_banned)
+        self.assertEqual(self.events(), [])
+
+    def test_recorded_events_visible_in_event_list(self):
+        self.client.post(
+            f"/api/v1/admin/teams/{self.team.team_id}/ban",
+            {"ban_reason": "플래그 공유"}, format="json",
+        )
+        self.mileage({"amount": 10, "reason": "보상"})
+
+        res = self.client.get("/api/v1/admin/events")
+
+        self.assertEqual(res.status_code, 200)
+        rows = res.data["data"]["events"]
+        self.assertEqual(res.data["data"]["total_count"], 2)
+        self.assertEqual([r["type"] for r in rows], ["MILEAGE_ADJUSTED", "TEAM_BANNED"])
+        self.assertEqual(rows[1]["team_name"], "감자는외로워")
+        self.assertEqual(rows[1]["actor"], "root")
