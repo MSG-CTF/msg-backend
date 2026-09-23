@@ -3042,8 +3042,11 @@ class AdminBoardCellStatusTests(AdminBoardTestBase):
         self.assertIsNotNone(access.cleared_at)
 
     def test_reverts_cleared_cell_back_to_opened(self):
+        from apps.board.models import TeamBoardState
+
         self.auth("root")
         self.open_challenge_on_cell()
+        opened_at = TeamChallengeAccess.objects.get(team=self.team).opened_at
         self.patch({"status": "CLEARED", "reason": "보정"})
 
         res = self.patch({"status": "OPENED", "reason": "오판정 취소"})
@@ -3052,6 +3055,26 @@ class AdminBoardCellStatusTests(AdminBoardTestBase):
         access = TeamChallengeAccess.objects.get(team=self.team)
         self.assertEqual(access.status, TeamChallengeAccess.Status.OPENED)
         self.assertIsNone(access.cleared_at)
+        self.assertEqual(access.opened_at, opened_at)
+        self.assertEqual(
+            TeamBoardState.objects.get(team=self.team).active_challenge_access_id, access.pk,
+        )
+
+    def test_reopening_another_cell_does_not_make_it_active(self):
+        from apps.board.models import TeamBoardState
+
+        self.auth("root")
+        self.open_challenge_on_cell()
+        self.patch({"status": "CLEARED", "reason": "풀이 판정 보정"})
+        state = TeamBoardState.objects.get(team=self.team)
+        state.position = self.chance_cell
+        state.save(update_fields=["position"])
+
+        response = self.patch({"status": "OPENED", "reason": "이전 칸 판정 취소"})
+
+        self.assertEqual(response.status_code, 200)
+        state.refresh_from_db()
+        self.assertIsNone(state.active_challenge_access_id)
 
     def test_unvisited_clears_progress_and_allows_reopening(self):
         """되돌린 칸에서는 문제를 다시 열 수 있어야 한다."""
