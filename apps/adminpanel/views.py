@@ -1530,6 +1530,9 @@ def board_cell_status(request, team_id, cell_index):
             else:
                 access.status = TeamChallengeAccess.Status.OPENED
                 access.cleared_at = None
+                if state.position_id == cell.cell_index and state.active_challenge_access_id is None:
+                    state.active_challenge_access = access
+                    state.save(update_fields=["active_challenge_access", "updated_at"])
             access.save(update_fields=["status", "cleared_at"])
 
         apply_pending_dice_recharge(state)
