@@ -2168,7 +2168,7 @@ class TeamLockNoKeyTest(TransactionTestCase):
         self.team = Team.objects.create(team_name="감자는외로워")
 
     def test_fk_insert_not_blocked_by_admin_team_lock(self):
-        from django.db import OperationalError, connection
+        from django.db import connection
         from apps.adminpanel.models import AdminEvent
         from apps.adminpanel.views import _get_team_for_update
 
@@ -2199,20 +2199,90 @@ class TeamLockNoKeyTest(TransactionTestCase):
                         team=self.team,
                         actor="root",
                     )
-            except OperationalError as exc:
+            except Exception as exc:  # noqa: BLE001
                 errors.append(("inserter", exc))
             finally:
                 done.set()
                 connections.close_all()
 
         holder_thread = threading.Thread(target=holder)
-        holder_thread.start()
-        self.assertTrue(locked.wait(timeout=5), "팀 잠금을 잡지 못했다")
-
         inserter_thread = threading.Thread(target=inserter)
-        inserter_thread.start()
-        inserter_thread.join(timeout=15)
-        holder_thread.join(timeout=15)
+        holder_thread.start()
+        try:
+            self.assertTrue(locked.wait(timeout=5), "팀 잠금을 잡지 못했다")
+            inserter_thread.start()
+            inserter_thread.join(timeout=15)
+        finally:
+            done.set()
+            holder_thread.join(timeout=15)
 
+        self.assertFalse(holder_thread.is_alive())
+        self.assertFalse(inserter_thread.is_alive())
         self.assertEqual(errors, [])
         self.assertEqual(AdminEvent.objects.filter(team=self.team).count(), 1)
+
+
+class AdminTeamLockCoverageTests(TestCase):
+    def setUp(self):
+        self.team = Team.objects.create(team_name="잠금 경로 확인", mileage=200)
+        self.admin = User.objects.create_user(
+            login_id="lock-admin", password="pw1234", nickname="운영자", role=Role.ADMIN,
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.admin)
+
+    def assert_team_no_key_lock(self, queries):
+        team_locks = [
+            query["sql"] for query in queries
+            if 'FROM "teams"' in query["sql"] and "FOR " in query["sql"]
+        ]
+        self.assertEqual(len(team_locks), 1, team_locks)
+        self.assertIn("FOR NO KEY UPDATE", team_locks[0])
+
+    def test_ban_uses_no_key_team_lock(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        with CaptureQueriesContext(connection) as queries:
+            response = self.client.post(
+                f"/api/v1/admin/teams/{self.team.pk}/ban",
+                {"ban_reason": "운영 조정"}, format="json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assert_team_no_key_lock(queries)
+
+    def test_checkout_uses_no_key_team_lock(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        PaymentToken.objects.create(
+            team=self.team, token_hash=hash_token("lock-checkout"),
+            expires_at=timezone.now() + timedelta(minutes=5),
+        )
+        with CaptureQueriesContext(connection) as queries:
+            response = self.client.post(
+                "/api/v1/admin/payment/checkout",
+                {"payment_token": "lock-checkout", "amount": 30, "item_name": "굿즈"},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assert_team_no_key_lock(queries)
+        self.team.refresh_from_db()
+        self.assertEqual(self.team.mileage, 170)
+
+    def test_refund_uses_no_key_team_lock(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        purchase = MileageHistory.objects.create(
+            team=self.team, type=MileageType.PURCHASE, amount=-30, item_name="굿즈",
+        )
+        with CaptureQueriesContext(connection) as queries:
+            response = self.client.delete(f"/api/v1/admin/payment/{purchase.pk}/refund")
+
+        self.assertEqual(response.status_code, 200)
+        self.assert_team_no_key_lock(queries)
+        self.team.refresh_from_db()
+        self.assertEqual(self.team.mileage, 230)
