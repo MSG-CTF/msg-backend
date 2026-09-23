@@ -93,7 +93,6 @@ SETTING_SPECS = {
 }
 SETTINGS_UPDATED_KEY = "_meta.updated"
 EVENT_TYPES = set(AdminEvent.EventType.values)
-EVENT_MESSAGE_MAX_LENGTH = AdminEvent._meta.get_field("message").max_length
 
 
 def _page_number(raw, default, maximum=None):
@@ -184,7 +183,7 @@ def _record_event(event_type, message, actor, *, severity=AdminEvent.Severity.IN
     AdminEvent.objects.create(
         type=event_type,
         severity=severity,
-        message=message[:EVENT_MESSAGE_MAX_LENGTH],
+        message=message,
         team=team,
         challenge=challenge,
         instance_id=instance_id,

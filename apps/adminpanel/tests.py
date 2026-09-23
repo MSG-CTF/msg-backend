@@ -2587,19 +2587,64 @@ class AdminEventRecordingTests(TestCase):
 
     # ---- 공통 ----
 
-    def test_long_reason_is_truncated_to_message_limit(self):
-        """message 는 255자 컬럼이고 사유는 500자까지 들어온다. 잘라서 저장해야 500 이 안 난다."""
+    def test_long_reason_is_preserved_in_event_list(self):
+        """API에서 허용한 500자 사유를 감사 기록에서도 온전히 조회할 수 있어야 한다."""
         from apps.adminpanel.models import AdminEvent
 
+        reason = "가" * 490 + "사유의마지막열글자끝"
+        self.assertEqual(len(reason), 500)
         res = self.client.post(
             f"/api/v1/admin/teams/{self.team.team_id}/ban",
-            {"ban_reason": "가" * 500}, format="json",
+            {"ban_reason": reason}, format="json",
         )
 
         self.assertEqual(res.status_code, 200)
         event = self.only_event(AdminEvent.EventType.TEAM_BANNED)
-        limit = AdminEvent._meta.get_field("message").max_length
-        self.assertEqual(len(event.message), limit)
+        self.assertEqual(event.message, f"팀 활동이 정지되었습니다: {reason}")
+        response = self.client.get("/api/v1/admin/events")
+        self.assertEqual(response.data["data"]["events"][0]["message"], event.message)
+
+    def test_unban_keeps_full_reason_after_team_reason_is_cleared(self):
+        from apps.adminpanel.models import AdminEvent
+
+        reason = "가" * 500
+        url = f"/api/v1/admin/teams/{self.team.team_id}/ban"
+        self.client.post(url, {"ban_reason": reason}, format="json")
+
+        response = self.client.delete(url)
+
+        self.assertEqual(response.status_code, 200)
+        self.team.refresh_from_db()
+        self.assertIsNone(self.team.ban_reason)
+        event = self.only_event(AdminEvent.EventType.TEAM_UNBANNED)
+        self.assertIn(reason, event.message)
+
+    def test_visibility_keeps_full_reason(self):
+        from apps.adminpanel.models import AdminEvent
+
+        reason = "가" * 500
+        response = self.client.patch(
+            f"/api/v1/admin/challenges/{self.challenge.pk}/visibility",
+            {"is_published": False, "reason": reason}, format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        event = self.only_event(AdminEvent.EventType.CHALLENGE_VISIBILITY_CHANGED)
+        self.assertTrue(event.message.endswith(reason))
+
+    def test_event_write_failure_rolls_back_ban(self):
+        from django.db import DatabaseError
+
+        with patch("apps.adminpanel.views._record_event", side_effect=DatabaseError("audit unavailable")):
+            response = self.client.post(
+                f"/api/v1/admin/teams/{self.team.team_id}/ban",
+                {"ban_reason": "운영 보정"}, format="json",
+            )
+
+        self.assertEqual(response.status_code, 500)
+        self.team.refresh_from_db()
+        self.assertFalse(self.team.is_banned)
+        self.assertEqual(self.events(), [])
 
     def test_recorded_events_visible_in_event_list(self):
         self.client.post(
