@@ -169,8 +169,10 @@ def _get_team(team_id):
 
 
 def _get_team_for_update(team_id):
+    # 기본키는 바꾸지 않으므로 NO KEY 로 잠근다. FOR UPDATE 는 admin_events 처럼 팀을
+    # 참조하는 행의 INSERT 를 막아, 플래그 제출과 보드가 이미 no_key 를 쓰는 것과 어긋난다.
     try:
-        return Team.objects.select_for_update().get(pk=team_id)
+        return Team.objects.select_for_update(no_key=True).get(pk=team_id)
     except (Team.DoesNotExist, ValidationError, ValueError):
         raise TeamNotFound()
 
@@ -516,7 +518,7 @@ def payment_checkout(request):
         if token.expires_at < now:
             raise PaymentTokenExpired()
 
-        team = Team.objects.select_for_update().get(pk=token.team_id)
+        team = Team.objects.select_for_update(no_key=True).get(pk=token.team_id)
         if team.is_banned:
             raise TeamBanned()
         if team.mileage < amount:
@@ -626,7 +628,7 @@ def payment_refund(request, history_id):
             )
 
         refunded_amount = -purchase.amount  # PURCHASE.amount 는 음수 → 양수 환불액
-        team = Team.objects.select_for_update().get(pk=purchase.team_id)
+        team = Team.objects.select_for_update(no_key=True).get(pk=purchase.team_id)
 
         refund = MileageHistory.objects.create(
             team=team,
