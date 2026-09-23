@@ -1410,13 +1410,13 @@ def _read_cell_status(team, cell):
 
 def _drop_cell_challenge(state, team, cell, access):
     """칸을 되돌린다. 개방 기록이 남으면 그 칸에서 문제를 다시 열 수 없으므로 후보까지 지운다."""
+    TeamCellCandidate.objects.filter(team=team, cell=cell).delete()
     if access is None:
         return
     if state.active_challenge_access_id == access.id:
         state.active_challenge_access = None
         state.save(update_fields=["active_challenge_access", "updated_at"])
     access.delete()
-    TeamCellCandidate.objects.filter(team=team, cell=cell).delete()
 
 
 @api_view(["PATCH"])
@@ -1465,6 +1465,7 @@ def board_position(request, team_id):
 
         if consume_cell:
             TeamCellConsumption.objects.get_or_create(team=team, cell=cell)
+        apply_pending_dice_recharge(state)
         # 도착 칸의 효과는 발동하지 않는다. 소모 여부만 현재 값으로 돌려준다.
         cell_consumed = TeamCellConsumption.objects.filter(team=team, cell=cell).exists()
 
@@ -1523,10 +1524,15 @@ def board_cell_status(request, team_id, cell_index):
             if status == CELL_STATUS_CLEARED:
                 access.status = TeamChallengeAccess.Status.CLEARED
                 access.cleared_at = timezone.now()
+                if state.active_challenge_access_id == access.id:
+                    state.active_challenge_access = None
+                    state.save(update_fields=["active_challenge_access", "updated_at"])
             else:
                 access.status = TeamChallengeAccess.Status.OPENED
                 access.cleared_at = None
             access.save(update_fields=["status", "cleared_at"])
+
+        apply_pending_dice_recharge(state)
 
     return ok(
         {

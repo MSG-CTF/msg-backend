@@ -2393,6 +2393,104 @@ class AdminBoardCellStatusTests(AdminBoardTestBase):
     def patch(self, body, cell_index=2, team_id=None):
         return self.client.patch(self.url(cell_index, team_id), body, format="json")
 
+    def test_cleared_cell_removes_active_challenge_from_board_response(self):
+        from apps.board.models import TeamBoardState
+
+        self.auth("root")
+        self.open_challenge_on_cell()
+
+        response = self.patch({"status": "CLEARED", "reason": "풀이 판정 보정"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(
+            TeamBoardState.objects.get(team=self.team).active_challenge_access_id
+        )
+        self.auth("player")
+        response = self.client.get("/api/v1/board/me")
+        self.assertIsNone(response.data["data"]["active_challenge"])
+
+    def test_unvisited_removes_candidates_before_a_challenge_was_selected(self):
+        from apps.board.models import BoardChallenge, TeamBoardState, TeamCellCandidate
+        from apps.board.services import get_current_cell_candidates
+
+        self.auth("root")
+        challenge = Challenge.objects.create(
+            title="후보 문제", category="WEB", difficulty="EASY",
+            score=100, flag_hash="x", is_published=True,
+        )
+        BoardChallenge.objects.create(challenge=challenge, challenge_number=1)
+        TeamBoardState.objects.create(team=self.team, position=self.challenge_cell)
+        get_current_cell_candidates(self.team)
+        self.assertTrue(TeamCellCandidate.objects.filter(team=self.team).exists())
+
+        response = self.patch({"status": "UNVISITED", "reason": "잘못된 도착 취소"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(TeamCellCandidate.objects.filter(team=self.team, cell=2).exists())
+
+    def _prepare_last_unconsumed_cell(self, now):
+        from apps.board.models import TeamBoardState, TeamCellConsumption
+
+        for index in range(1, 37):
+            cell, _ = Cell.objects.get_or_create(
+                cell_index=index,
+                defaults={"type": "CHALLENGE", "difficulty": "EASY", "name": str(index)},
+            )
+            if index not in (1, 2):
+                TeamCellConsumption.objects.create(team=self.team, cell=cell)
+        return TeamBoardState.objects.create(
+            team=self.team, position=self.start, dice_rolls_left=1,
+            next_dice_reset_at=now + timedelta(minutes=5),
+        )
+
+    def test_consuming_last_cell_stops_recharge_immediately(self):
+        self.auth("root")
+        now = timezone.now()
+        state = self._prepare_last_unconsumed_cell(now)
+
+        with patch("apps.board.services.timezone.now", return_value=now):
+            response = self.patch({"status": "CONSUMED", "reason": "마지막 칸 보정"})
+
+        self.assertEqual(response.status_code, 200)
+        state.refresh_from_db()
+        self.assertIsNone(state.next_dice_reset_at)
+        self.assertEqual(state.dice_rolls_left, 1)
+
+    def test_reopening_completed_board_restarts_recharge_immediately(self):
+        from apps.board.models import TeamCellConsumption
+
+        self.auth("root")
+        now = timezone.now()
+        state = self._prepare_last_unconsumed_cell(now)
+        TeamCellConsumption.objects.create(team=self.team, cell=self.challenge_cell)
+        state.next_dice_reset_at = None
+        state.save(update_fields=["next_dice_reset_at"])
+
+        with patch("apps.board.services.timezone.now", return_value=now):
+            response = self.patch({"status": "UNVISITED", "reason": "완료 판정 취소"})
+
+        self.assertEqual(response.status_code, 200)
+        state.refresh_from_db()
+        self.assertEqual(state.next_dice_reset_at, now + timedelta(minutes=15))
+        self.assertEqual(state.dice_rolls_left, 1)
+
+    def test_position_consuming_last_cell_stops_recharge(self):
+        self.auth("root")
+        now = timezone.now()
+        state = self._prepare_last_unconsumed_cell(now)
+
+        with patch("apps.board.services.timezone.now", return_value=now):
+            response = self.client.patch(
+                f"/api/v1/admin/teams/{self.team.pk}/board/position",
+                {"position": 2, "consume_cell": True, "reason": "마지막 도착 보정"},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        state.refresh_from_db()
+        self.assertIsNone(state.next_dice_reset_at)
+        self.assertEqual(state.dice_rolls_left, 1)
+
     def test_marks_unvisited_cell_as_consumed(self):
         from apps.board.models import TeamBoardState, TeamCellConsumption
 
