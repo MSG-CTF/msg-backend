@@ -3377,3 +3377,137 @@ class AdminBoardCellStatusTests(AdminBoardTestBase):
     def test_requires_token(self):
         res = self.patch({"status": "CONSUMED", "reason": "x"})
         self.assertEqual(res.status_code, 401)
+
+
+def _target(**overrides):
+    base = {
+        "resource_target_id": "00000000-0000-4000-8000-000000000001",
+        "name": "vm-a",
+        "provider": "GCP",
+        "account_id": "00000000-0000-4000-8000-000000000002",
+        "scope_id": "example-project",
+        "status": "RUNNING",
+        "provider_capacity": {"cpu_millicores": 4000, "memory_mib": 8192},
+        "runtime_usage": {"cpu_millicores": 1200, "memory_mib": 3072},
+        "container_storage_usage": {"total_container_count": 2},
+        "account_enabled": True,
+        "enabled": True,
+        "runtime_ready": True,
+    }
+    base.update(overrides)
+    return base
+
+
+@override_settings(CACHES=LOCMEM)
+class AdminResourcesTests(TestCase):
+    URL = "/api/v1/admin/resources"
+    GENERATED_AT = "2026-09-15T00:00:01Z"
+
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        User.objects.create_user(
+            login_id="root", password="pw1234", nickname="운영자", team=None, role=Role.ADMIN,
+        )
+        User.objects.create_user(login_id="player", password="pw1234", nickname="참가자")
+        self.auth("root")
+
+    def auth(self, login_id):
+        res = self.client.post(
+            "/api/v1/auth/login", {"login_id": login_id, "password": "pw1234"}, format="json",
+        )
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {res.data['data']['access_token']}")
+
+    def get(self, targets):
+        with patch("apps.adminpanel.views.fetch_resource_targets",
+                   return_value=(self.GENERATED_AT, targets)):
+            return self.client.get(self.URL)
+
+    def test_groups_targets_into_accounts_and_nodes(self):
+        res = self.get([_target()])
+
+        self.assertEqual(res.status_code, 200)
+        data = res.data["data"]
+        self.assertEqual(data["total_count"], 1)
+        self.assertEqual(data["collected_at"], self.GENERATED_AT)
+        account = data["accounts"][0]
+        self.assertEqual(account["account_id"], "00000000-0000-4000-8000-000000000002")
+        self.assertEqual(account["provider"], "GCP")
+        self.assertEqual(account["scope_id"], "example-project")
+        self.assertEqual(account["status"], "HEALTHY")
+        self.assertEqual(account["running_instances"], 2)
+        self.assertEqual(account["nodes"], [{
+            "node_id": "00000000-0000-4000-8000-000000000001",
+            "node_name": "vm-a",
+            "status": "HEALTHY",
+            "running_instances": 2,
+            "cpu_usage_percent": 30,
+            "memory_usage_percent": 38,
+        }])
+
+    def test_two_vms_same_account_are_one_account(self):
+        res = self.get([
+            _target(),
+            _target(resource_target_id="00000000-0000-4000-8000-000000000003", name="vm-b",
+                    runtime_ready=False),
+        ])
+
+        data = res.data["data"]
+        self.assertEqual(data["total_count"], 1)
+        account = data["accounts"][0]
+        self.assertEqual(len(account["nodes"]), 2)
+        self.assertEqual(account["running_instances"], 4)
+        self.assertEqual(account["status"], "DEGRADED")
+        self.assertEqual([n["status"] for n in account["nodes"]], ["HEALTHY", "DEGRADED"])
+
+    def test_missing_usage_stays_null_not_zero(self):
+        """브로커의 null 은 미수집이다. 프론트가 0 과 구분해 표시한다."""
+        res = self.get([_target(runtime_usage=None, container_storage_usage=None)])
+
+        node = res.data["data"]["accounts"][0]["nodes"][0]
+        self.assertIsNone(node["cpu_usage_percent"])
+        self.assertIsNone(node["memory_usage_percent"])
+        self.assertIsNone(node["running_instances"])
+        self.assertIsNone(res.data["data"]["accounts"][0]["running_instances"])
+
+    def test_stopped_vm_is_degraded(self):
+        res = self.get([_target(status="STOPPED")])
+        self.assertEqual(res.data["data"]["accounts"][0]["nodes"][0]["status"], "DEGRADED")
+
+    def test_empty_inventory_returns_null_data(self):
+        res = self.get([])
+
+        self.assertEqual(res.status_code, 200)
+        self.assertIsNone(res.data["data"])
+        self.assertEqual(res.data["message"], "수집된 리소스 정보가 없습니다")
+
+    def test_broker_failure_returns_503(self):
+        from apps.instances.services import SchedulerError
+
+        with patch("apps.adminpanel.views.fetch_resource_targets",
+                   side_effect=SchedulerError("SCHEDULER_UNAVAILABLE", "연결 실패", 503)):
+            res = self.client.get(self.URL)
+
+        self.assertEqual(res.status_code, 503)
+        self.assertEqual(res.data["code"], "SCHEDULER_UNAVAILABLE")
+
+    def test_requires_admin(self):
+        self.auth("player")
+        self.assertEqual(self.client.get(self.URL).status_code, 403)
+
+    def test_pagination_follows_offset_until_total(self):
+        """브로커 limit 상한이 500 이라 그 이상은 offset 으로 이어 받는다."""
+        from apps.adminpanel import resource_broker
+
+        pages = [
+            {"generated_at": self.GENERATED_AT, "total": 501, "items": [_target()]},
+            {"generated_at": "later", "total": 501, "items": [_target(name="vm-z")]},
+        ]
+        with patch.object(resource_broker, "_get", side_effect=pages) as mock_get:
+            generated_at, items = resource_broker.fetch_resource_targets()
+
+        self.assertEqual(generated_at, self.GENERATED_AT)
+        self.assertEqual([i["name"] for i in items], ["vm-a", "vm-z"])
+        self.assertEqual(
+            [c.args[1]["offset"] for c in mock_get.call_args_list], [0, 500],
+        )
