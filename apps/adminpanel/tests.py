@@ -3,7 +3,7 @@ import uuid
 
 from datetime import timedelta
 from decimal import Decimal
-from django.db import connections
+from django.db import connections, transaction
 from django.utils import timezone
 from django.core.cache import cache
 from django.test import TestCase, TransactionTestCase, override_settings
@@ -2154,6 +2154,138 @@ class SettingsLockOrderTest(TransactionTestCase):
         self.assertEqual(errors, [])
         self.assertEqual(len(results), len(bodies))
         self.assertEqual(sorted(results.values()), [200, 200])
+
+
+class TeamLockNoKeyTest(TransactionTestCase):
+    """관리자 뷰가 팀 행을 잠근 동안에도 그 팀을 참조하는 행을 INSERT 할 수 있어야 한다.
+
+    외래키 INSERT 는 참조 행에 FOR KEY SHARE 를 건다. 팀을 FOR UPDATE 로 잡으면 이것이
+    막혀 admin_events 적재나 인스턴스 생성이 관리자 트랜잭션이 끝날 때까지 기다린다.
+    NO KEY UPDATE 는 값만 바꾼다는 뜻이라 KEY SHARE 와 충돌하지 않는다.
+    """
+
+    def setUp(self):
+        self.team = Team.objects.create(team_name="감자는외로워")
+
+    def test_fk_insert_not_blocked_by_admin_team_lock(self):
+        from django.db import connection
+        from apps.adminpanel.models import AdminEvent
+        from apps.adminpanel.views import _get_team_for_update
+
+        locked = threading.Event()
+        done = threading.Event()
+        errors = []
+
+        def holder():
+            try:
+                with transaction.atomic():
+                    _get_team_for_update(self.team.pk)
+                    locked.set()
+                    done.wait(timeout=10)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(("holder", exc))
+            finally:
+                connections.close_all()
+
+        def inserter():
+            try:
+                with transaction.atomic():
+                    with connection.cursor() as cursor:
+                        # 잠금에 막히면 무한정 기다리지 않고 1초 뒤 실패로 드러나게 한다.
+                        cursor.execute("SET LOCAL lock_timeout = '1000'")
+                    AdminEvent.objects.create(
+                        type=AdminEvent.EventType.TEAM_BANNED,
+                        message="잠금 검증",
+                        team=self.team,
+                        actor="root",
+                    )
+            except Exception as exc:  # noqa: BLE001
+                errors.append(("inserter", exc))
+            finally:
+                done.set()
+                connections.close_all()
+
+        holder_thread = threading.Thread(target=holder)
+        inserter_thread = threading.Thread(target=inserter)
+        holder_thread.start()
+        try:
+            self.assertTrue(locked.wait(timeout=5), "팀 잠금을 잡지 못했다")
+            inserter_thread.start()
+            inserter_thread.join(timeout=15)
+        finally:
+            done.set()
+            holder_thread.join(timeout=15)
+
+        self.assertFalse(holder_thread.is_alive())
+        self.assertFalse(inserter_thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(AdminEvent.objects.filter(team=self.team).count(), 1)
+
+
+class AdminTeamLockCoverageTests(TestCase):
+    def setUp(self):
+        self.team = Team.objects.create(team_name="잠금 경로 확인", mileage=200)
+        self.admin = User.objects.create_user(
+            login_id="lock-admin", password="pw1234", nickname="운영자", role=Role.ADMIN,
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.admin)
+
+    def assert_team_no_key_lock(self, queries):
+        team_locks = [
+            query["sql"] for query in queries
+            if 'FROM "teams"' in query["sql"] and "FOR " in query["sql"]
+        ]
+        self.assertEqual(len(team_locks), 1, team_locks)
+        self.assertIn("FOR NO KEY UPDATE", team_locks[0])
+
+    def test_ban_uses_no_key_team_lock(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        with CaptureQueriesContext(connection) as queries:
+            response = self.client.post(
+                f"/api/v1/admin/teams/{self.team.pk}/ban",
+                {"ban_reason": "운영 조정"}, format="json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assert_team_no_key_lock(queries)
+
+    def test_checkout_uses_no_key_team_lock(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        PaymentToken.objects.create(
+            team=self.team, token_hash=hash_token("lock-checkout"),
+            expires_at=timezone.now() + timedelta(minutes=5),
+        )
+        with CaptureQueriesContext(connection) as queries:
+            response = self.client.post(
+                "/api/v1/admin/payment/checkout",
+                {"payment_token": "lock-checkout", "amount": 30, "item_name": "굿즈"},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assert_team_no_key_lock(queries)
+        self.team.refresh_from_db()
+        self.assertEqual(self.team.mileage, 170)
+
+    def test_refund_uses_no_key_team_lock(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        purchase = MileageHistory.objects.create(
+            team=self.team, type=MileageType.PURCHASE, amount=-30, item_name="굿즈",
+        )
+        with CaptureQueriesContext(connection) as queries:
+            response = self.client.delete(f"/api/v1/admin/payment/{purchase.pk}/refund")
+
+        self.assertEqual(response.status_code, 200)
+        self.assert_team_no_key_lock(queries)
+        self.team.refresh_from_db()
+        self.assertEqual(self.team.mileage, 230)
 
 
 @override_settings(CACHES=LOCMEM)
