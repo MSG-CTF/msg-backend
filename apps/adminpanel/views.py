@@ -17,8 +17,18 @@ from apps.common.jwt import hash_token
 from apps.common.idempotency import run_idempotent
 from apps.challenge.models import Challenge, Solve
 from apps.challenge.services import hash_flag
-from apps.board.models import TeamBoardState, TeamChallengeAccess
+from apps.board.models import (
+    Cell,
+    PendingDiceRoll,
+    TeamBoardState,
+    TeamCellCandidate,
+    TeamCellConsumption,
+    TeamChallengeAccess,
+    TeamChanceCard,
+)
 from apps.board.services import (
+    FIRST_CELL_INDEX,
+    LAST_CELL_INDEX,
     MAX_DICE_ROLLS,
     apply_pending_dice_recharge,
     get_or_create_board_state,
@@ -83,7 +93,6 @@ MILEAGE_TYPES = set(MileageType.values)
 DICE_ADJUST_MIN = -20
 DICE_ADJUST_MAX = 20
 
-
 SETTING_SPECS = {
     "board.dice_rolls_per_reset": (1, 20, 3),
     "board.dice_reset_interval_minutes": (1, 1440, 15),
@@ -93,6 +102,17 @@ SETTING_SPECS = {
 }
 SETTINGS_UPDATED_KEY = "_meta.updated"
 EVENT_TYPES = set(AdminEvent.EventType.values)
+
+CELL_STATUS_UNVISITED = "UNVISITED"
+CELL_STATUS_CONSUMED = "CONSUMED"
+CELL_STATUS_OPENED = "OPENED"
+CELL_STATUS_CLEARED = "CLEARED"
+CELL_STATUSES = (
+    CELL_STATUS_UNVISITED,
+    CELL_STATUS_CONSUMED,
+    CELL_STATUS_OPENED,
+    CELL_STATUS_CLEARED,
+)
 
 
 def _page_number(raw, default, maximum=None):
@@ -1415,3 +1435,195 @@ def event_list(request):
     ]
 
     return ok({"events": events, "total_count": total_count, "page": page, "size": size})
+
+
+def _json_object(request):
+    """본문이 객체가 아니면 .get 에서 터져 500 이 나간다. 400 으로 돌려준다."""
+    body = request.data
+    if not isinstance(body, dict):
+        raise InvalidRequest("요청 본문은 JSON 객체여야 합니다")
+    return body
+
+
+def _require_reason(body):
+    reason = body.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        raise InvalidRequest("필수 항목이 누락되었습니다: reason")
+    reason = reason.strip()
+    if len(reason) > 500:
+        raise InvalidRequest("reason 은 500자 이하여야 합니다")
+    return reason
+
+
+def _parse_cell_index(raw):
+    """URL 에서 받은 칸 번호. 음수나 문자도 404 가 아니라 400 으로 돌려준다."""
+    if not isinstance(raw, str) or not raw.isascii() or not raw.isdigit():
+        raise InvalidRequest("cell_index 는 정수여야 합니다")
+    cell_index = int(raw)
+    if not (FIRST_CELL_INDEX <= cell_index <= LAST_CELL_INDEX):
+        raise InvalidRequest(
+            f"cell_index 는 {FIRST_CELL_INDEX} ~ {LAST_CELL_INDEX} 범위여야 합니다"
+        )
+    return cell_index
+
+
+def _get_cell(cell_index):
+    cell = Cell.objects.filter(cell_index=cell_index).first()
+    if cell is None:
+        raise InvalidRequest(f"{cell_index} 번 칸이 없습니다")
+    return cell
+
+
+def _read_cell_status(team, cell):
+    """보드의 build_cell_states 와 같은 규칙. 단 소모 기록 없이 문제만 열린 칸도
+    UNVISITED 가 아니라 실제 상태로 읽는다. 지우는 대상을 감춰서는 안 된다."""
+    access = TeamChallengeAccess.objects.filter(team=team, source_cell=cell).first()
+    if access is not None:
+        if access.status == TeamChallengeAccess.Status.CLEARED:
+            return CELL_STATUS_CLEARED
+        return CELL_STATUS_OPENED
+    if TeamCellConsumption.objects.filter(team=team, cell=cell).exists():
+        return CELL_STATUS_CONSUMED
+    return CELL_STATUS_UNVISITED
+
+
+def _drop_cell_challenge(state, team, cell, access):
+    """칸을 되돌린다. 개방 기록이 남으면 그 칸에서 문제를 다시 열 수 없으므로 후보까지 지운다."""
+    TeamCellCandidate.objects.filter(team=team, cell=cell).delete()
+    if access is None:
+        return
+    if state.active_challenge_access_id == access.id:
+        state.active_challenge_access = None
+        state.save(update_fields=["active_challenge_access", "updated_at"])
+    access.delete()
+
+
+@api_view(["PATCH"])
+@permission_classes([IsAdmin])
+def board_position(request, team_id):
+    body = _json_object(request)
+
+    position = body.get("position")
+    if not isinstance(position, int) or isinstance(position, bool):
+        raise InvalidRequest("position 은 정수여야 합니다")
+    if not (FIRST_CELL_INDEX <= position <= LAST_CELL_INDEX):
+        raise InvalidRequest(
+            f"position 은 {FIRST_CELL_INDEX} ~ {LAST_CELL_INDEX} 범위여야 합니다"
+        )
+
+    consume_cell = body.get("consume_cell", False)
+    if not isinstance(consume_cell, bool):
+        raise InvalidRequest("consume_cell 은 true 또는 false 여야 합니다")
+
+    _require_reason(body)
+
+    with transaction.atomic():
+        # 보드와 같은 순서로 잠근다: 보드 상태 먼저, 팀은 잠그지 않는다.
+        team = _get_team(team_id)
+        get_or_create_board_state(team)
+        state = TeamBoardState.objects.select_for_update(of=("self",)).get(team=team)
+
+        cell = _get_cell(position)
+        previous_position = state.position_id
+        state.position = cell
+        state.save(update_fields=["position", "updated_at"])
+
+        # 확정되지 않은 굴림이 남아 있으면 팀이 확정하는 순간 교정한 위치가 덮어써진다.
+        # 선택을 기다리던 찬스카드를 함께 마감하지 않으면 이후 모든 확정이 막힌다.
+        TeamChanceCard.objects.filter(
+            team=team,
+            used_at__isnull=True,
+            discarded_at__isnull=True,
+            pending_first_number__isnull=False,
+        ).update(
+            used_at=timezone.now(),
+            pending_first_number=None,
+            pending_second_number=None,
+        )
+        PendingDiceRoll.objects.filter(team=team).delete()
+
+        if consume_cell:
+            TeamCellConsumption.objects.get_or_create(team=team, cell=cell)
+        apply_pending_dice_recharge(state)
+        # 도착 칸의 효과는 발동하지 않는다. 소모 여부만 현재 값으로 돌려준다.
+        cell_consumed = TeamCellConsumption.objects.filter(team=team, cell=cell).exists()
+
+    return ok(
+        {
+            "team_id": str(team.team_id),
+            "previous_position": previous_position,
+            "position": cell.cell_index,
+            "type": cell.type,
+            "cell_consumed": cell_consumed,
+            "moved_at": timezone.now().replace(microsecond=0),
+            "moved_by": request.user.login_id,
+        },
+        message="말 위치가 변경되었습니다",
+    )
+
+
+@api_view(["PATCH"])
+@permission_classes([IsAdmin])
+def board_cell_status(request, team_id, cell_index):
+    cell_index = _parse_cell_index(cell_index)
+    body = _json_object(request)
+
+    status = body.get("status")
+    if status not in CELL_STATUSES:
+        raise InvalidRequest(f"status 는 {', '.join(CELL_STATUSES)} 중 하나여야 합니다")
+
+    _require_reason(body)
+
+    with transaction.atomic():
+        # 보드와 같은 순서로 잠근다: 보드 상태 먼저, 그 다음 문제 개방 기록.
+        team = _get_team(team_id)
+        get_or_create_board_state(team)
+        state = TeamBoardState.objects.select_for_update(of=("self",)).get(team=team)
+
+        cell = _get_cell(cell_index)
+        previous_status = _read_cell_status(team, cell)
+        access = (
+            TeamChallengeAccess.objects.select_for_update()
+            .filter(team=team, source_cell=cell)
+            .first()
+        )
+
+        if status == CELL_STATUS_UNVISITED:
+            _drop_cell_challenge(state, team, cell, access)
+            TeamCellConsumption.objects.filter(team=team, cell=cell).delete()
+        elif status == CELL_STATUS_CONSUMED:
+            _drop_cell_challenge(state, team, cell, access)
+            TeamCellConsumption.objects.get_or_create(team=team, cell=cell)
+        else:
+            if access is None:
+                raise InvalidRequest(
+                    "이 칸에서 연 문제가 없어 OPENED 나 CLEARED 로 바꿀 수 없습니다"
+                )
+            TeamCellConsumption.objects.get_or_create(team=team, cell=cell)
+            if status == CELL_STATUS_CLEARED:
+                access.status = TeamChallengeAccess.Status.CLEARED
+                access.cleared_at = timezone.now()
+                if state.active_challenge_access_id == access.id:
+                    state.active_challenge_access = None
+                    state.save(update_fields=["active_challenge_access", "updated_at"])
+            else:
+                access.status = TeamChallengeAccess.Status.OPENED
+                access.cleared_at = None
+                if state.position_id == cell.cell_index and state.active_challenge_access_id is None:
+                    state.active_challenge_access = access
+                    state.save(update_fields=["active_challenge_access", "updated_at"])
+            access.save(update_fields=["status", "cleared_at"])
+
+        apply_pending_dice_recharge(state)
+
+    return ok(
+        {
+            "team_id": str(team.team_id),
+            "cell_index": cell.cell_index,
+            "previous_status": previous_status,
+            "status": status,
+            "changed_at": timezone.now().replace(microsecond=0),
+            "changed_by": request.user.login_id,
+        },
+        message="칸 상태가 변경되었습니다",
+    )
