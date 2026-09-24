@@ -1249,6 +1249,12 @@ def board_dice(request, team_id):
         state.save(update_fields=["dice_rolls_left", "updated_at"])
         # 조정 뒤 충전 시계를 보드와 같은 규칙으로 다시 맞춘다.
         apply_pending_dice_recharge(state)
+        _record_event(
+            AdminEvent.EventType.DICE_ADJUSTED,
+            f"주사위 {applied:+d} ({previous} → {state.dice_rolls_left}): {reason}",
+            request.user.login_id,
+            team=team,
+        )
 
     return ok(
         {
@@ -1515,7 +1521,7 @@ def board_position(request, team_id):
     if not isinstance(consume_cell, bool):
         raise InvalidRequest("consume_cell 은 true 또는 false 여야 합니다")
 
-    _require_reason(body)
+    reason = _require_reason(body)
 
     with transaction.atomic():
         # 보드와 같은 순서로 잠근다: 보드 상태 먼저, 팀은 잠그지 않는다.
@@ -1547,6 +1553,14 @@ def board_position(request, team_id):
         apply_pending_dice_recharge(state)
         # 도착 칸의 효과는 발동하지 않는다. 소모 여부만 현재 값으로 돌려준다.
         cell_consumed = TeamCellConsumption.objects.filter(team=team, cell=cell).exists()
+        _record_event(
+            AdminEvent.EventType.BOARD_POSITION_MOVED,
+            f"말 위치 {previous_position} → {cell.cell_index}"
+            f" (칸 소모: {'예' if cell_consumed else '아니오'}): {reason}",
+            request.user.login_id,
+            severity=AdminEvent.Severity.WARNING,
+            team=team,
+        )
 
     return ok(
         {
@@ -1572,7 +1586,7 @@ def board_cell_status(request, team_id, cell_index):
     if status not in CELL_STATUSES:
         raise InvalidRequest(f"status 는 {', '.join(CELL_STATUSES)} 중 하나여야 합니다")
 
-    _require_reason(body)
+    reason = _require_reason(body)
 
     with transaction.atomic():
         # 보드와 같은 순서로 잠근다: 보드 상태 먼저, 그 다음 문제 개방 기록.
@@ -1615,6 +1629,14 @@ def board_cell_status(request, team_id, cell_index):
             access.save(update_fields=["status", "cleared_at"])
 
         apply_pending_dice_recharge(state)
+        _record_event(
+            AdminEvent.EventType.CELL_STATUS_CHANGED,
+            f"{cell.cell_index}번 칸 {previous_status} → {status}: {reason}",
+            request.user.login_id,
+            severity=AdminEvent.Severity.WARNING,
+            team=team,
+            challenge=access.challenge if access is not None else None,
+        )
 
     return ok(
         {

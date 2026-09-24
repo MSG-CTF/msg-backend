@@ -2585,6 +2585,42 @@ class AdminEventRecordingTests(TestCase):
         self.assertEqual(res.status_code, 400)
         self.assertEqual(self.events(), [])
 
+    # ---- 주사위 ----
+
+    def test_dice_adjust_records_applied_amount(self):
+        """상한에 잘린 실제 지급량이 남아야 요청량과 헷갈리지 않는다."""
+        from apps.adminpanel.models import AdminEvent
+        from apps.board.models import Cell, TeamBoardState
+
+        cell = Cell.objects.create(cell_index=1, type="START", name="출발")
+        TeamBoardState.objects.create(team=self.team, position=cell, dice_rolls_left=2)
+
+        res = self.client.post(
+            f"/api/v1/admin/teams/{self.team.team_id}/board/dice",
+            {"amount": 5, "reason": "주사위 소실 보정"}, format="json",
+        )
+
+        self.assertEqual(res.status_code, 200)
+        event = self.only_event(AdminEvent.EventType.DICE_ADJUSTED)
+        self.assertEqual(event.team_id, self.team.team_id)
+        self.assertIn("+1", event.message)
+        self.assertIn("(2 → 3)", event.message)
+        self.assertIn("주사위 소실 보정", event.message)
+
+    def test_failed_dice_adjust_leaves_no_event(self):
+        from apps.board.models import Cell, TeamBoardState
+
+        cell = Cell.objects.create(cell_index=1, type="START", name="출발")
+        TeamBoardState.objects.create(team=self.team, position=cell, dice_rolls_left=1)
+
+        res = self.client.post(
+            f"/api/v1/admin/teams/{self.team.team_id}/board/dice",
+            {"amount": -5, "reason": "회수"}, format="json",
+        )
+
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(self.events(), [])
+
     # ---- 공통 ----
 
     def test_long_reason_is_preserved_in_event_list(self):
@@ -2713,6 +2749,115 @@ class AdminBoardTestBase(TestCase):
         get_current_cell_candidates(self.team)
         open_current_cell_challenge(self.team, challenge.challenge_id)
         return challenge
+
+
+class AdminBoardAuditTests(AdminBoardTestBase):
+    def test_position_records_team_actor_and_full_reason(self):
+        from apps.adminpanel.models import AdminEvent
+        from apps.board.models import TeamBoardState
+
+        self.auth("root")
+        TeamBoardState.objects.create(team=self.team, position=self.start)
+        reason = "가" * 500
+
+        response = self.client.patch(
+            f"/api/v1/admin/teams/{self.team.pk}/board/position",
+            {"position": 7, "consume_cell": True, "reason": reason}, format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        event = AdminEvent.objects.get(type=AdminEvent.EventType.BOARD_POSITION_MOVED)
+        self.assertEqual(event.team_id, self.team.pk)
+        self.assertEqual(event.actor, "root")
+        self.assertIn("1 → 7", event.message)
+        self.assertIn("소모", event.message)
+        self.assertTrue(event.message.endswith(reason))
+        response = self.client.get("/api/v1/admin/events?type=BOARD_POSITION_MOVED")
+        self.assertEqual(response.data["data"]["total_count"], 1)
+
+    def test_cell_status_records_previous_status_and_challenge(self):
+        from apps.adminpanel.models import AdminEvent
+
+        self.auth("root")
+        challenge = self.open_challenge_on_cell()
+
+        response = self.client.patch(
+            f"/api/v1/admin/teams/{self.team.pk}/board/cells/2",
+            {"status": "CLEARED", "reason": "풀이 판정 보정"}, format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        event = AdminEvent.objects.get(type=AdminEvent.EventType.CELL_STATUS_CHANGED)
+        self.assertEqual(event.team_id, self.team.pk)
+        self.assertEqual(event.challenge_id, challenge.pk)
+        self.assertEqual(event.actor, "root")
+        self.assertIn("2번 칸 OPENED → CLEARED", event.message)
+        self.assertIn("풀이 판정 보정", event.message)
+
+    def test_removed_access_keeps_challenge_reference_in_event(self):
+        from apps.adminpanel.models import AdminEvent
+
+        self.auth("root")
+        challenge = self.open_challenge_on_cell()
+
+        response = self.client.patch(
+            f"/api/v1/admin/teams/{self.team.pk}/board/cells/2",
+            {"status": "UNVISITED", "reason": "잘못된 문제 배정 취소"}, format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        event = AdminEvent.objects.get(type=AdminEvent.EventType.CELL_STATUS_CHANGED)
+        self.assertEqual(event.challenge_id, challenge.pk)
+        self.assertFalse(TeamChallengeAccess.objects.filter(team=self.team).exists())
+
+    def test_invalid_correction_does_not_record_event(self):
+        from apps.adminpanel.models import AdminEvent
+
+        self.auth("root")
+        response = self.client.patch(
+            f"/api/v1/admin/teams/{self.team.pk}/board/cells/2",
+            {"status": "CLEARED", "reason": "개방 기록 없음"}, format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(AdminEvent.objects.exists())
+
+    def test_position_event_failure_rolls_back_board_change(self):
+        from django.db import DatabaseError
+        from apps.board.models import TeamBoardState, TeamCellConsumption
+
+        self.auth("root")
+        state = TeamBoardState.objects.create(team=self.team, position=self.start)
+        with patch("apps.adminpanel.views._record_event", side_effect=DatabaseError("audit unavailable")):
+            response = self.client.patch(
+                f"/api/v1/admin/teams/{self.team.pk}/board/position",
+                {"position": 7, "consume_cell": True, "reason": "이동 보정"}, format="json",
+            )
+
+        self.assertEqual(response.status_code, 500)
+        state.refresh_from_db()
+        self.assertEqual(state.position_id, 1)
+        self.assertFalse(TeamCellConsumption.objects.filter(team=self.team, cell=7).exists())
+
+    def test_cell_event_failure_rolls_back_status_and_active_link(self):
+        from django.db import DatabaseError
+        from apps.board.models import TeamBoardState
+
+        self.auth("root")
+        self.open_challenge_on_cell()
+        access = TeamChallengeAccess.objects.get(team=self.team)
+        with patch("apps.adminpanel.views._record_event", side_effect=DatabaseError("audit unavailable")):
+            response = self.client.patch(
+                f"/api/v1/admin/teams/{self.team.pk}/board/cells/2",
+                {"status": "CLEARED", "reason": "풀이 판정 보정"}, format="json",
+            )
+
+        self.assertEqual(response.status_code, 500)
+        access.refresh_from_db()
+        self.assertEqual(access.status, TeamChallengeAccess.Status.OPENED)
+        self.assertEqual(
+            TeamBoardState.objects.get(team=self.team).active_challenge_access_id, access.pk,
+        )
 
 
 class AdminBoardPositionTests(AdminBoardTestBase):
