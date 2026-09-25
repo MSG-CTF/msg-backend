@@ -5,10 +5,15 @@ from unittest.mock import patch
 
 from django.core.cache import cache
 from django.test import TestCase, override_settings
+from django.utils import timezone
 
 from apps.challenge.models import Challenge
 from apps.challenge.services import hash_flag
-from apps.instances.models import ChallengeRelease, ChallengeRuntimeConfig
+from apps.instances.models import (
+    ChallengeRelease,
+    ChallengeRuntimeConfig,
+    PollerArtifact,
+)
 from apps.instances.poller import list_bundle_artifacts, poll_once, register_bundle
 
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
@@ -159,6 +164,33 @@ class ListBundleArtifactsTests(TestCase):
             artifacts = list_bundle_artifacts(token="test-token")
 
         self.assertEqual([artifact["id"] for artifact in artifacts], [2, 3])
+
+    @override_settings(RELEASE_POLL_LIMIT=3)
+    def test_stops_listing_at_processed_artifact_boundary(self):
+        PollerArtifact.objects.create(
+            artifact_id=10,
+            kind=PollerArtifact.Kind.RELEASE,
+            payload=publish_artifact(10, "old-publish-bundle"),
+            processed_at=timezone.now(),
+        )
+        responses = [
+            json.dumps(
+                {
+                    "total_count": 100,
+                    "artifacts": [
+                        publish_artifact(12, "new-publish-bundle"),
+                        publish_artifact(11, "test-output"),
+                        publish_artifact(10, "old-publish-bundle"),
+                    ],
+                }
+            ).encode("utf-8")
+        ]
+
+        with patch("apps.instances.poller.urlopen", fake_urlopen(responses)):
+            artifacts = list_bundle_artifacts(token="test-token")
+
+        self.assertEqual([artifact["id"] for artifact in artifacts], [12])
+        self.assertIsNone(PollerArtifact.objects.get(pk=12).processed_at)
 
 
 @override_settings(CACHES=LOCMEM)

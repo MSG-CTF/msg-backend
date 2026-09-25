@@ -212,6 +212,22 @@ class ReleaseContainer(models.Model):
         return f"{self.release_id} {self.name}"
 
 
+class PollerArtifact(models.Model):
+    class Kind(models.TextChoices):
+        RELEASE = "RELEASE"
+        USER_FILES = "USER_FILES"
+
+    artifact_id = models.BigIntegerField(primary_key=True)
+    kind = models.CharField(max_length=20, choices=Kind.choices)
+    payload = models.JSONField()
+    processed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "poller_artifacts"
+        indexes = [models.Index(fields=["kind", "processed_at", "artifact_id"])]
+
+
 class ChallengeUserFileBundle(models.Model):
     bundle_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     challenge = models.ForeignKey(

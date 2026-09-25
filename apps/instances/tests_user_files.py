@@ -18,6 +18,7 @@ from apps.instances.models import (
     ChallengeRuntimeConfig,
     ChallengeUserFileBundle,
     IsolationProfile,
+    PollerArtifact,
 )
 from apps.instances.user_files import (
     current_user_file_bundle,
@@ -217,13 +218,31 @@ class RegisterUserFilesBundleTests(UserFilesTestBase):
 
         self.assertIsNone(current_user_file_bundle(self.challenge))
 
+    def test_latest_present_false_hides_active_release_file(self):
+        release_one = self.create_release(1)
+        archive_bytes = user_archive()
+        register_user_files_bundle(
+            user_manifest(archive_bytes), archive_bytes, user_artifact()
+        )
+        ChallengeRuntimeConfig.objects.create(
+            challenge=self.challenge,
+            current_release=release_one,
+        )
+        register_user_files_bundle(
+            user_manifest(revision=2, source_sha=SHA_B),
+            None,
+            user_artifact(artifact_id=2, sha=SHA_B),
+        )
+
+        self.assertIsNone(current_user_file_bundle(self.challenge))
+
 
 class UserFilesPollerTests(UserFilesTestBase):
     def test_poller_registers_bundle_and_rejects_source_sha_mismatch(self):
         archive_bytes = user_archive()
         artifact = user_artifact()
         with (
-            patch("apps.instances.user_files.list_artifacts_by_suffix", return_value=[artifact]),
+            patch("apps.instances.poller.list_artifacts_by_suffix", return_value=[artifact]),
             patch("apps.instances.user_files.get_workflow_run", return_value=workflow_run()),
             patch(
                 "apps.instances.user_files.download_user_files_bundle",
@@ -234,7 +253,7 @@ class UserFilesPollerTests(UserFilesTestBase):
 
         bad_artifact = user_artifact(artifact_id=2, sha=SHA_B)
         with (
-            patch("apps.instances.user_files.list_artifacts_by_suffix", return_value=[bad_artifact]),
+            patch("apps.instances.poller.list_artifacts_by_suffix", return_value=[bad_artifact]),
             patch(
                 "apps.instances.user_files.get_workflow_run",
                 return_value=workflow_run(artifact_id=2, sha=SHA_B),
@@ -248,6 +267,65 @@ class UserFilesPollerTests(UserFilesTestBase):
 
         self.assertEqual(registered["registered"], 1)
         self.assertEqual(rejected["invalid"], 1)
+
+    def test_processed_artifact_is_not_downloaded_again(self):
+        archive_bytes = user_archive()
+        artifact = user_artifact()
+        with (
+            patch(
+                "apps.instances.poller.list_artifacts_by_suffix",
+                side_effect=[[artifact], []],
+            ),
+            patch(
+                "apps.instances.user_files.get_workflow_run",
+                return_value=workflow_run(),
+            ) as get_run,
+            patch(
+                "apps.instances.user_files.download_user_files_bundle",
+                return_value=(user_manifest(archive_bytes), archive_bytes),
+            ) as download,
+        ):
+            first = poll_user_files_once(token="token")
+            second = poll_user_files_once(token="token")
+
+        self.assertEqual(first["registered"], 1)
+        self.assertEqual(
+            second,
+            {
+                "registered": 0,
+                "duplicate": 0,
+                "unmatched": 0,
+                "invalid": 0,
+                "error": 0,
+            },
+        )
+        self.assertEqual(get_run.call_count, 1)
+        self.assertEqual(download.call_count, 1)
+        self.assertIsNotNone(PollerArtifact.objects.get(pk=1).processed_at)
+
+    def test_failed_artifact_is_retried_without_rediscovery(self):
+        archive_bytes = user_archive()
+        artifact = user_artifact()
+        with (
+            patch(
+                "apps.instances.poller.list_artifacts_by_suffix",
+                side_effect=[[artifact], []],
+            ),
+            patch(
+                "apps.instances.user_files.get_workflow_run",
+                side_effect=[TimeoutError("연결 실패"), workflow_run()],
+            ),
+            patch(
+                "apps.instances.user_files.download_user_files_bundle",
+                return_value=(user_manifest(archive_bytes), archive_bytes),
+            ),
+        ):
+            failed = poll_user_files_once(token="token")
+            retried = poll_user_files_once(token="token")
+
+        self.assertEqual(failed["error"], 1)
+        self.assertEqual(retried["registered"], 1)
+        self.assertIsNotNone(PollerArtifact.objects.get(pk=1).processed_at)
 
     @override_settings(RELEASE_POLL_GITHUB_TOKEN="token")
     def test_release_command_runs_user_files_poll(self):

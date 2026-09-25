@@ -17,13 +17,15 @@ from apps.instances.models import (
     ChallengeRelease,
     ChallengeRuntimeConfig,
     ChallengeUserFileBundle,
+    PollerArtifact,
 )
 from apps.instances.poller import (
     expected_source_ref,
     get_workflow_run,
     github_request,
-    list_artifacts_by_suffix,
+    mark_artifact_processed,
     match_challenge,
+    pending_artifacts,
     validate_workflow_run_source,
 )
 from apps.instances.releases import ReleaseValidationError
@@ -284,7 +286,11 @@ def register_user_files_bundle(manifest, archive_bytes, artifact):
 def poll_user_files_once(token=None):
     summary = {"registered": 0, "duplicate": 0, "unmatched": 0, "invalid": 0, "error": 0}
     try:
-        artifacts = list_artifacts_by_suffix(USER_FILES_BUNDLE_SUFFIX, token=token)
+        artifacts = pending_artifacts(
+            PollerArtifact.Kind.USER_FILES,
+            USER_FILES_BUNDLE_SUFFIX,
+            token=token,
+        )
     except ReleaseValidationError as error:
         logger.warning("user-files poller 설정 오류: %s", error.message)
         summary["error"] += 1
@@ -308,6 +314,7 @@ def poll_user_files_once(token=None):
         except ReleaseValidationError as error:
             logger.warning("user-files poller bundle 형식 오류 %s: %s", artifact.get("name"), error.message)
             summary["invalid"] += 1
+            mark_artifact_processed(artifact)
             continue
 
         try:
@@ -317,6 +324,8 @@ def poll_user_files_once(token=None):
             summary["error"] += 1
             continue
         summary[status] += 1
+        if status != "unmatched":
+            mark_artifact_processed(artifact)
         if status == "registered":
             logger.info(
                 "user-files poller 등록: challenge=%s revision=%s present=%s",
@@ -336,8 +345,11 @@ def current_user_file_bundle(challenge):
         runtime_config = None
 
     bundles = ChallengeUserFileBundle.objects.filter(challenge=challenge)
+    latest = bundles.order_by("-registry_revision", "-created_at").first()
+    if latest is not None and not latest.present:
+        return None
     if runtime_config is None:
-        bundle = bundles.order_by("-registry_revision", "-created_at").first()
+        bundle = latest
     elif runtime_config.current_release is None:
         return None
     else:

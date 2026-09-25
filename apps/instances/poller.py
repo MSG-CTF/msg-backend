@@ -8,9 +8,11 @@ from urllib.request import Request, urlopen
 
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Max
+from django.utils import timezone
 
 from apps.challenge.models import Challenge
-from apps.instances.models import ChallengeRelease
+from apps.instances.models import ChallengeRelease, PollerArtifact
 from apps.instances.releases import (
     ReleaseValidationError,
     check_slug_consistency,
@@ -46,7 +48,7 @@ def github_request(path, token=None, timeout=10, max_bytes=None):
     return body
 
 
-def list_artifacts_by_suffix(suffix, token=None):
+def list_artifacts_by_suffix(suffix, token=None, stop_at_id=None):
     # 문제 저장소의 Actions artifact 전체에서 지정한 bundle만 최신순으로 돌려준다
     page_size = min(max(settings.RELEASE_POLL_LIMIT, 1), 100)
     page = 1
@@ -66,12 +68,22 @@ def list_artifacts_by_suffix(suffix, token=None):
                 "GitHub artifact 목록 형식이 올바르지 않습니다"
             )
 
-        bundles.extend(
-            entry
-            for entry in artifacts
-            if entry.get("name", "").endswith(suffix)
-            and not entry.get("expired")
-        )
+        reached_boundary = False
+        for entry in artifacts:
+            artifact_id = entry.get("id")
+            if (
+                stop_at_id is not None
+                and isinstance(artifact_id, int)
+                and not isinstance(artifact_id, bool)
+                and artifact_id <= stop_at_id
+            ):
+                reached_boundary = True
+                break
+            if entry.get("name", "").endswith(suffix) and not entry.get("expired"):
+                bundles.append(entry)
+
+        if reached_boundary:
+            break
 
         total_count = payload.get("total_count")
         if isinstance(total_count, int):
@@ -87,8 +99,51 @@ def list_artifacts_by_suffix(suffix, token=None):
     return bundles
 
 
+def pending_artifacts(kind, suffix, token=None):
+    last_seen_id = PollerArtifact.objects.filter(kind=kind).aggregate(
+        value=Max("artifact_id")
+    )["value"]
+    discovered = list_artifacts_by_suffix(
+        suffix,
+        token=token,
+        stop_at_id=last_seen_id,
+    )
+    rows = []
+    for artifact in discovered:
+        artifact_id = artifact.get("id")
+        if (
+            isinstance(artifact_id, bool)
+            or not isinstance(artifact_id, int)
+            or artifact_id <= 0
+        ):
+            raise ReleaseValidationError("artifact id 값이 올바르지 않습니다")
+        rows.append(
+            PollerArtifact(
+                artifact_id=artifact_id,
+                kind=kind,
+                payload=artifact,
+            )
+        )
+    PollerArtifact.objects.bulk_create(rows, ignore_conflicts=True)
+    return list(
+        PollerArtifact.objects.filter(kind=kind, processed_at__isnull=True)
+        .order_by("artifact_id")
+        .values_list("payload", flat=True)
+    )
+
+
+def mark_artifact_processed(artifact):
+    PollerArtifact.objects.filter(artifact_id=artifact["id"]).update(
+        processed_at=timezone.now()
+    )
+
+
 def list_bundle_artifacts(token=None):
-    return list_artifacts_by_suffix(BUNDLE_NAME_SUFFIX, token=token)
+    return pending_artifacts(
+        PollerArtifact.Kind.RELEASE,
+        BUNDLE_NAME_SUFFIX,
+        token=token,
+    )
 
 
 def workflow_run_id(artifact):
@@ -259,6 +314,7 @@ def poll_once(token=None):
         except ReleaseValidationError as error:
             logger.warning("release poller bundle 형식 오류 %s: %s", artifact.get("name"), error.message)
             summary["invalid"] += 1
+            mark_artifact_processed(artifact)
             continue
 
         try:
@@ -266,6 +322,7 @@ def poll_once(token=None):
         except ReleaseValidationError as error:
             logger.warning("release poller bundle 출처 오류 %s: %s", artifact.get("name"), error.message)
             summary["invalid"] += 1
+            mark_artifact_processed(artifact)
             continue
 
         status, detail = register_bundle(
@@ -273,6 +330,8 @@ def poll_once(token=None):
             note="공급망 자동 등록: " + str(artifact.get("name", "")),
         )
         summary[status] += 1
+        if status != "unmatched":
+            mark_artifact_processed(artifact)
         if status == "registered":
             logger.info(
                 "release poller 등록: challenge=%s version=%s revision=%s",
