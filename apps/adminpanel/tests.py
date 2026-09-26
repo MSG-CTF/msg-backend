@@ -23,7 +23,7 @@ from apps.teams.models import (
     PaymentToken,
     PaymentTokenStatus,
 )
-from apps.challenge.models import Challenge
+from apps.challenge.models import Challenge, Solve
 from apps.instances.models import DeleteReason, Instance, InstanceStatus
 from unittest.mock import patch
 
@@ -2544,7 +2544,7 @@ class AdminEventRecordingTests(TestCase):
         res = self.client.delete(f"/api/v1/admin/payment/{hid}/refund")
 
         self.assertEqual(res.status_code, 409)
-        self.assertEqual(len(self.events()), 1)
+        self.assertEqual(len(self.events("PAYMENT_REFUNDED")), 1)
 
     def test_settings_contest_only_change_records_event(self):
         from apps.adminpanel.models import AdminEvent
@@ -3377,3 +3377,290 @@ class AdminBoardCellStatusTests(AdminBoardTestBase):
     def test_requires_token(self):
         res = self.patch({"status": "CONSUMED", "reason": "x"})
         self.assertEqual(res.status_code, 401)
+
+
+@override_settings(CACHES=LOCMEM)
+class AdminTeamManageTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.team = Team.objects.create(team_name="감자는외로워")
+        self.other = Team.objects.create(team_name="고구마")
+        self.admin = User.objects.create_user(
+            login_id="root", password="pw1234", nickname="운영자", team=None, role=Role.ADMIN,
+        )
+        self.leader = User.objects.create_user(
+            login_id="leader", password="pw1234", nickname="팀장", team=self.team, is_leader=True,
+        )
+        self.member = User.objects.create_user(
+            login_id="member", password="pw1234", nickname="팀원", team=self.team,
+        )
+        self.free = User.objects.create_user(login_id="free", password="pw1234", nickname="무소속")
+        self.elsewhere = User.objects.create_user(
+            login_id="elsewhere", password="pw1234", nickname="남의팀", team=self.other,
+        )
+        self.auth("root")
+
+    def auth(self, login_id):
+        res = self.client.post(
+            "/api/v1/auth/login", {"login_id": login_id, "password": "pw1234"}, format="json",
+        )
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {res.data['data']['access_token']}")
+
+    def url(self, team=None):
+        return f"/api/v1/admin/teams/{(team or self.team).team_id}"
+
+    def patch(self, body, team=None):
+        return self.client.patch(self.url(team), body, format="json")
+
+    def delete(self, body, team=None):
+        return self.client.delete(self.url(team), body, format="json")
+
+    def events(self, event_type):
+        from apps.adminpanel.models import AdminEvent
+        return list(AdminEvent.objects.filter(type=event_type))
+
+    # ---- 수정 ----
+
+    def test_rename_team(self):
+        res = self.patch({"team_name": "감자전", "reason": "오타"})
+
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data["data"]["team_name"], "감자전")
+        self.assertEqual(Team.objects.get(pk=self.team.pk).team_name, "감자전")
+        [event] = self.events("TEAM_UPDATED")
+        self.assertIn("감자는외로워 → 감자전", event.message)
+        self.assertEqual(event.team_id, self.team.team_id)
+
+    def test_rename_to_taken_name_is_409(self):
+        res = self.patch({"team_name": "고구마", "reason": "x"})
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.data["code"], "TEAM_NAME_TAKEN")
+
+    def test_add_and_remove_members(self):
+        res = self.patch({
+            "add_user_ids": [str(self.free.user_id)],
+            "remove_user_ids": [str(self.member.user_id)],
+            "reason": "팀 재편성",
+        })
+
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(
+            sorted(m["login_id"] for m in res.data["data"]["members"]), ["free", "leader"]
+        )
+        self.assertEqual(User.objects.get(pk=self.free.pk).team_id, self.team.team_id)
+        self.assertIsNone(User.objects.get(pk=self.member.pk).team_id)
+
+    def test_change_leader(self):
+        res = self.patch({"leader_user_id": str(self.member.user_id), "reason": "팀장 교체"})
+
+        self.assertEqual(res.status_code, 200)
+        self.assertFalse(User.objects.get(pk=self.leader.pk).is_leader)
+        self.assertTrue(User.objects.get(pk=self.member.pk).is_leader)
+        self.assertEqual(res.data["data"]["members"][0]["login_id"], "member")
+        [event] = self.events("TEAM_UPDATED")
+        self.assertIn("팀장 leader → member", event.message)
+
+    def test_add_member_and_make_leader_in_one_request(self):
+        res = self.patch({
+            "add_user_ids": [str(self.free.user_id)],
+            "leader_user_id": str(self.free.user_id),
+            "reason": "신규 팀장",
+        })
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(User.objects.get(pk=self.free.pk).is_leader)
+        self.assertFalse(User.objects.get(pk=self.leader.pk).is_leader)
+
+    def test_clear_leader_with_null(self):
+        res = self.patch({"leader_user_id": None, "reason": "팀장 공석"})
+        self.assertEqual(res.status_code, 200)
+        self.assertFalse(User.objects.filter(team=self.team, is_leader=True).exists())
+
+    def test_removing_leader_leaves_team_without_leader(self):
+        res = self.patch({"remove_user_ids": [str(self.leader.user_id)], "reason": "탈퇴"})
+        self.assertEqual(res.status_code, 200)
+        leader = User.objects.get(pk=self.leader.pk)
+        self.assertIsNone(leader.team_id)
+        self.assertFalse(leader.is_leader)
+
+    def test_changed_accounts_must_log_in_again(self):
+        """claim 의 team_id·is_leader 가 바뀌므로 refresh_token 을 지운다."""
+        from apps.accounts.models import RefreshToken
+
+        for login_id in ("leader", "member"):
+            self.client.post(
+                "/api/v1/auth/login", {"login_id": login_id, "password": "pw1234"}, format="json",
+            )
+        self.auth("root")
+
+        self.patch({"remove_user_ids": [str(self.member.user_id)], "reason": "제외"})
+
+        self.assertFalse(RefreshToken.objects.filter(user=self.member).exists())
+        self.assertTrue(RefreshToken.objects.filter(user=self.leader).exists())
+
+    def test_rejects_user_from_another_team(self):
+        res = self.patch({"add_user_ids": [str(self.elsewhere.user_id)], "reason": "x"})
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(User.objects.get(pk=self.elsewhere.pk).team_id, self.other.team_id)
+
+    def test_rejects_admin_account(self):
+        res = self.patch({"add_user_ids": [str(self.admin.user_id)], "reason": "x"})
+        self.assertEqual(res.status_code, 400)
+
+    def test_rejects_leader_outside_team(self):
+        res = self.patch({"leader_user_id": str(self.free.user_id), "reason": "x"})
+        self.assertEqual(res.status_code, 400)
+        self.assertTrue(User.objects.get(pk=self.leader.pk).is_leader)
+
+    def test_rejects_removing_non_member(self):
+        res = self.patch({"remove_user_ids": [str(self.free.user_id)], "reason": "x"})
+        self.assertEqual(res.status_code, 400)
+
+    def test_rejects_bad_bodies(self):
+        cases = [
+            {"reason": "x"},
+            {"team_name": "새이름"},
+            {"team_name": "  ", "reason": "x"},
+            {"add_user_ids": "abc", "reason": "x"},
+            {"add_user_ids": ["not-a-uuid"], "reason": "x"},
+            {"add_user_ids": [str(uuid.uuid4())], "reason": "x"},
+            {"leader_user_id": 3, "reason": "x"},
+            {"add_user_ids": [str(self.free.user_id)],
+             "remove_user_ids": [str(self.free.user_id)], "reason": "x"},
+        ]
+        for body in cases:
+            with self.subTest(body=body):
+                self.assertEqual(self.patch(body).status_code, 400)
+        self.assertEqual(self.events("TEAM_UPDATED"), [])
+
+    def test_removing_member_with_running_instance_is_409(self):
+        challenge = Challenge.objects.create(
+            title="웹", category="WEB", difficulty="EASY", score=100, flag_hash="x",
+        )
+        Instance.objects.create(
+            user=self.member, team=self.team, challenge=challenge, status=InstanceStatus.RUNNING,
+        )
+        res = self.patch({"remove_user_ids": [str(self.member.user_id)], "reason": "x"})
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.data["code"], "ACTIVE_INSTANCE_EXISTS")
+        self.assertEqual(User.objects.get(pk=self.member.pk).team_id, self.team.team_id)
+
+    def test_update_unknown_team_is_404(self):
+        res = self.client.patch(
+            f"/api/v1/admin/teams/{uuid.uuid4()}", {"team_name": "x", "reason": "x"}, format="json",
+        )
+        self.assertEqual(res.status_code, 404)
+
+    # ---- 삭제 ----
+
+    def test_delete_team_cascades_accounts(self):
+        res = self.delete({"reason": "테스트 팀 정리"})
+
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data["data"]["deleted_member_count"], 2)
+        self.assertFalse(Team.objects.filter(pk=self.team.pk).exists())
+        self.assertFalse(User.objects.filter(login_id__in=["leader", "member"]).exists())
+        self.assertTrue(User.objects.filter(login_id="elsewhere").exists())
+        [event] = self.events("TEAM_DELETED")
+        self.assertEqual(event.severity, "CRITICAL")
+        self.assertIsNone(event.team_id)
+        self.assertIn("감자는외로워", event.message)
+        self.assertIn("테스트 팀 정리", event.message)
+
+    def test_delete_recalculates_dynamic_score(self):
+        """푼 팀이 줄면 문제 점수가 올라가고 남은 팀 점수도 따라 오른다."""
+        from decimal import Decimal
+        from apps.challenge.services import update_dynamic_score_and_team_scores
+
+        challenge = Challenge.objects.create(
+            title="웹", category="WEB", difficulty="EASY", score=500, flag_hash="x",
+            initial_score=500, minimum_score=100, decay=2, current_score=500,
+        )
+        for team in (self.team, self.other):
+            Solve.objects.create(team=team, challenge=challenge, earned_score=0, earned_mileage=0)
+        update_dynamic_score_and_team_scores(challenge)
+        before = Challenge.objects.get(pk=challenge.pk).current_score
+
+        self.delete({"reason": "정리"})
+
+        after = Challenge.objects.get(pk=challenge.pk).current_score
+        self.assertGreater(after, before)
+        self.assertEqual(Team.objects.get(pk=self.other.pk).team_score, after)
+        self.assertIsInstance(after, Decimal)
+
+    def test_delete_with_running_instance_is_409(self):
+        challenge = Challenge.objects.create(
+            title="웹", category="WEB", difficulty="EASY", score=100, flag_hash="x",
+        )
+        Instance.objects.create(
+            user=self.member, team=self.team, challenge=challenge, status=InstanceStatus.RUNNING,
+        )
+        res = self.delete({"reason": "정리"})
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.data["code"], "ACTIVE_INSTANCE_EXISTS")
+        self.assertTrue(Team.objects.filter(pk=self.team.pk).exists())
+        self.assertEqual(self.events("TEAM_DELETED"), [])
+
+    def test_delete_requires_reason(self):
+        self.assertEqual(self.delete({}).status_code, 400)
+        self.assertTrue(Team.objects.filter(pk=self.team.pk).exists())
+
+    def test_delete_unknown_team_is_404(self):
+        res = self.client.delete(f"/api/v1/admin/teams/{uuid.uuid4()}", {"reason": "x"}, format="json")
+        self.assertEqual(res.status_code, 404)
+
+    def test_participant_cannot_update_or_delete(self):
+        self.auth("leader")
+        self.assertEqual(self.patch({"team_name": "x", "reason": "x"}).status_code, 403)
+        self.assertEqual(self.delete({"reason": "x"}).status_code, 403)
+
+    # ---- 나머지 관리자 조작 이벤트 ----
+
+    def test_account_create_records_event(self):
+        res = self.client.post(
+            "/api/v1/admin/accounts",
+            {"login_id": "newbie", "password": "pw12345678", "nickname": "신입",
+             "team_id": str(self.other.team_id)},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 200)
+        [event] = self.events("ACCOUNT_CREATED")
+        self.assertIn("newbie", event.message)
+        self.assertEqual(event.team_id, self.other.team_id)
+
+    def test_failed_account_create_leaves_no_event(self):
+        self.client.post(
+            "/api/v1/admin/accounts",
+            {"login_id": "leader", "password": "pw12345678", "nickname": "중복"},
+            format="json",
+        )
+        self.assertEqual(self.events("ACCOUNT_CREATED"), [])
+
+    def test_payment_records_event(self):
+        self.team.mileage = 100
+        self.team.save(update_fields=["mileage"])
+        PaymentToken.objects.create(
+            team=self.team, token_hash=hash_token("tok"), status=PaymentTokenStatus.ACTIVE,
+            expires_at=timezone.now() + timedelta(hours=1),
+        )
+        res = self.client.post(
+            "/api/v1/admin/payment/checkout",
+            {"payment_token": "tok", "amount": 30, "item_name": "굿즈"}, format="json",
+        )
+        self.assertEqual(res.status_code, 200)
+        [event] = self.events("PAYMENT_PROCESSED")
+        self.assertIn("-30", event.message)
+        self.assertIn("굿즈", event.message)
+        self.assertEqual(event.team_id, self.team.team_id)
+
+    def test_challenge_create_records_event(self):
+        res = self.client.post(
+            "/api/v1/admin/challenges",
+            {"challenge_slug": "web-1", "title": "첫 문제", "category": "WEB", "difficulty": "EASY",
+             "flag": "MSG{x}", "initial_score": 500, "minimum_score": 100, "decay": 10},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        [event] = self.events("CHALLENGE_CREATED")
+        self.assertIn("첫 문제", event.message)
+        self.assertEqual(str(event.challenge_id), res.data["data"]["challenge_id"])
