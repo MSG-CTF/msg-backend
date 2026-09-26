@@ -126,6 +126,9 @@ def grant_dice_roll(state, amount):
     """Return the actual reward, preserving the recharge deadline below capacity."""
     if amount <= 0:
         return 0
+    if is_board_completed(state.team_id):
+        state.next_dice_reset_at = None
+        return 0
     now = timezone.now()
     _update_dice_recharge(state, now)
     granted = max(0, min(amount, MAX_DICE_ROLLS - state.dice_rolls_left))
@@ -145,7 +148,9 @@ def get_consumed_indexes(team):
 
 
 def is_board_completed(team):
-    return TeamCellConsumption.objects.filter(team=team).count() >= BOARD_SIZE
+    return TeamCellConsumption.objects.filter(
+        team=team, cell_id__gt=START_CELL_INDEX, cell_id__lte=LAST_CELL_INDEX,
+    ).count() >= BOARD_SIZE - 1
 
 
 def challenge_solve_deadline(access):
@@ -207,8 +212,9 @@ def consume_cell(team, cell):
 
 
 def compute_start_reward(passed_start, landed_on_start):
+    reached_start = passed_start or landed_on_start
     return {
-        "mileage_gained": START_PASS_MILEAGE_REWARD if passed_start else 0,
+        "mileage_gained": START_PASS_MILEAGE_REWARD if reached_start else 0,
         "roll_gained": START_ROLL_BONUS if landed_on_start else 0,
     }
 
@@ -222,6 +228,9 @@ def finalize_landing(team, state, cell, passed_start, landed_on_start):
 
     reward = compute_start_reward(passed_start, landed_on_start)
     update_fields = ["position", "updated_at"]
+    if is_board_completed(team):
+        state.next_dice_reset_at = None
+        update_fields.append("next_dice_reset_at")
     if passed_start:
         update_fields.append("has_passed_start")
     if reward["roll_gained"]:
@@ -361,7 +370,11 @@ def roll_dice(team):
                 "start_reward": start_reward,
                 "board_event_code": board_event_code,
                 "pending_confirm": True,
-                "usable_chance_card": {"card_id": held_card.card_id, "effect": held_card.card.effect},
+                "usable_chance_card": {
+                    "card_id": held_card.card_id,
+                    "team_card_id": str(held_card.pk),
+                    "effect": held_card.card.effect,
+                },
             }
 
         start_reward = finalize_landing(team, state, destination_cell, passed_start, landed_on_start)
@@ -820,6 +833,7 @@ def build_chance_cards_view(team, state):
         result.append(
             {
                 "card_id": draw.card_id,
+                "team_card_id": str(draw.pk),
                 "used": used,
                 "discarded": discarded,
                 "usable_now": usable_now,
@@ -851,17 +865,23 @@ def draw_chance_card(team):
     return draw, state.dice_rolls_left, awaiting_discard
 
 
-def discard_chance_card(team, card_id):
+def discard_chance_card(team, card_id, *, team_card_id=None):
     """찬스카드를 2장 들고 있을 때(재드로우), 팀장이 직접 하나를 골라 버린다."""
-    if not card_id:
+    if not card_id and team_card_id is None:
         raise CardIdRequired()
 
     with transaction.atomic():
+        # Serialize discards with draws and uses, including two different cards.
+        get_or_create_board_state(team)
         held = list(_held_cards_queryset(team).select_for_update(of=("self",)).select_related("card"))
         if len(held) < 2:
             raise NoCardToDiscard()
 
-        target = next((draw for draw in held if draw.card_id == card_id), None)
+        target = next((
+            draw for draw in held
+            if (team_card_id is None or draw.pk == team_card_id)
+            and (not card_id or draw.card_id == card_id)
+        ), None)
         if target is None:
             raise ChanceCardNotFound()
 
@@ -870,7 +890,10 @@ def discard_chance_card(team, card_id):
 
         remaining = next(draw for draw in held if draw.pk != target.pk)
 
-    return {"discarded_card_id": target.card_id, "kept_card_id": remaining.card_id}
+    return {
+        "discarded_card_id": target.card_id, "kept_card_id": remaining.card_id,
+        "discarded_team_card_id": str(target.pk), "kept_team_card_id": str(remaining.pk),
+    }
 
 
 def _assert_timing_ok(team, state, card):
@@ -1085,15 +1108,20 @@ _EFFECT_HANDLERS = {
 }
 
 
-def use_chance_card(team, card_id, payload):
-    if not card_id:
+def use_chance_card(team, card_id, payload, *, team_card_id=None):
+    if not card_id and team_card_id is None:
         raise CardIdRequired()
-    if card_id not in ChanceCard.CardId.values:
+    if card_id and card_id not in ChanceCard.CardId.values:
         raise ChanceCardNotFound()
 
-    existing_draw = _held_cards_queryset(team).filter(card_id=card_id).first()
-    if existing_draw is None:
-        existing_draw = TeamChanceCard.objects.filter(team=team, card_id=card_id).first()
+    draws = TeamChanceCard.objects.filter(team=team, card_id__in=ChanceCard.CardId.values)
+    if card_id:
+        draws = draws.filter(card_id=card_id)
+    if team_card_id is not None:
+        existing_draw = draws.filter(pk=team_card_id).first()
+    else:
+        # Retain legacy card_id requests, choosing a specific unused copy once.
+        existing_draw = draws.filter(used_at__isnull=True, discarded_at__isnull=True).first() or draws.first()
     if existing_draw is None:
         raise ChanceCardNotFound()
     if existing_draw.used_at is not None:
@@ -1105,19 +1133,11 @@ def use_chance_card(team, card_id, payload):
     with transaction.atomic():
         state = TeamBoardState.objects.select_for_update().get(team=team)
         draw = (
-            _held_cards_queryset(team)
-            .select_for_update(of=("self",))
+            TeamChanceCard.objects.select_for_update(of=("self",))
             .select_related("card")
-            .filter(card_id=card_id)
+            .filter(team=team, pk=existing_draw.pk)
             .first()
         )
-        if draw is None:
-            draw = (
-                TeamChanceCard.objects.select_for_update(of=("self",))
-                .select_related("card")
-                .filter(team=team, card_id=card_id)
-                .first()
-            )
         if draw is None:
             raise ChanceCardNotFound()
         if draw.used_at is not None:
@@ -1134,7 +1154,9 @@ def use_chance_card(team, card_id, payload):
         if handler is None:
             raise ChanceCardNotFound()
 
-        return handler(team, state, draw, payload or {})
+        result = handler(team, state, draw, payload or {})
+        result["team_card_id"] = str(draw.pk)
+        return result
 
 
 def confirm_chance_choice(team, choice):
@@ -1179,6 +1201,7 @@ def confirm_chance_choice(team, choice):
         "card_id": draw.card_id,
         "effect": draw.card.effect,
         "choice": choice,
+        "team_card_id": str(draw.pk),
         "chosen_number": chosen_number,
         "from_index": previous_position,
         "to_index": destination,
