@@ -7,7 +7,12 @@ from rest_framework.test import APIClient
 from apps.accounts.models import Role, Team, User
 from apps.koth.models import KothClub
 
-from .models import SignatureChallenge, SignatureSolve
+from .models import (
+    SignatureChallenge,
+    SignatureFlagSubmission,
+    SignatureSolve,
+    SignatureSubmissionLock,
+)
 
 
 class SignatureAdminApiTests(TestCase):
@@ -165,6 +170,88 @@ class SignatureAdminApiTests(TestCase):
             challenge.refresh_from_db()
             self.assertEqual(challenge.is_published, is_published)
 
+    def test_admin_can_delete_unused_unpublished_challenge_and_recreate(self):
+        challenge = self.create_challenge()
+        signature_id = challenge.signature_id
+        self.authenticate()
+
+        response = self.client.delete(
+            f"/api/v1/admin/signatures/{signature_id}"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["code"], "SUCCESS")
+        self.assertEqual(
+            response.data["data"]["signature_id"],
+            str(signature_id),
+        )
+        self.assertFalse(SignatureChallenge.objects.filter(pk=signature_id).exists())
+
+        recreated = self.client.post(
+            "/api/v1/admin/signatures",
+            {
+                "club_id": str(self.club.club_id),
+                "title": "Recreated Signature",
+                "description": "다시 등록한 문제",
+                "flag": "MSG{recreated}",
+            },
+            format="json",
+        )
+        self.assertEqual(recreated.status_code, 201)
+
+    def test_delete_rejects_published_challenge(self):
+        challenge = self.create_challenge(is_published=True)
+        self.authenticate()
+
+        response = self.client.delete(
+            f"/api/v1/admin/signatures/{challenge.signature_id}"
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["code"], "SIGNATURE_IN_USE")
+        self.assertTrue(
+            SignatureChallenge.objects.filter(pk=challenge.signature_id).exists()
+        )
+
+    def test_delete_rejects_solve_submission_and_lock_records(self):
+        self.authenticate()
+        for index, record_type in enumerate(("solve", "submission", "lock"), start=1):
+            with self.subTest(record_type=record_type):
+                club = KothClub.objects.create(name=f"Delete Test {index}")
+                challenge = self.create_challenge(club=club)
+                team = Team.objects.create(team_name=f"Delete Team {index}")
+
+                if record_type == "solve":
+                    SignatureSolve.objects.create(
+                        team=team,
+                        challenge=challenge,
+                        earned_score=challenge.score,
+                    )
+                elif record_type == "submission":
+                    SignatureFlagSubmission.objects.create(
+                        team=team,
+                        challenge=challenge,
+                        submitted_flag_hash="submitted-hash",
+                        result=SignatureFlagSubmission.SubmissionResult.INCORRECT,
+                    )
+                else:
+                    SignatureSubmissionLock.objects.create(
+                        team=team,
+                        challenge=challenge,
+                    )
+
+                response = self.client.delete(
+                    f"/api/v1/admin/signatures/{challenge.signature_id}"
+                )
+
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(response.data["code"], "SIGNATURE_IN_USE")
+                self.assertTrue(
+                    SignatureChallenge.objects.filter(
+                        pk=challenge.signature_id
+                    ).exists()
+                )
+
     def test_update_rejects_empty_body(self):
         challenge = self.create_challenge()
         self.authenticate()
@@ -178,11 +265,20 @@ class SignatureAdminApiTests(TestCase):
         self.assertEqual(response.data["code"], "INVALID_REQUEST")
 
     def test_non_admin_is_forbidden(self):
+        challenge = self.create_challenge()
         self.authenticate(self.participant)
         response = self.client.get("/api/v1/admin/signatures")
+        deleted = self.client.delete(
+            f"/api/v1/admin/signatures/{challenge.signature_id}"
+        )
 
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.data["code"], "FORBIDDEN")
+        self.assertEqual(deleted.status_code, 403)
+        self.assertEqual(deleted.data["code"], "FORBIDDEN")
+        self.assertTrue(
+            SignatureChallenge.objects.filter(pk=challenge.signature_id).exists()
+        )
 
     def test_update_and_publish_return_not_found(self):
         self.authenticate()
@@ -198,8 +294,11 @@ class SignatureAdminApiTests(TestCase):
             {"is_published": True},
             format="json",
         )
+        deleted = self.client.delete(f"/api/v1/admin/signatures/{missing_id}")
 
         self.assertEqual(update.status_code, 404)
         self.assertEqual(update.data["code"], "SIGNATURE_NOT_FOUND")
         self.assertEqual(publish.status_code, 404)
         self.assertEqual(publish.data["code"], "SIGNATURE_NOT_FOUND")
+        self.assertEqual(deleted.status_code, 404)
+        self.assertEqual(deleted.data["code"], "SIGNATURE_NOT_FOUND")
