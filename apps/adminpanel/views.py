@@ -75,6 +75,7 @@ from apps.instances.services import (
     call_scheduler_reset,
     create_instance_from_scheduler,
     isoformat_z,
+    mark_instance_replaced,
     scheduler_auth_header,
 )
 from .serializers import ChallengeCreateSerializer
@@ -919,13 +920,18 @@ def instance_force_reset(request, instance_id):
         except SchedulerError as error:
             return fail(error.code, error.message, error.status_code)
 
-        new_instance = create_instance_from_scheduler(
-            scheduler_data,
-            user=instance.user,
-            team=instance.team,
-            challenge=instance.challenge,
-            replaced_instance=instance,
-        )
+        try:
+            new_instance = create_instance_from_scheduler(
+                scheduler_data,
+                user=instance.user,
+                team=instance.team,
+                challenge=instance.challenge,
+                replaced_instance=instance,
+                release=instance.release,
+            )
+        except SchedulerError as error:
+            return fail(error.code, error.message, error.status_code)
+        mark_instance_replaced(instance)
         _record_event(
             AdminEvent.EventType.INSTANCE_FORCED,
             f"인스턴스 강제 재시작 (이전 {instance.instance_id})",
@@ -944,6 +950,11 @@ def instance_force_reset(request, instance_id):
             "challenge_id": str(new_instance.challenge_id),
             "status": new_instance.status,
             "host": new_instance.host if new_instance.status == InstanceStatus.RUNNING else None,
+            "endpoints": (
+                new_instance.endpoints
+                if new_instance.status == InstanceStatus.RUNNING
+                else []
+            ),
             "port": None,
             "expires_at": isoformat_z(new_instance.expires_at),
             "forced_by": request.user.login_id,

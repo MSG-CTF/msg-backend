@@ -24,7 +24,14 @@ from apps.teams.models import (
     PaymentTokenStatus,
 )
 from apps.challenge.models import Challenge
-from apps.instances.models import DeleteReason, Instance, InstanceStatus
+from apps.instances.models import (
+    ChallengeRelease,
+    ChallengeRuntimeConfig,
+    DeleteReason,
+    Instance,
+    InstanceStatus,
+    ReleaseContainer,
+)
 from unittest.mock import patch
 
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
@@ -1477,6 +1484,7 @@ class PaymentTests(TestCase):
         self.assertEqual(res.status_code, 400)
         self.assertEqual(res.data["code"], "INVALID_REQUEST")
 
+@override_settings(CACHES=LOCMEM, SCHEDULER_API_TOKEN="test-scheduler-token")
 class AdminInstanceTests(TestCase):
     def setUp(self):
         cache.clear()
@@ -1493,6 +1501,30 @@ class AdminInstanceTests(TestCase):
             title="웹 문제", category="WEB", difficulty="EASY",
             score=500, flag_hash="x", is_published=True,
         )
+        self.release = ChallengeRelease.objects.create(
+            challenge=self.challenge,
+            version=1,
+            registry_revision=1,
+            challenge_slug="web-basic",
+            cpu_millicores=500,
+            memory_mib=512,
+            ephemeral_storage_mib=1024,
+            isolation_profile="WEB",
+            source_ref="refs/heads/main",
+        )
+        ReleaseContainer.objects.create(
+            release=self.release,
+            name="web",
+            image_ref=(
+                "ghcr.io/msg-ctf/challenges/web-basic/web@sha256:"
+                + "a" * 64
+            ),
+            ports=[{"port": 8080, "public": True}],
+        )
+        ChallengeRuntimeConfig.objects.create(
+            challenge=self.challenge,
+            current_release=self.release,
+        )
         self.auth("root")
 
     def auth(self, login_id):
@@ -1505,7 +1537,7 @@ class AdminInstanceTests(TestCase):
     def _instance(self, status=InstanceStatus.RUNNING, user=None):
         return Instance.objects.create(
             user=user or self.player, team=self.team, challenge=self.challenge,
-            status=status,
+            status=status, release=self.release,
         )
 
     def test_list_returns_instances_and_summary(self):
@@ -1570,6 +1602,15 @@ class AdminInstanceTests(TestCase):
     @patch("apps.adminpanel.views.call_scheduler_reset")
     def test_force_reset_replaces_instance(self, mock_reset):
         old = self._instance(status=InstanceStatus.RUNNING)
+        old.endpoints = [
+            {
+                "container_name": "web",
+                "port": 8080,
+                "protocol": "HTTP",
+                "service_url": "https://old.instance.example",
+            }
+        ]
+        old.save(update_fields=["endpoints", "updated_at"])
         new_id = uuid.uuid4()
         mock_reset.return_value = {"instance_id": str(new_id), "status": "RESETTING"}
         res = self.client.post(f"/api/v1/admin/instances/{old.instance_id}/reset")
@@ -1577,9 +1618,15 @@ class AdminInstanceTests(TestCase):
         self.assertEqual(res.data["data"]["instance_id"], str(new_id))
         self.assertNotEqual(res.data["data"]["instance_id"], str(old.instance_id))
         self.assertEqual(res.data["data"]["status"], "RESETTING")
+        self.assertEqual(res.data["data"]["endpoints"], [])
         self.assertEqual(res.data["data"]["forced_by"], "root")
         new_inst = Instance.objects.get(pk=new_id)
         self.assertEqual(new_inst.replaced_instance_id, old.instance_id)
+        self.assertEqual(new_inst.release_id, self.release.release_id)
+        self.assertEqual(new_inst.endpoints, [])
+        old.refresh_from_db()
+        self.assertEqual(old.status, InstanceStatus.STOPPING)
+        self.assertEqual(old.delete_reason, DeleteReason.REPLACED_BY_NEW_INSTANCE)
 
     def test_force_reset_not_restartable(self):
         inst = self._instance(status=InstanceStatus.STOPPED)
@@ -2002,6 +2049,11 @@ class AdminEventTests(TestCase):
     def test_newest_first(self):
         first = self._event(message="먼저")
         second = self._event(message="나중")
+        now = timezone.now()
+        first.__class__.objects.filter(pk=first.pk).update(
+            created_at=now - timedelta(seconds=1)
+        )
+        second.__class__.objects.filter(pk=second.pk).update(created_at=now)
         self.auth("root")
         messages = [e["message"] for e in self.client.get(self.url).data["data"]["events"]]
         self.assertEqual(messages, ["나중", "먼저"])
@@ -2288,7 +2340,7 @@ class AdminTeamLockCoverageTests(TestCase):
         self.assertEqual(self.team.mileage, 230)
 
 
-@override_settings(CACHES=LOCMEM)
+@override_settings(CACHES=LOCMEM, SCHEDULER_API_TOKEN="test-scheduler-token")
 class AdminEventRecordingTests(TestCase):
     """관리자 조작이 admin_events 에 남는지, 실패한 조작은 남지 않는지 확인한다."""
 
@@ -2488,7 +2540,24 @@ class AdminEventRecordingTests(TestCase):
     def test_force_reset_records_new_instance_id(self, mock_reset):
         from apps.adminpanel.models import AdminEvent
 
-        old = self.instance()
+        release = ChallengeRelease.objects.create(
+            challenge=self.challenge,
+            version=1,
+            registry_revision=1,
+            challenge_slug="web-basic",
+            cpu_millicores=500,
+            memory_mib=512,
+            ephemeral_storage_mib=1024,
+            isolation_profile="WEB",
+            source_ref="refs/heads/main",
+        )
+        old = Instance.objects.create(
+            user=self.player,
+            team=self.team,
+            challenge=self.challenge,
+            status=InstanceStatus.RUNNING,
+            release=release,
+        )
         new_id = uuid.uuid4()
         mock_reset.return_value = {"instance_id": str(new_id), "status": "RESETTING"}
 
@@ -2496,6 +2565,8 @@ class AdminEventRecordingTests(TestCase):
 
         self.assertEqual(res.status_code, 202)
         event = self.only_event(AdminEvent.EventType.INSTANCE_FORCED)
+        replacement = Instance.objects.get(instance_id=new_id)
+        self.assertEqual(replacement.release_id, release.release_id)
         self.assertEqual(event.instance_id, new_id)
         self.assertIn(str(old.instance_id), event.message)
 
@@ -2683,11 +2754,22 @@ class AdminEventRecordingTests(TestCase):
         self.assertEqual(self.events(), [])
 
     def test_recorded_events_visible_in_event_list(self):
+        from apps.adminpanel.models import AdminEvent
+
         self.client.post(
             f"/api/v1/admin/teams/{self.team.team_id}/ban",
             {"ban_reason": "플래그 공유"}, format="json",
         )
         self.mileage({"amount": 10, "reason": "보상"})
+
+        events = {event.type: event for event in AdminEvent.objects.all()}
+        now = timezone.now()
+        AdminEvent.objects.filter(
+            pk=events[AdminEvent.EventType.TEAM_BANNED].pk
+        ).update(created_at=now - timedelta(seconds=1))
+        AdminEvent.objects.filter(
+            pk=events[AdminEvent.EventType.MILEAGE_ADJUSTED].pk
+        ).update(created_at=now)
 
         res = self.client.get("/api/v1/admin/events")
 
