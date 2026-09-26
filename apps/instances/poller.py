@@ -8,9 +8,11 @@ from urllib.request import Request, urlopen
 
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Max
+from django.utils import timezone
 
 from apps.challenge.models import Challenge
-from apps.instances.models import ChallengeRelease
+from apps.instances.models import ChallengeRelease, PollerArtifact
 from apps.instances.releases import (
     ReleaseValidationError,
     check_slug_consistency,
@@ -23,9 +25,10 @@ logger = logging.getLogger(__name__)
 BUNDLE_NAME_SUFFIX = "-publish-bundle"
 BUNDLE_FILE_NAME = "artifact-v2.json"
 POLLER_CREATED_BY = "release-poller"
+RETRYABLE_WORKFLOW_STATUSES = {"queued", "in_progress"}
 
 
-def github_request(path, token=None, timeout=10):
+def github_request(path, token=None, timeout=10, max_bytes=None):
     # 공급망 artifact 조회용 GitHub API 호출. 응답 본문 bytes를 돌려준다
     base = settings.RELEASE_POLL_API_BASE.rstrip("/")
     if not base.startswith(("http://", "https://")):
@@ -40,11 +43,14 @@ def github_request(path, token=None, timeout=10):
     request = Request(base + path, headers=headers)
     # 위에서 scheme을 http와 https로 제한한 운영 설정만 사용한다
     with urlopen(request, timeout=timeout) as response:  # nosec B310
-        return response.read()
+        body = response.read() if max_bytes is None else response.read(max_bytes + 1)
+    if max_bytes is not None and len(body) > max_bytes:
+        raise ReleaseValidationError("GitHub artifact 크기가 허용 범위를 초과합니다")
+    return body
 
 
-def list_bundle_artifacts(token=None):
-    # 문제 저장소의 Actions artifact 전체에서 publish bundle만 최신순으로 돌려준다
+def list_artifacts_by_suffix(suffix, token=None, stop_at_id=None):
+    # 문제 저장소의 Actions artifact 전체에서 지정한 bundle만 최신순으로 돌려준다
     page_size = min(max(settings.RELEASE_POLL_LIMIT, 1), 100)
     page = 1
     bundles = []
@@ -63,12 +69,22 @@ def list_bundle_artifacts(token=None):
                 "GitHub artifact 목록 형식이 올바르지 않습니다"
             )
 
-        bundles.extend(
-            entry
-            for entry in artifacts
-            if entry.get("name", "").endswith(BUNDLE_NAME_SUFFIX)
-            and not entry.get("expired")
-        )
+        reached_boundary = False
+        for entry in artifacts:
+            artifact_id = entry.get("id")
+            if (
+                stop_at_id is not None
+                and isinstance(artifact_id, int)
+                and not isinstance(artifact_id, bool)
+                and artifact_id <= stop_at_id
+            ):
+                reached_boundary = True
+                break
+            if entry.get("name", "").endswith(suffix) and not entry.get("expired"):
+                bundles.append(entry)
+
+        if reached_boundary:
+            break
 
         total_count = payload.get("total_count")
         if isinstance(total_count, int):
@@ -82,6 +98,53 @@ def list_bundle_artifacts(token=None):
         page += 1
 
     return bundles
+
+
+def pending_artifacts(kind, suffix, token=None):
+    last_seen_id = PollerArtifact.objects.filter(kind=kind).aggregate(
+        value=Max("artifact_id")
+    )["value"]
+    discovered = list_artifacts_by_suffix(
+        suffix,
+        token=token,
+        stop_at_id=last_seen_id,
+    )
+    rows = []
+    for artifact in discovered:
+        artifact_id = artifact.get("id")
+        if (
+            isinstance(artifact_id, bool)
+            or not isinstance(artifact_id, int)
+            or artifact_id <= 0
+        ):
+            raise ReleaseValidationError("artifact id 값이 올바르지 않습니다")
+        rows.append(
+            PollerArtifact(
+                artifact_id=artifact_id,
+                kind=kind,
+                payload=artifact,
+            )
+        )
+    PollerArtifact.objects.bulk_create(rows, ignore_conflicts=True)
+    return list(
+        PollerArtifact.objects.filter(kind=kind, processed_at__isnull=True)
+        .order_by("artifact_id")
+        .values_list("payload", flat=True)
+    )
+
+
+def mark_artifact_processed(artifact):
+    PollerArtifact.objects.filter(artifact_id=artifact["id"]).update(
+        processed_at=timezone.now()
+    )
+
+
+def list_bundle_artifacts(token=None):
+    return pending_artifacts(
+        PollerArtifact.Kind.RELEASE,
+        BUNDLE_NAME_SUFFIX,
+        token=token,
+    )
 
 
 def workflow_run_id(artifact):
@@ -105,6 +168,10 @@ def get_workflow_run(artifact, token=None):
     if not isinstance(workflow_run, dict):
         raise ReleaseValidationError("workflow_run 응답 값이 올바르지 않습니다")
     return workflow_run
+
+
+def workflow_run_is_retryable(workflow_run):
+    return workflow_run.get("status") in RETRYABLE_WORKFLOW_STATUSES
 
 
 def download_bundle(artifact, token=None):
@@ -243,6 +310,12 @@ def poll_once(token=None):
     for artifact in artifacts:
         try:
             workflow_run = get_workflow_run(artifact, token=token)
+            if workflow_run_is_retryable(workflow_run):
+                logger.info(
+                    "release poller workflow 실행 중, 다음 poll에서 재시도: %s",
+                    artifact.get("name"),
+                )
+                continue
             validate_workflow_run_source(artifact, workflow_run)
             artifact_data = download_bundle(artifact, token=token)
         except (HTTPError, URLError, TimeoutError, ValueError, zipfile.BadZipFile) as error:
@@ -252,6 +325,7 @@ def poll_once(token=None):
         except ReleaseValidationError as error:
             logger.warning("release poller bundle 형식 오류 %s: %s", artifact.get("name"), error.message)
             summary["invalid"] += 1
+            mark_artifact_processed(artifact)
             continue
 
         try:
@@ -259,6 +333,7 @@ def poll_once(token=None):
         except ReleaseValidationError as error:
             logger.warning("release poller bundle 출처 오류 %s: %s", artifact.get("name"), error.message)
             summary["invalid"] += 1
+            mark_artifact_processed(artifact)
             continue
 
         status, detail = register_bundle(
@@ -266,6 +341,8 @@ def poll_once(token=None):
             note="공급망 자동 등록: " + str(artifact.get("name", "")),
         )
         summary[status] += 1
+        if status != "unmatched":
+            mark_artifact_processed(artifact)
         if status == "registered":
             logger.info(
                 "release poller 등록: challenge=%s version=%s revision=%s",

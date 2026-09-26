@@ -5,10 +5,15 @@ from unittest.mock import patch
 
 from django.core.cache import cache
 from django.test import TestCase, override_settings
+from django.utils import timezone
 
 from apps.challenge.models import Challenge
 from apps.challenge.services import hash_flag
-from apps.instances.models import ChallengeRelease, ChallengeRuntimeConfig
+from apps.instances.models import (
+    ChallengeRelease,
+    ChallengeRuntimeConfig,
+    PollerArtifact,
+)
 from apps.instances.poller import list_bundle_artifacts, poll_once, register_bundle
 
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
@@ -160,6 +165,33 @@ class ListBundleArtifactsTests(TestCase):
 
         self.assertEqual([artifact["id"] for artifact in artifacts], [2, 3])
 
+    @override_settings(RELEASE_POLL_LIMIT=3)
+    def test_stops_listing_at_processed_artifact_boundary(self):
+        PollerArtifact.objects.create(
+            artifact_id=10,
+            kind=PollerArtifact.Kind.RELEASE,
+            payload=publish_artifact(10, "old-publish-bundle"),
+            processed_at=timezone.now(),
+        )
+        responses = [
+            json.dumps(
+                {
+                    "total_count": 100,
+                    "artifacts": [
+                        publish_artifact(12, "new-publish-bundle"),
+                        publish_artifact(11, "test-output"),
+                        publish_artifact(10, "old-publish-bundle"),
+                    ],
+                }
+            ).encode("utf-8")
+        ]
+
+        with patch("apps.instances.poller.urlopen", fake_urlopen(responses)):
+            artifacts = list_bundle_artifacts(token="test-token")
+
+        self.assertEqual([artifact["id"] for artifact in artifacts], [12])
+        self.assertIsNone(PollerArtifact.objects.get(pk=12).processed_at)
+
 
 @override_settings(CACHES=LOCMEM)
 class PollerTestBase(TestCase):
@@ -297,6 +329,58 @@ class PollOnceTests(PollerTestBase):
         self.assertEqual(summary["invalid"], 1)
         self.assertEqual(summary["registered"], 0)
         self.assertEqual(ChallengeRelease.objects.count(), 0)
+        self.assertIsNotNone(PollerArtifact.objects.get(pk=11).processed_at)
+
+    def test_poll_once_retries_running_workflow_after_success(self):
+        for offset, status in enumerate(("queued", "in_progress")):
+            with self.subTest(status=status):
+                artifact_id = 20 + offset
+                revision = offset + 1
+                sha = SHA_A if offset == 0 else SHA_B
+                digest = DIGEST_A if offset == 0 else DIGEST_B
+                artifact = publish_artifact(
+                    artifact_id,
+                    f"web-basic-{revision}-1-x-publish-bundle",
+                    sha=sha,
+                )
+                responses = [
+                    json.dumps({"artifacts": [artifact]}).encode("utf-8"),
+                    workflow_run(
+                        artifact_id,
+                        sha=sha,
+                        status=status,
+                        conclusion=None,
+                    ),
+                    json.dumps({"artifacts": []}).encode("utf-8"),
+                    workflow_run(artifact_id, sha=sha),
+                    bundle_zip(
+                        bundle(
+                            revision=revision,
+                            challenge_id=self.challenge.challenge_id,
+                            source_sha=sha,
+                            digest=digest,
+                        )
+                    ),
+                ]
+
+                with patch("apps.instances.poller.urlopen", fake_urlopen(responses)):
+                    pending = poll_once(token="test-token")
+                    record = PollerArtifact.objects.get(pk=artifact_id)
+                    self.assertEqual(pending["registered"], 0)
+                    self.assertEqual(pending["invalid"], 0)
+                    self.assertIsNone(record.processed_at)
+
+                    completed = poll_once(token="test-token")
+
+                self.assertEqual(completed["registered"], 1)
+                record.refresh_from_db()
+                self.assertIsNotNone(record.processed_at)
+                self.assertTrue(
+                    ChallengeRelease.objects.filter(
+                        challenge=self.challenge,
+                        registry_revision=revision,
+                    ).exists()
+                )
 
     def test_poll_once_rejects_wrong_branch(self):
         artifacts_page = json.dumps(
