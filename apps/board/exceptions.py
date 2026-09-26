@@ -144,7 +144,7 @@ class NoCardToDiscard(APIError):
 class CardIdRequired(APIError):
     status_code = status.HTTP_400_BAD_REQUEST
     code = "CARD_ID_REQUIRED"
-    message = "card_id가 필요합니다."
+    message = "team_card_id 또는 card_id가 필요합니다."
 
 
 class ChanceCardNotFound(APIError):

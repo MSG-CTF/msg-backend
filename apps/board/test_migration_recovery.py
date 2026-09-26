@@ -48,8 +48,9 @@ class BoardMigrationRecoveryTests(TransactionTestCase):
     def test_forward_migration_failure_rolls_back_data_and_can_retry(self):
         source = test_migrations.BoardSpecMigrationTestCase.migrate_from
         target = test_migrations.BoardSpecMigrationTestCase.migrate_to
-        self.addCleanup(lambda: MigrationExecutor(connection).migrate(target))
         executor = MigrationExecutor(connection)
+        latest = executor.loader.graph.leaf_nodes()
+        self.addCleanup(lambda: MigrationExecutor(connection).migrate(latest))
         executor.migrate(source)
         old_apps = executor.loader.project_state(source).apps
         OldCell = old_apps.get_model("board", "Cell")
@@ -97,7 +98,7 @@ class BoardMigrationRecoveryTests(TransactionTestCase):
         self.assertEqual((state.dice_rolls_left, state.next_dice_reset_at, state.is_quarantined), (2, deadline, True))
         self.assertEqual(OldTeam.objects.get(pk=team.pk).mileage, 450)
 
-        MigrationExecutor(connection).migrate(target)
+        MigrationExecutor(connection).migrate(latest)
         self.assert_latest_schema_usable()
         self.assertEqual(Cell.objects.get(pk=16).type, "ROULETTE")
         state = TeamBoardState.objects.get(pk=team.pk)

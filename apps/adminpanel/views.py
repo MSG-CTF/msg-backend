@@ -4,6 +4,7 @@ from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.db.models import Count, Prefetch, Q, Sum
 from django.utils import timezone
+from datetime import datetime
 
 from rest_framework.decorators import api_view, permission_classes
 
@@ -16,13 +17,24 @@ from apps.common.jwt import hash_token
 from apps.common.idempotency import run_idempotent
 from apps.challenge.models import Challenge, Solve
 from apps.challenge.services import hash_flag
-from apps.board.models import TeamBoardState, TeamChallengeAccess
+from apps.board.models import (
+    Cell,
+    PendingDiceRoll,
+    TeamBoardState,
+    TeamCellCandidate,
+    TeamCellConsumption,
+    TeamChallengeAccess,
+    TeamChanceCard,
+)
 from apps.board.services import (
+    FIRST_CELL_INDEX,
+    LAST_CELL_INDEX,
     MAX_DICE_ROLLS,
     apply_pending_dice_recharge,
     get_or_create_board_state,
 )
 from apps.timer.models import Contest
+from .models import AdminEvent, AdminSetting
 
 from apps.teams.models import (
     MileageHistory,
@@ -45,6 +57,8 @@ from .exceptions import (
     PaymentTokenInvalid,
     TeamNotFound,
     TeamAlreadyHasLeader,
+    TeamNameTaken,
+    ContestAlreadyStarted,
 )
 
 from apps.instances.models import (
@@ -79,6 +93,28 @@ MILEAGE_TYPES = set(MileageType.values)
 
 DICE_ADJUST_MIN = -20
 DICE_ADJUST_MAX = 20
+
+SETTING_SPECS = {
+    "board.dice_rolls_per_reset": (1, 20, 3),
+    "board.dice_reset_interval_minutes": (1, 1440, 15),
+    "board.solve_deadline_minutes": (1, 180, 15),
+    "flag.max_attempts": (1, 10, 3),
+    "flag.lock_seconds": (1, 3600, 30),
+}
+SETTINGS_UPDATED_KEY = "_meta.updated"
+EVENT_TYPES = set(AdminEvent.EventType.values)
+
+CELL_STATUS_UNVISITED = "UNVISITED"
+CELL_STATUS_CONSUMED = "CONSUMED"
+CELL_STATUS_OPENED = "OPENED"
+CELL_STATUS_CLEARED = "CLEARED"
+CELL_STATUSES = (
+    CELL_STATUS_UNVISITED,
+    CELL_STATUS_CONSUMED,
+    CELL_STATUS_OPENED,
+    CELL_STATUS_CLEARED,
+)
+
 
 def _page_number(raw, default, maximum=None):
     if raw in (None, ""):
@@ -154,10 +190,27 @@ def _get_team(team_id):
 
 
 def _get_team_for_update(team_id):
+    # 기본키는 바꾸지 않으므로 NO KEY 로 잠근다. FOR UPDATE 는 admin_events 처럼 팀을
+    # 참조하는 행의 INSERT 를 막아, 플래그 제출과 보드가 이미 no_key 를 쓰는 것과 어긋난다.
     try:
-        return Team.objects.select_for_update().get(pk=team_id)
+        return Team.objects.select_for_update(no_key=True).get(pk=team_id)
     except (Team.DoesNotExist, ValidationError, ValueError):
         raise TeamNotFound()
+
+
+def _record_event(event_type, message, actor, *, severity=AdminEvent.Severity.INFO,
+                  team=None, challenge=None, instance_id=None):
+    """관리자 조작을 admin_events 에 남긴다. 호출부의 트랜잭션 안에서 불러 조작과 함께 커밋되게 한다."""
+    AdminEvent.objects.create(
+        type=event_type,
+        severity=severity,
+        message=message,
+        team=team,
+        challenge=challenge,
+        instance_id=instance_id,
+        actor=actor,
+    )
+
 
 @api_view(["POST"])
 @permission_classes([IsAdmin])
@@ -191,13 +244,25 @@ def account_create(request):
     if role == Role.ADMIN and is_leader:
         raise InvalidRequest("관리자 계정은 팀장이 될 수 없습니다")
 
-    team = None
     team_id = request.data.get("team_id")
+    team_name = request.data.get("team_name")
+    if "team_id" in request.data and "team_name" in request.data:
+        raise InvalidRequest("team_id 와 team_name 은 함께 보낼 수 없습니다")
+
+    team = None
     if team_id:
         try:
             team = Team.objects.get(pk=team_id)
         except (Team.DoesNotExist, ValidationError, ValueError):
             raise TeamNotFound()
+    elif team_name is not None:
+        if not isinstance(team_name, str) or not team_name.strip():
+            raise InvalidRequest("team_name 은 1자 이상이어야 합니다")
+        team_name = team_name.strip()
+        if len(team_name) > 100:
+            raise InvalidRequest("team_name 은 100자 이하여야 합니다")
+        if Team.objects.filter(team_name=team_name).exists():
+            raise TeamNameTaken()
 
     if User.objects.filter(login_id=login_id).exists():
         raise LoginIdTaken()
@@ -207,6 +272,8 @@ def account_create(request):
 
     try:
         with transaction.atomic():
+            if team is None and team_name:
+                team = Team.objects.create(team_name=team_name)
             user = User.objects.create_user(
                 login_id=login_id,
                 password=password,
@@ -216,8 +283,11 @@ def account_create(request):
                 is_leader=is_leader,
             )
     except IntegrityError as exc:
-        if "uq_users_one_leader_per_team" in str(exc):
+        text = str(exc)
+        if "uq_users_one_leader_per_team" in text:
             raise TeamAlreadyHasLeader()
+        if "team_name" in text:
+            raise TeamNameTaken()
         raise LoginIdTaken()
 
     return ok(
@@ -271,6 +341,13 @@ def _ban(request, team_id):
         team.save(
             update_fields=["is_banned", "ban_reason", "banned_at", "banned_by", "updated_at"]
         )
+        _record_event(
+            AdminEvent.EventType.TEAM_BANNED,
+            f"팀 활동이 정지되었습니다: {reason}",
+            request.user.login_id,
+            severity=AdminEvent.Severity.WARNING,
+            team=team,
+        )
 
     return ok(
         {
@@ -304,6 +381,14 @@ def challenge_visibility(request, challenge_id):
             challenge.is_published = is_published
             challenge.save(update_fields=["is_published"])
             affected_team_count = TeamChallengeAccess.objects.filter(challenge=challenge).count()
+            _record_event(
+                AdminEvent.EventType.CHALLENGE_VISIBILITY_CHANGED,
+                f"문제 {'공개' if is_published else '비공개'} 전환"
+                f" (영향 팀 {affected_team_count}): {reason}",
+                request.user.login_id,
+                severity=AdminEvent.Severity.WARNING,
+                challenge=challenge,
+            )
     except (Challenge.DoesNotExist, ValidationError, ValueError):
         return fail("CHALLENGE_NOT_FOUND", "존재하지 않는 문제 ID입니다.", 404)
 
@@ -326,7 +411,12 @@ def _unban(request, team_id):
         if not team.is_banned:
             raise NotBanned(data={"team_id": str(team.team_id), "is_banned": False})
 
-        # 이력이 필요하면 admin_events 에 기록한다 (해당 앱 생성 후).
+        _record_event(
+            AdminEvent.EventType.TEAM_UNBANNED,
+            f"팀 활동 정지가 해제되었습니다 (정지 사유: {team.ban_reason})",
+            request.user.login_id,
+            team=team,
+        )
         team.is_banned = False
         team.ban_reason = None
         team.banned_at = None
@@ -390,6 +480,12 @@ def team_mileage(request, team_id):
         )
         team.mileage = previous + amount
         team.save(update_fields=["mileage", "updated_at"])
+        _record_event(
+            AdminEvent.EventType.MILEAGE_ADJUSTED,
+            f"마일리지 {amount:+d} ({previous} → {team.mileage}): {reason}",
+            request.user.login_id,
+            team=team,
+        )
 
         return {
             "team_id": str(team.team_id),
@@ -484,7 +580,7 @@ def payment_checkout(request):
         if token.expires_at < now:
             raise PaymentTokenExpired()
 
-        team = Team.objects.select_for_update().get(pk=token.team_id)
+        team = Team.objects.select_for_update(no_key=True).get(pk=token.team_id)
         if team.is_banned:
             raise TeamBanned()
         if team.mileage < amount:
@@ -594,7 +690,7 @@ def payment_refund(request, history_id):
             )
 
         refunded_amount = -purchase.amount  # PURCHASE.amount 는 음수 → 양수 환불액
-        team = Team.objects.select_for_update().get(pk=purchase.team_id)
+        team = Team.objects.select_for_update(no_key=True).get(pk=purchase.team_id)
 
         refund = MileageHistory.objects.create(
             team=team,
@@ -609,6 +705,13 @@ def payment_refund(request, history_id):
 
         purchase.is_refunded = True
         purchase.save(update_fields=["is_refunded"])
+        _record_event(
+            AdminEvent.EventType.PAYMENT_REFUNDED,
+            f"결제 환불 +{refunded_amount} (원 결제 {purchase.history_id})",
+            request.user.login_id,
+            severity=AdminEvent.Severity.WARNING,
+            team=team,
+        )
 
     return ok(
         {
@@ -756,6 +859,15 @@ def instance_force_delete(request, instance_id):
         instance.status = InstanceStatus.STOPPING
         instance.delete_reason = DeleteReason.ADMIN_FORCED
         instance.save(update_fields=["status", "delete_reason", "updated_at"])
+        _record_event(
+            AdminEvent.EventType.INSTANCE_FORCED,
+            "인스턴스 강제 종료",
+            request.user.login_id,
+            severity=AdminEvent.Severity.WARNING,
+            team=instance.team,
+            challenge=instance.challenge,
+            instance_id=instance.instance_id,
+        )
 
     return ok(
         {
@@ -820,6 +932,15 @@ def instance_force_reset(request, instance_id):
         except SchedulerError as error:
             return fail(error.code, error.message, error.status_code)
         mark_instance_replaced(instance)
+        _record_event(
+            AdminEvent.EventType.INSTANCE_FORCED,
+            f"인스턴스 강제 재시작 (이전 {instance.instance_id})",
+            request.user.login_id,
+            severity=AdminEvent.Severity.WARNING,
+            team=instance.team,
+            challenge=instance.challenge,
+            instance_id=new_instance.instance_id,
+        )
 
     return ok(
         {
@@ -1139,6 +1260,12 @@ def board_dice(request, team_id):
         state.save(update_fields=["dice_rolls_left", "updated_at"])
         # 조정 뒤 충전 시계를 보드와 같은 규칙으로 다시 맞춘다.
         apply_pending_dice_recharge(state)
+        _record_event(
+            AdminEvent.EventType.DICE_ADJUSTED,
+            f"주사위 {applied:+d} ({previous} → {state.dice_rolls_left}): {reason}",
+            request.user.login_id,
+            team=team,
+        )
 
     return ok(
         {
@@ -1151,4 +1278,385 @@ def board_dice(request, team_id):
             "adjusted_by": request.user.login_id,
         },
         message="주사위 횟수가 조정되었습니다",
+    )
+
+
+def _parse_iso_utc(raw, field):
+    if not isinstance(raw, str):
+        raise InvalidRequest(f"{field} 는 ISO-8601 문자열이어야 합니다")
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        raise InvalidRequest(f"{field} 형식이 올바르지 않습니다")
+    if timezone.is_naive(parsed):
+        raise InvalidRequest(f"{field} 는 UTC 오프셋을 포함해야 합니다")
+    return parsed
+
+
+def _settings_payload():
+    stored = {row.key: row for row in AdminSetting.objects.all()}
+    grouped = {}
+    for key, (_, _, default) in SETTING_SPECS.items():
+        group, name = key.split(".", 1)
+        grouped.setdefault(group, {})[name] = stored[key].value if key in stored else default
+
+    contest = Contest.objects.filter(is_active=True).first()
+    if contest is None:
+        contest_data = {"status": "BEFORE", "started_at": None, "ends_at": None}
+    else:
+        contest_data = {
+            "status": contest.snapshot()["status"],
+            "started_at": contest.start_time,
+            "ends_at": contest.end_time,
+        }
+
+    marker = stored.get(SETTINGS_UPDATED_KEY)
+    return {
+        "contest": contest_data,
+        "board": grouped.get("board", {}),
+        "flag": grouped.get("flag", {}),
+        "updated_at": marker.updated_at if marker else None,
+        "updated_by": marker.updated_by if marker else None,
+    }
+
+
+@api_view(["GET", "PATCH"])
+@permission_classes([IsAdmin])
+def settings_view(request):
+    if request.method == "GET":
+        return ok(_settings_payload())
+
+    body = request.data
+    if not isinstance(body, dict) or not body:
+        raise InvalidRequest("변경할 설정이 없습니다")
+
+    unknown_groups = set(body) - {"board", "flag", "contest"}
+    if unknown_groups:
+        raise InvalidRequest(f"알 수 없는 항목입니다: {', '.join(sorted(unknown_groups))}")
+
+    changes = {}
+    for group in ("board", "flag"):
+        if group not in body:
+            continue
+        values = body[group]
+        if not isinstance(values, dict):
+            raise InvalidRequest(f"{group} 은 객체여야 합니다")
+        for name, value in values.items():
+            key = f"{group}.{name}"
+            if key not in SETTING_SPECS:
+                raise InvalidRequest(f"알 수 없는 설정입니다: {key}")
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise InvalidRequest(f"{key} 는 정수여야 합니다")
+            low, high, _ = SETTING_SPECS[key]
+            if not (low <= value <= high):
+                raise InvalidRequest(f"{key} 는 {low} ~ {high} 범위여야 합니다")
+            changes[key] = value
+
+    contest_body = None
+    if "contest" in body:
+        contest_body = body["contest"]
+        if not isinstance(contest_body, dict):
+            raise InvalidRequest("contest 는 객체여야 합니다")
+
+    with transaction.atomic():
+        if contest_body:
+            unknown = set(contest_body) - {"started_at", "ends_at"}
+            if unknown:
+                raise InvalidRequest(f"알 수 없는 설정입니다: {', '.join(sorted(unknown))}")
+
+            contest = Contest.objects.select_for_update().filter(is_active=True).first()
+            if contest is None:
+                raise InvalidRequest("활성화된 대회가 없습니다")
+
+            now = timezone.now()
+            started = contest.start_time <= now
+            if "started_at" in contest_body:
+                new_start = _parse_iso_utc(contest_body["started_at"], "started_at")
+                if started and new_start != contest.start_time:
+                    raise ContestAlreadyStarted()
+                contest.start_time = new_start
+            if "ends_at" in contest_body:
+                contest.end_time = _parse_iso_utc(contest_body["ends_at"], "ends_at")
+
+            if contest.end_time <= contest.start_time:
+                raise InvalidRequest("ends_at 은 started_at 보다 뒤여야 합니다")
+            contest.save(update_fields=["start_time", "end_time"])
+
+        # 항목 순서가 다른 동시 요청이 서로의 잠금을 기다리지 않도록 항상 같은 순서로 저장한다.
+        for key in sorted(changes):
+            AdminSetting.objects.update_or_create(
+                key=key,
+                defaults={"value": changes[key], "updated_by": request.user.login_id},
+            )
+
+        AdminSetting.objects.update_or_create(
+            key=SETTINGS_UPDATED_KEY,
+            defaults={"value": 0, "updated_by": request.user.login_id},
+        )
+
+        changed = [f"{key}={changes[key]}" for key in sorted(changes)]
+        if contest_body:
+            changed.extend(f"contest.{name}" for name in sorted(contest_body))
+        # 빈 그룹만 보낸 요청은 아무것도 바꾸지 않으므로 이벤트도 남기지 않는다.
+        if changed:
+            _record_event(
+                AdminEvent.EventType.SETTINGS_CHANGED,
+                "설정 변경: " + ", ".join(changed),
+                request.user.login_id,
+            )
+
+    return ok(_settings_payload(), message="설정이 변경되었습니다")
+
+
+@api_view(["GET"])
+@permission_classes([IsAdmin])
+def event_list(request):
+    queryset = AdminEvent.objects.select_related("team", "challenge")
+
+    etype = request.query_params.get("type")
+    if etype:
+        if etype not in EVENT_TYPES:
+            return fail("INVALID_REQUEST", "이벤트 타입이 올바르지 않습니다.", 400)
+        queryset = queryset.filter(type=etype)
+
+    team_id = request.query_params.get("team_id")
+    if team_id:
+        try:
+            uuid.UUID(str(team_id))
+        except (ValueError, TypeError, AttributeError):
+            raise InvalidRequest("team_id 형식이 올바르지 않습니다")
+        queryset = queryset.filter(team_id=team_id)
+
+    page = _page_number(request.query_params.get("page"), 1, MAX_PAGE)
+    size = min(_page_number(request.query_params.get("size"), 50), MAX_PAGE_SIZE)
+
+    total_count = queryset.count()
+    offset = (page - 1) * size
+    rows = queryset[offset : offset + size]
+
+    events = [
+        {
+            "event_id": str(e.event_id),
+            "type": e.type,
+            "severity": e.severity,
+            "message": e.message,
+            "team_id": str(e.team_id) if e.team_id else None,
+            "team_name": e.team.team_name if e.team_id else None,
+            "challenge_id": str(e.challenge_id) if e.challenge_id else None,
+            "challenge_title": e.challenge.title if e.challenge_id else None,
+            "instance_id": str(e.instance_id) if e.instance_id else None,
+            "actor": e.actor,
+            "created_at": e.created_at,
+        }
+        for e in rows
+    ]
+
+    return ok({"events": events, "total_count": total_count, "page": page, "size": size})
+
+
+def _json_object(request):
+    """본문이 객체가 아니면 .get 에서 터져 500 이 나간다. 400 으로 돌려준다."""
+    body = request.data
+    if not isinstance(body, dict):
+        raise InvalidRequest("요청 본문은 JSON 객체여야 합니다")
+    return body
+
+
+def _require_reason(body):
+    reason = body.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        raise InvalidRequest("필수 항목이 누락되었습니다: reason")
+    reason = reason.strip()
+    if len(reason) > 500:
+        raise InvalidRequest("reason 은 500자 이하여야 합니다")
+    return reason
+
+
+def _parse_cell_index(raw):
+    """URL 에서 받은 칸 번호. 음수나 문자도 404 가 아니라 400 으로 돌려준다."""
+    if not isinstance(raw, str) or not raw.isascii() or not raw.isdigit():
+        raise InvalidRequest("cell_index 는 정수여야 합니다")
+    cell_index = int(raw)
+    if not (FIRST_CELL_INDEX <= cell_index <= LAST_CELL_INDEX):
+        raise InvalidRequest(
+            f"cell_index 는 {FIRST_CELL_INDEX} ~ {LAST_CELL_INDEX} 범위여야 합니다"
+        )
+    return cell_index
+
+
+def _get_cell(cell_index):
+    cell = Cell.objects.filter(cell_index=cell_index).first()
+    if cell is None:
+        raise InvalidRequest(f"{cell_index} 번 칸이 없습니다")
+    return cell
+
+
+def _read_cell_status(team, cell):
+    """보드의 build_cell_states 와 같은 규칙. 단 소모 기록 없이 문제만 열린 칸도
+    UNVISITED 가 아니라 실제 상태로 읽는다. 지우는 대상을 감춰서는 안 된다."""
+    access = TeamChallengeAccess.objects.filter(team=team, source_cell=cell).first()
+    if access is not None:
+        if access.status == TeamChallengeAccess.Status.CLEARED:
+            return CELL_STATUS_CLEARED
+        return CELL_STATUS_OPENED
+    if TeamCellConsumption.objects.filter(team=team, cell=cell).exists():
+        return CELL_STATUS_CONSUMED
+    return CELL_STATUS_UNVISITED
+
+
+def _drop_cell_challenge(state, team, cell, access):
+    """칸을 되돌린다. 개방 기록이 남으면 그 칸에서 문제를 다시 열 수 없으므로 후보까지 지운다."""
+    TeamCellCandidate.objects.filter(team=team, cell=cell).delete()
+    if access is None:
+        return
+    if state.active_challenge_access_id == access.id:
+        state.active_challenge_access = None
+        state.save(update_fields=["active_challenge_access", "updated_at"])
+    access.delete()
+
+
+@api_view(["PATCH"])
+@permission_classes([IsAdmin])
+def board_position(request, team_id):
+    body = _json_object(request)
+
+    position = body.get("position")
+    if not isinstance(position, int) or isinstance(position, bool):
+        raise InvalidRequest("position 은 정수여야 합니다")
+    if not (FIRST_CELL_INDEX <= position <= LAST_CELL_INDEX):
+        raise InvalidRequest(
+            f"position 은 {FIRST_CELL_INDEX} ~ {LAST_CELL_INDEX} 범위여야 합니다"
+        )
+
+    consume_cell = body.get("consume_cell", False)
+    if not isinstance(consume_cell, bool):
+        raise InvalidRequest("consume_cell 은 true 또는 false 여야 합니다")
+
+    reason = _require_reason(body)
+
+    with transaction.atomic():
+        # 보드와 같은 순서로 잠근다: 보드 상태 먼저, 팀은 잠그지 않는다.
+        team = _get_team(team_id)
+        get_or_create_board_state(team)
+        state = TeamBoardState.objects.select_for_update(of=("self",)).get(team=team)
+
+        cell = _get_cell(position)
+        previous_position = state.position_id
+        state.position = cell
+        state.save(update_fields=["position", "updated_at"])
+
+        # 확정되지 않은 굴림이 남아 있으면 팀이 확정하는 순간 교정한 위치가 덮어써진다.
+        # 선택을 기다리던 찬스카드를 함께 마감하지 않으면 이후 모든 확정이 막힌다.
+        TeamChanceCard.objects.filter(
+            team=team,
+            used_at__isnull=True,
+            discarded_at__isnull=True,
+            pending_first_number__isnull=False,
+        ).update(
+            used_at=timezone.now(),
+            pending_first_number=None,
+            pending_second_number=None,
+        )
+        PendingDiceRoll.objects.filter(team=team).delete()
+
+        if consume_cell:
+            TeamCellConsumption.objects.get_or_create(team=team, cell=cell)
+        apply_pending_dice_recharge(state)
+        # 도착 칸의 효과는 발동하지 않는다. 소모 여부만 현재 값으로 돌려준다.
+        cell_consumed = TeamCellConsumption.objects.filter(team=team, cell=cell).exists()
+        _record_event(
+            AdminEvent.EventType.BOARD_POSITION_MOVED,
+            f"말 위치 {previous_position} → {cell.cell_index}"
+            f" (칸 소모: {'예' if cell_consumed else '아니오'}): {reason}",
+            request.user.login_id,
+            severity=AdminEvent.Severity.WARNING,
+            team=team,
+        )
+
+    return ok(
+        {
+            "team_id": str(team.team_id),
+            "previous_position": previous_position,
+            "position": cell.cell_index,
+            "type": cell.type,
+            "cell_consumed": cell_consumed,
+            "moved_at": timezone.now().replace(microsecond=0),
+            "moved_by": request.user.login_id,
+        },
+        message="말 위치가 변경되었습니다",
+    )
+
+
+@api_view(["PATCH"])
+@permission_classes([IsAdmin])
+def board_cell_status(request, team_id, cell_index):
+    cell_index = _parse_cell_index(cell_index)
+    body = _json_object(request)
+
+    status = body.get("status")
+    if status not in CELL_STATUSES:
+        raise InvalidRequest(f"status 는 {', '.join(CELL_STATUSES)} 중 하나여야 합니다")
+
+    reason = _require_reason(body)
+
+    with transaction.atomic():
+        # 보드와 같은 순서로 잠근다: 보드 상태 먼저, 그 다음 문제 개방 기록.
+        team = _get_team(team_id)
+        get_or_create_board_state(team)
+        state = TeamBoardState.objects.select_for_update(of=("self",)).get(team=team)
+
+        cell = _get_cell(cell_index)
+        previous_status = _read_cell_status(team, cell)
+        access = (
+            TeamChallengeAccess.objects.select_for_update()
+            .filter(team=team, source_cell=cell)
+            .first()
+        )
+
+        if status == CELL_STATUS_UNVISITED:
+            _drop_cell_challenge(state, team, cell, access)
+            TeamCellConsumption.objects.filter(team=team, cell=cell).delete()
+        elif status == CELL_STATUS_CONSUMED:
+            _drop_cell_challenge(state, team, cell, access)
+            TeamCellConsumption.objects.get_or_create(team=team, cell=cell)
+        else:
+            if access is None:
+                raise InvalidRequest(
+                    "이 칸에서 연 문제가 없어 OPENED 나 CLEARED 로 바꿀 수 없습니다"
+                )
+            TeamCellConsumption.objects.get_or_create(team=team, cell=cell)
+            if status == CELL_STATUS_CLEARED:
+                access.status = TeamChallengeAccess.Status.CLEARED
+                access.cleared_at = timezone.now()
+                if state.active_challenge_access_id == access.id:
+                    state.active_challenge_access = None
+                    state.save(update_fields=["active_challenge_access", "updated_at"])
+            else:
+                access.status = TeamChallengeAccess.Status.OPENED
+                access.cleared_at = None
+                if state.position_id == cell.cell_index and state.active_challenge_access_id is None:
+                    state.active_challenge_access = access
+                    state.save(update_fields=["active_challenge_access", "updated_at"])
+            access.save(update_fields=["status", "cleared_at"])
+
+        apply_pending_dice_recharge(state)
+        _record_event(
+            AdminEvent.EventType.CELL_STATUS_CHANGED,
+            f"{cell.cell_index}번 칸 {previous_status} → {status}: {reason}",
+            request.user.login_id,
+            severity=AdminEvent.Severity.WARNING,
+            team=team,
+            challenge=access.challenge if access is not None else None,
+        )
+
+    return ok(
+        {
+            "team_id": str(team.team_id),
+            "cell_index": cell.cell_index,
+            "previous_status": previous_status,
+            "status": status,
+            "changed_at": timezone.now().replace(microsecond=0),
+            "changed_by": request.user.login_id,
+        },
+        message="칸 상태가 변경되었습니다",
     )

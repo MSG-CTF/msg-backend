@@ -43,11 +43,21 @@
 | --- | --- | --- |
 | `team_id`, `user_id`, `challenge_id`, `club_id`, `history_id`, `koth_challenge_id`, `instance_id` | `String(UUID)` | `"018f3f1e-0100-7a91-a30b-630000000001"` |
 | `card_id` | `String` | `"card_reroll"` (enum 성격) |
+| `team_card_id`, `discarded_team_card_id`, `kept_team_card_id` | `String(UUID)` | 팀이 뽑은 카드 한 장의 식별자 |
 | `token` (QR 결제) | `String` | `"pt_9f8a3c2e"` |
 
 `team_id`, `club_id`, `koth_challenge_id`는 2026-08-16 KOTH 템플릿 확정에 맞춰 UUID 문자열로 바뀌었다. 출제자 배포용 템플릿과 KOTH 명세가 모두 UUID를 쓴다.
 `challenge_id`는 2026-08-08 규약 개정으로 이미 UUID 문자열이었으나 이 표에는 반영되지 않고 있었다. `/api/v1/board/opened_challenges` 명세가 근거다.
 `user_id`, `history_id`도 UUID 문자열이다 (강지원 확인, 2026-08-16).
+
+## 보유 찬스카드 식별
+
+- `card_id`는 카드 종류, `team_card_id`는 실제 보유 카드 한 장을 가리킨다.
+- 뽑기 응답, `board/me.chance_cards`, 굴림 응답의 `usable_chance_card`, 사용·확정 응답에 `team_card_id`를 포함한다.
+- 사용·버리기는 `team_card_id`로 지정한다. 기존 `card_id` 요청도 지원하며, 둘 다 보내면 같은 카드 종류여야 한다.
+- 버리기 응답은 `discarded_team_card_id`와 `kept_team_card_id`로 같은 종류의 두 장도 구분한다.
+- 다른 팀의 카드·폐기한 카드·없는 UUID는 `CHANCE_CARD_NOT_FOUND`, 사용한 카드 재사용은 `CHANCE_CARD_ALREADY_USED`, 잘못된 UUID는 `INVALID_REQUEST`다.
+- 2장 보유 시 먼저 1장을 버리는 기존 규칙은 유지한다. 순차적으로 뽑은 같은 종류의 카드는 각각 1회씩 사용할 수 있다.
 
 ## Idempotency-Key
 
@@ -216,6 +226,8 @@ API 공통, 제출 명세, 마이페이지, 마일리지 내역은 아래 지급
 - 보유한 주사위는 문제 선택 후 대기 없이 연속 사용할 수 있다. 문제의 15분 보상 타이머는 다음 굴리기를 막지 않으며, `timer_running`과 `can_roll`은 동시에 true일 수 있다.
 - 시간 충전은 기존 예정 시각부터 경과한 15분 구간마다 1회씩, 최대 3회까지 반영한다. 다음 예정 시각도 기존 예정 시각을 기준으로 계산한다.
 - 주사위 추가 카드는 3회 보유 중이면 사용할 수 없고 소비되지 않는다. START 보상의 `roll_gained`는 한도 적용 후 실제 증가량이다.
+- START(1번)는 팀별 최초 정확한 도착 1회에 소모한다. 초기 시작 위치는 도착으로 세지 않는다. 이후에는 같은 방향의 다음 미소모 칸까지 건너뛰며 공항·세계여행 목적지로도 선택할 수 없다. START 소모 기록은 조회에 포함하되, 완료 판정은 START와 무관하게 2~36번의 35칸으로 한다. 소모된 칸을 통과한 경로도 `movement_path`에 포함한다.
+- START 통과 마일리지 100은 소모 여부와 무관하게 확정된 이동마다 지급한다. 최초 정확한 도착에도 마일리지 100을 지급하고 주사위 +1은 이 도착 1회에만 지급한다(최대 3회 보유). 통과만 하면 주사위는 지급하지 않으며 같은 요청 재시도에는 중복 지급하지 않는다. 보드 완료 후에는 자동 충전·추가 주사위 지급을 멈추고 `can_roll=false`, `blocked_reason=BOARD_COMPLETED`를 반환한다.
 - 제출 응답의 `earned_mileage`, 풀이 기록의 `earned_mileage`, `CHALLENGE_SOLVE` 내역의 `amount`는 동일한 지급액이다.
 - 제출 응답과 `GET /teams/me`, `GET /teams/me/mileage_history`의 `mileage`는 지급 후 잔액이다. 프론트는 이 값을 그대로 표시한다.
 - 예: 잔액 0에서 EASY → MEDIUM → HARD를 풀면 지급액은 30 → 60 → 120, 잔액은 30 → 90 → 210이다.
