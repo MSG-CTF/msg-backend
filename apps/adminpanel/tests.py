@@ -1,4 +1,5 @@
 import threading
+import time
 import uuid
 
 from datetime import timedelta
@@ -3377,3 +3378,67 @@ class AdminBoardCellStatusTests(AdminBoardTestBase):
     def test_requires_token(self):
         res = self.patch({"status": "CONSUMED", "reason": "x"})
         self.assertEqual(res.status_code, 401)
+
+
+class PaymentCheckoutLockOrderTest(TransactionTestCase):
+    """결제와 QR 재발급이 겹쳐도 교착으로 500 이 나지 않아야 한다.
+
+    재발급은 팀 → 토큰 순으로 잠근다. 결제가 토큰 → 팀 순이면 서로 상대가 쥔 행을
+    기다리다 PostgreSQL 이 한쪽을 교착으로 끊는다.
+    """
+
+    def setUp(self):
+        self.team = Team.objects.create(team_name="감자는외로워", mileage=100)
+        self.admin = User.objects.create_user(
+            login_id="root", password="pw1234", nickname="운영자", team=None, role=Role.ADMIN,
+        )
+        PaymentToken.objects.create(
+            team=self.team, token_hash=hash_token("tok"), status=PaymentTokenStatus.ACTIVE,
+            expires_at=timezone.now() + timedelta(hours=1),
+        )
+
+    def test_checkout_during_qr_reissue_does_not_deadlock(self):
+        team_locked = threading.Event()
+        errors = []
+        result = {}
+
+        def reissue():
+            # apps/teams/views.py qr_token 과 같은 순서: 팀을 잠근 뒤 기존 토큰을 무효화한다.
+            try:
+                with transaction.atomic():
+                    Team.objects.select_for_update(no_key=True).get(pk=self.team.pk)
+                    team_locked.set()
+                    time.sleep(1)
+                    PaymentToken.objects.filter(
+                        team=self.team, status=PaymentTokenStatus.ACTIVE
+                    ).update(status=PaymentTokenStatus.INVALIDATED, invalidated_at=timezone.now())
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+            finally:
+                connections.close_all()
+
+        def checkout():
+            try:
+                team_locked.wait(timeout=5)
+                client = APIClient()
+                client.credentials(HTTP_AUTHORIZATION=f"Bearer {issue_access_token(self.admin)}")
+                res = client.post(
+                    "/api/v1/admin/payment/checkout",
+                    {"payment_token": "tok", "amount": 30, "item_name": "굿즈"},
+                    format="json",
+                )
+                result["status"] = res.status_code
+                result["code"] = res.data["code"]
+            finally:
+                connections.close_all()
+
+        threads = [threading.Thread(target=reissue), threading.Thread(target=checkout)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=20)
+
+        self.assertEqual(errors, [])
+        # 재발급이 먼저 토큰을 무효화했으므로 결제는 무효 토큰으로 거절돼야 한다.
+        self.assertEqual((result.get("status"), result.get("code")), (400, "PAYMENT_TOKEN_INVALID"))
+        self.assertEqual(Team.objects.get(pk=self.team.pk).mileage, 100)

@@ -99,7 +99,7 @@ def qr_token(request):
     expires_at = now + datetime.timedelta(minutes=QR_TOKEN_TTL_MINUTES)
 
     with transaction.atomic():
-        Team.objects.select_for_update().get(pk=team.team_id)
+        Team.objects.select_for_update(no_key=True).get(pk=team.team_id)
 
         old_ids = list(
             PaymentToken.objects.filter(team=team, status=PaymentTokenStatus.ACTIVE)
