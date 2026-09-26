@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 BUNDLE_NAME_SUFFIX = "-publish-bundle"
 BUNDLE_FILE_NAME = "artifact-v2.json"
 POLLER_CREATED_BY = "release-poller"
+RETRYABLE_WORKFLOW_STATUSES = {"queued", "in_progress"}
 
 
 def github_request(path, token=None, timeout=10, max_bytes=None):
@@ -169,6 +170,10 @@ def get_workflow_run(artifact, token=None):
     return workflow_run
 
 
+def workflow_run_is_retryable(workflow_run):
+    return workflow_run.get("status") in RETRYABLE_WORKFLOW_STATUSES
+
+
 def download_bundle(artifact, token=None):
     # bundle zip을 내려받아 artifact-v2.json 내용을 dict로 돌려준다
     raw = github_request(
@@ -305,6 +310,12 @@ def poll_once(token=None):
     for artifact in artifacts:
         try:
             workflow_run = get_workflow_run(artifact, token=token)
+            if workflow_run_is_retryable(workflow_run):
+                logger.info(
+                    "release poller workflow 실행 중, 다음 poll에서 재시도: %s",
+                    artifact.get("name"),
+                )
+                continue
             validate_workflow_run_source(artifact, workflow_run)
             artifact_data = download_bundle(artifact, token=token)
         except (HTTPError, URLError, TimeoutError, ValueError, zipfile.BadZipFile) as error:

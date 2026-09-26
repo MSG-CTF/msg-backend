@@ -27,6 +27,7 @@ from apps.instances.poller import (
     match_challenge,
     pending_artifacts,
     validate_workflow_run_source,
+    workflow_run_is_retryable,
 )
 from apps.instances.releases import ReleaseValidationError
 
@@ -303,6 +304,12 @@ def poll_user_files_once(token=None):
     for artifact in artifacts:
         try:
             workflow_run = get_workflow_run(artifact, token=token)
+            if workflow_run_is_retryable(workflow_run):
+                logger.info(
+                    "user-files poller workflow 실행 중, 다음 poll에서 재시도: %s",
+                    artifact.get("name"),
+                )
+                continue
             validate_workflow_run_source(artifact, workflow_run)
             manifest, archive_bytes = download_user_files_bundle(artifact, token=token)
             validated = validate_user_files_manifest(manifest)

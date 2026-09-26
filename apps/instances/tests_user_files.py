@@ -76,11 +76,16 @@ def user_artifact(artifact_id=1, slug="web-basic", sha=SHA_A):
     }
 
 
-def workflow_run(artifact_id=1, sha=SHA_A):
+def workflow_run(
+    artifact_id=1,
+    sha=SHA_A,
+    status="completed",
+    conclusion="success",
+):
     return {
         "id": artifact_id + 1000,
-        "status": "completed",
-        "conclusion": "success",
+        "status": status,
+        "conclusion": conclusion,
         "head_branch": "main",
         "head_sha": sha,
     }
@@ -326,6 +331,85 @@ class UserFilesPollerTests(UserFilesTestBase):
         self.assertEqual(failed["error"], 1)
         self.assertEqual(retried["registered"], 1)
         self.assertIsNotNone(PollerArtifact.objects.get(pk=1).processed_at)
+
+    def test_running_workflow_is_retried_after_success(self):
+        for offset, status in enumerate(("queued", "in_progress")):
+            with self.subTest(status=status):
+                artifact_id = offset + 1
+                revision = offset + 1
+                sha = SHA_A if offset == 0 else SHA_B
+                archive_bytes = user_archive(
+                    {"readme.txt": f"revision-{revision}".encode("utf-8")}
+                )
+                artifact = user_artifact(artifact_id=artifact_id, sha=sha)
+                with (
+                    patch(
+                        "apps.instances.poller.list_artifacts_by_suffix",
+                        side_effect=[[artifact], []],
+                    ),
+                    patch(
+                        "apps.instances.user_files.get_workflow_run",
+                        side_effect=[
+                            workflow_run(
+                                artifact_id=artifact_id,
+                                sha=sha,
+                                status=status,
+                                conclusion=None,
+                            ),
+                            workflow_run(artifact_id=artifact_id, sha=sha),
+                        ],
+                    ),
+                    patch(
+                        "apps.instances.user_files.download_user_files_bundle",
+                        return_value=(
+                            user_manifest(
+                                archive_bytes,
+                                revision=revision,
+                                source_sha=sha,
+                            ),
+                            archive_bytes,
+                        ),
+                    ) as download,
+                ):
+                    pending = poll_user_files_once(token="token")
+                    record = PollerArtifact.objects.get(pk=artifact_id)
+                    self.assertEqual(pending["registered"], 0)
+                    self.assertEqual(pending["invalid"], 0)
+                    self.assertEqual(download.call_count, 0)
+                    self.assertIsNone(record.processed_at)
+
+                    completed = poll_user_files_once(token="token")
+
+                self.assertEqual(completed["registered"], 1)
+                self.assertEqual(download.call_count, 1)
+                record.refresh_from_db()
+                self.assertIsNotNone(record.processed_at)
+
+    def test_completed_failed_workflow_is_not_retried(self):
+        artifact = user_artifact(artifact_id=10)
+        with (
+            patch(
+                "apps.instances.poller.list_artifacts_by_suffix",
+                return_value=[artifact],
+            ),
+            patch(
+                "apps.instances.user_files.get_workflow_run",
+                return_value=workflow_run(
+                    artifact_id=10,
+                    status="completed",
+                    conclusion="failure",
+                ),
+            ),
+            patch(
+                "apps.instances.user_files.download_user_files_bundle"
+            ) as download,
+        ):
+            summary = poll_user_files_once(token="token")
+
+        self.assertEqual(summary["invalid"], 1)
+        self.assertEqual(summary["registered"], 0)
+        download.assert_not_called()
+        self.assertIsNotNone(PollerArtifact.objects.get(pk=10).processed_at)
 
     @override_settings(RELEASE_POLL_GITHUB_TOKEN="token")
     def test_release_command_runs_user_files_poll(self):
