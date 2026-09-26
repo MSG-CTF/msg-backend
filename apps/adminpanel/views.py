@@ -16,7 +16,7 @@ from apps.common.utils import num
 from apps.common.jwt import hash_token
 from apps.common.idempotency import run_idempotent
 from apps.challenge.models import Challenge, Solve
-from apps.challenge.services import hash_flag
+from apps.challenge.services import hash_flag, update_dynamic_score_and_team_scores
 from apps.board.models import (
     Cell,
     PendingDiceRoll,
@@ -77,7 +77,7 @@ from apps.instances.services import (
     isoformat_z,
     scheduler_auth_header,
 )
-from .serializers import ChallengeCreateSerializer
+from .serializers import ChallengeCreateSerializer, ChallengeUpdateSerializer
 
 SORT_FIELDS = {
     "score": "-team_score",
@@ -1105,6 +1105,24 @@ CHALLENGE_SORT = {
 }
 
 
+def _serialize_challenge(challenge):
+    return {
+        "challenge_id": str(challenge.challenge_id),
+        "challenge_slug": challenge.challenge_slug,
+        "title": challenge.title,
+        "category": challenge.category,
+        "difficulty": challenge.difficulty,
+        "description": challenge.description,
+        "score": num(challenge.score),
+        "initial_score": num(challenge.initial_score),
+        "minimum_score": num(challenge.minimum_score),
+        "decay": challenge.decay,
+        "current_score": num(challenge.current_score),
+        "is_published": challenge.is_published,
+        "created_at": challenge.created_at,
+    }
+
+
 def _challenge_create(request):
     serializer = ChallengeCreateSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
@@ -1129,24 +1147,56 @@ def _challenge_create(request):
     except IntegrityError as error:
         raise InvalidRequest("이미 사용 중인 challenge_slug입니다.") from error
 
-    return ok(
-        {
-            "challenge_id": str(challenge.challenge_id),
-            "challenge_slug": challenge.challenge_slug,
-            "title": challenge.title,
-            "category": challenge.category,
-            "difficulty": challenge.difficulty,
-            "description": challenge.description,
-            "score": num(challenge.score),
-            "initial_score": num(challenge.initial_score),
-            "minimum_score": num(challenge.minimum_score),
-            "decay": challenge.decay,
-            "current_score": num(challenge.current_score),
-            "is_published": challenge.is_published,
-            "created_at": challenge.created_at,
-        },
-        message="문제가 등록되었습니다.",
-    )
+    return ok(_serialize_challenge(challenge), message="문제가 등록되었습니다.")
+
+
+@api_view(["PATCH"])
+@permission_classes([IsAdmin])
+def challenge_detail(request, challenge_id):
+    with transaction.atomic():
+        try:
+            challenge = Challenge.objects.select_for_update().get(pk=challenge_id)
+        except Challenge.DoesNotExist:
+            return fail("CHALLENGE_NOT_FOUND", "존재하지 않는 문제 ID입니다.", 404)
+
+        serializer = ChallengeUpdateSerializer(
+            challenge,
+            data=request.data,
+            partial=True,
+        )
+        serializer.is_valid(raise_exception=True)
+        values = serializer.validated_data
+
+        update_fields = []
+        for field in (
+            "title",
+            "category",
+            "difficulty",
+            "description",
+            "initial_score",
+            "minimum_score",
+            "decay",
+        ):
+            if field in values:
+                setattr(challenge, field, values[field])
+                update_fields.append(field)
+
+        if "flag" in values:
+            challenge.flag_hash = hash_flag(values["flag"])
+            update_fields.append("flag_hash")
+
+        scoring_changed = any(
+            field in values for field in ("initial_score", "minimum_score", "decay")
+        )
+        if scoring_changed:
+            challenge.score = challenge.initial_score
+            update_fields.append("score")
+
+        challenge.save(update_fields=update_fields)
+        if scoring_changed:
+            update_dynamic_score_and_team_scores(challenge)
+
+    return ok(_serialize_challenge(challenge), message="문제가 수정되었습니다.")
 
 
 @api_view(["GET", "POST"])

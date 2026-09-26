@@ -23,7 +23,7 @@ from apps.teams.models import (
     PaymentToken,
     PaymentTokenStatus,
 )
-from apps.challenge.models import Challenge
+from apps.challenge.models import Challenge, Solve
 from apps.instances.models import DeleteReason, Instance, InstanceStatus
 from unittest.mock import patch
 
@@ -981,6 +981,17 @@ class AdminChallengeTests(TestCase):
         body.update(overrides)
         return body
 
+    def create_challenge(self, **overrides):
+        response = self.client.post(
+            "/api/v1/admin/challenges",
+            self.challenge_body(**overrides),
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        return Challenge.objects.get(
+            challenge_id=response.data["data"]["challenge_id"]
+        )
+
     def test_challenge_create_uses_defaults_and_hashes_flag(self):
         from apps.challenge.services import is_correct_flag
 
@@ -1020,6 +1031,139 @@ class AdminChallengeTests(TestCase):
         self.assertEqual(challenge.decay, 80)
         self.assertEqual(challenge.score, 1500)
         self.assertEqual(challenge.current_score, 1500)
+
+    def test_challenge_update_changes_editable_fields_and_hashes_flag(self):
+        from apps.challenge.services import is_correct_flag
+
+        challenge = self.create_challenge()
+        response = self.client.patch(
+            f"/api/v1/admin/challenges/{challenge.challenge_id}",
+            {
+                "title": "수정된 문제",
+                "category": "CRYPTO",
+                "difficulty": "HARD",
+                "description": "수정된 설명",
+                "flag": "MSG{updated_flag}",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["code"], "SUCCESS")
+        challenge.refresh_from_db()
+        self.assertEqual(challenge.title, "수정된 문제")
+        self.assertEqual(challenge.category, "CRYPTO")
+        self.assertEqual(challenge.difficulty, "HARD")
+        self.assertEqual(challenge.description, "수정된 설명")
+        self.assertEqual(challenge.challenge_slug, "sql-injection-basic")
+        self.assertTrue(is_correct_flag("MSG{updated_flag}", challenge.flag_hash))
+        self.assertNotIn("flag", response.data["data"])
+        self.assertNotIn("flag_hash", response.data["data"])
+
+    def test_challenge_update_recalculates_current_and_team_scores(self):
+        challenge = self.create_challenge()
+        Solve.objects.create(
+            team=self.team,
+            challenge=challenge,
+            solved_by_user=self.player,
+            earned_score=1000,
+            earned_mileage=30,
+        )
+        Solve.objects.create(
+            team=self.team2,
+            challenge=challenge,
+            earned_score=1000,
+            earned_mileage=30,
+        )
+
+        response = self.client.patch(
+            f"/api/v1/admin/challenges/{challenge.challenge_id}",
+            {
+                "initial_score": 1000,
+                "minimum_score": 600,
+                "decay": 2,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        challenge.refresh_from_db()
+        self.team.refresh_from_db()
+        self.team2.refresh_from_db()
+        self.assertEqual(challenge.score, 1000)
+        self.assertEqual(challenge.current_score, 600)
+        self.assertEqual(self.team.team_score, 600)
+        self.assertEqual(self.team2.team_score, 600)
+        self.assertEqual(response.data["data"]["current_score"], 600)
+
+    def test_challenge_update_validates_final_scoring_values(self):
+        challenge = self.create_challenge()
+
+        for body in (
+            {"initial_score": 599},
+            {"minimum_score": 1001},
+            {"decay": 0},
+            {"initial_score": 1000.5},
+        ):
+            with self.subTest(body=body):
+                response = self.client.patch(
+                    f"/api/v1/admin/challenges/{challenge.challenge_id}",
+                    body,
+                    format="json",
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.data["code"], "INVALID_REQUEST")
+
+        challenge.refresh_from_db()
+        self.assertEqual(challenge.initial_score, 1000)
+        self.assertEqual(challenge.minimum_score, 600)
+        self.assertEqual(challenge.decay, 70)
+
+    def test_challenge_update_rejects_empty_and_managed_fields(self):
+        challenge = self.create_challenge()
+
+        for body in (
+            {},
+            {"challenge_slug": "changed-slug"},
+            {"is_published": True},
+        ):
+            with self.subTest(body=body):
+                response = self.client.patch(
+                    f"/api/v1/admin/challenges/{challenge.challenge_id}",
+                    body,
+                    format="json",
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.data["code"], "INVALID_REQUEST")
+
+        challenge.refresh_from_db()
+        self.assertEqual(challenge.challenge_slug, "sql-injection-basic")
+        self.assertFalse(challenge.is_published)
+
+    def test_challenge_update_returns_not_found(self):
+        response = self.client.patch(
+            f"/api/v1/admin/challenges/{uuid.uuid4()}",
+            {"title": "없는 문제"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.data["code"], "CHALLENGE_NOT_FOUND")
+
+    def test_challenge_update_participant_blocked(self):
+        challenge = self.create_challenge()
+        self.auth("player")
+
+        response = self.client.patch(
+            f"/api/v1/admin/challenges/{challenge.challenge_id}",
+            {"title": "권한 없는 수정"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.data["code"], "FORBIDDEN")
+        challenge.refresh_from_db()
+        self.assertEqual(challenge.title, "SQL Injection 기초")
 
     def test_challenge_create_rejects_invalid_scoring(self):
         invalid_values = [
