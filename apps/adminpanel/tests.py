@@ -16,15 +16,20 @@ from apps.accounts.models import (
     Team,
     User,
 )
-from apps.board.models import Cell, TeamChallengeAccess
+from apps.board.models import BoardChallenge, Cell, TeamChallengeAccess
 from apps.teams.models import (
     MileageHistory,
     MileageType,
     PaymentToken,
     PaymentTokenStatus,
 )
-from apps.challenge.models import Challenge, Solve
-from apps.instances.models import DeleteReason, Instance, InstanceStatus
+from apps.challenge.models import Challenge, FlagSubmission, Solve
+from apps.instances.models import (
+    ChallengeRuntimeConfig,
+    DeleteReason,
+    Instance,
+    InstanceStatus,
+)
 from unittest.mock import patch
 
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
@@ -1164,6 +1169,115 @@ class AdminChallengeTests(TestCase):
         self.assertEqual(response.data["code"], "FORBIDDEN")
         challenge.refresh_from_db()
         self.assertEqual(challenge.title, "SQL Injection 기초")
+
+    def test_challenge_delete_unused_unpublished_challenge(self):
+        from apps.adminpanel.models import AdminEvent
+
+        challenge = self.create_challenge()
+        event = AdminEvent.objects.create(
+            type=AdminEvent.EventType.CHALLENGE_VISIBILITY_CHANGED,
+            message="삭제 전 감사 기록",
+            challenge=challenge,
+            actor=self.admin.login_id,
+        )
+
+        response = self.client.delete(
+            f"/api/v1/admin/challenges/{challenge.challenge_id}"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["code"], "SUCCESS")
+        self.assertEqual(
+            response.data["data"]["challenge_id"],
+            str(challenge.challenge_id),
+        )
+        self.assertFalse(Challenge.objects.filter(pk=challenge.pk).exists())
+        event.refresh_from_db()
+        self.assertIsNone(event.challenge_id)
+
+    def test_challenge_delete_rejects_published_challenge(self):
+        challenge = self.create_challenge()
+        challenge.is_published = True
+        challenge.save(update_fields=["is_published"])
+
+        response = self.client.delete(
+            f"/api/v1/admin/challenges/{challenge.challenge_id}"
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["code"], "CHALLENGE_IN_USE")
+        self.assertTrue(Challenge.objects.filter(pk=challenge.pk).exists())
+
+    def test_challenge_delete_rejects_dependent_records(self):
+        dependency_types = ("solve", "submission", "board", "instance", "runtime")
+
+        for index, dependency_type in enumerate(dependency_types, start=1):
+            with self.subTest(dependency_type=dependency_type):
+                challenge = self.create_challenge(
+                    challenge_slug=f"delete-protected-{dependency_type}"
+                )
+
+                if dependency_type == "solve":
+                    Solve.objects.create(
+                        team=self.team,
+                        challenge=challenge,
+                        solved_by_user=self.player,
+                        earned_score=1000,
+                        earned_mileage=30,
+                    )
+                elif dependency_type == "submission":
+                    FlagSubmission.objects.create(
+                        team=self.team,
+                        user=self.player,
+                        challenge=challenge,
+                        submitted_flag_hash="submitted-hash",
+                        result=FlagSubmission.SubmissionResult.INCORRECT,
+                    )
+                elif dependency_type == "board":
+                    BoardChallenge.objects.create(
+                        challenge=challenge,
+                        challenge_number=index,
+                    )
+                elif dependency_type == "instance":
+                    Instance.objects.create(
+                        user=self.player,
+                        team=self.team,
+                        challenge=challenge,
+                    )
+                else:
+                    ChallengeRuntimeConfig.objects.create(
+                        challenge=challenge,
+                        container_image="ghcr.io/msg-ctf/test:latest",
+                        container_port=8080,
+                    )
+
+                response = self.client.delete(
+                    f"/api/v1/admin/challenges/{challenge.challenge_id}"
+                )
+
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(response.data["code"], "CHALLENGE_IN_USE")
+                self.assertTrue(Challenge.objects.filter(pk=challenge.pk).exists())
+
+    def test_challenge_delete_returns_not_found(self):
+        response = self.client.delete(
+            f"/api/v1/admin/challenges/{uuid.uuid4()}"
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.data["code"], "CHALLENGE_NOT_FOUND")
+
+    def test_challenge_delete_participant_blocked(self):
+        challenge = self.create_challenge()
+        self.auth("player")
+
+        response = self.client.delete(
+            f"/api/v1/admin/challenges/{challenge.challenge_id}"
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.data["code"], "FORBIDDEN")
+        self.assertTrue(Challenge.objects.filter(pk=challenge.pk).exists())
 
     def test_challenge_create_rejects_invalid_scoring(self):
         invalid_values = [

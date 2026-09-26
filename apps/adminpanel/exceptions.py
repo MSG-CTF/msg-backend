@@ -87,3 +87,9 @@ class ContestAlreadyStarted(APIError):
     status_code = status.HTTP_409_CONFLICT
     code = "CONTEST_ALREADY_STARTED"
     message = "이미 시작된 대회의 시작 시각은 변경할 수 없습니다"
+
+
+class ChallengeInUse(APIError):
+    status_code = status.HTTP_409_CONFLICT
+    code = "CHALLENGE_IN_USE"
+    message = "공개 중이거나 사용 기록이 있는 문제는 삭제할 수 없습니다"

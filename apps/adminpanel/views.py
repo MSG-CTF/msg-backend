@@ -1,8 +1,9 @@
 import uuid
 
-from django.core.exceptions import ValidationError
+from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db import IntegrityError, transaction
 from django.db.models import Count, Prefetch, Q, Sum
+from django.db.models.deletion import SET_NULL
 from django.utils import timezone
 from datetime import datetime
 
@@ -59,6 +60,7 @@ from .exceptions import (
     TeamAlreadyHasLeader,
     TeamNameTaken,
     ContestAlreadyStarted,
+    ChallengeInUse,
 )
 
 from apps.instances.models import (
@@ -1123,6 +1125,24 @@ def _serialize_challenge(challenge):
     }
 
 
+def _challenge_has_dependent_records(challenge):
+    for relation in challenge._meta.related_objects:
+        if relation.on_delete is SET_NULL:
+            continue
+
+        accessor = relation.get_accessor_name()
+        if relation.one_to_one:
+            try:
+                getattr(challenge, accessor)
+            except ObjectDoesNotExist:
+                continue
+            return True
+
+        if getattr(challenge, accessor).exists():
+            return True
+    return False
+
+
 def _challenge_create(request):
     serializer = ChallengeCreateSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
@@ -1150,7 +1170,7 @@ def _challenge_create(request):
     return ok(_serialize_challenge(challenge), message="문제가 등록되었습니다.")
 
 
-@api_view(["PATCH"])
+@api_view(["PATCH", "DELETE"])
 @permission_classes([IsAdmin])
 def challenge_detail(request, challenge_id):
     with transaction.atomic():
@@ -1158,6 +1178,17 @@ def challenge_detail(request, challenge_id):
             challenge = Challenge.objects.select_for_update().get(pk=challenge_id)
         except Challenge.DoesNotExist:
             return fail("CHALLENGE_NOT_FOUND", "존재하지 않는 문제 ID입니다.", 404)
+
+        if request.method == "DELETE":
+            if challenge.is_published or _challenge_has_dependent_records(challenge):
+                raise ChallengeInUse()
+
+            deleted = {
+                "challenge_id": str(challenge.challenge_id),
+                "challenge_slug": challenge.challenge_slug,
+            }
+            challenge.delete()
+            return ok(deleted, message="문제가 삭제되었습니다.")
 
         serializer = ChallengeUpdateSerializer(
             challenge,
