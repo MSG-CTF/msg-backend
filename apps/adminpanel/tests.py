@@ -2340,7 +2340,7 @@ class AdminTeamLockCoverageTests(TestCase):
         self.assertEqual(self.team.mileage, 230)
 
 
-@override_settings(CACHES=LOCMEM)
+@override_settings(CACHES=LOCMEM, SCHEDULER_API_TOKEN="test-scheduler-token")
 class AdminEventRecordingTests(TestCase):
     """관리자 조작이 admin_events 에 남는지, 실패한 조작은 남지 않는지 확인한다."""
 
