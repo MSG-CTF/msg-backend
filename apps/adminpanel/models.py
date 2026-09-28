@@ -57,6 +57,9 @@ class AdminEvent(models.Model):
         related_name="admin_events",
     )
     instance_id = models.UUIDField(null=True, blank=True)
+    # 팀이 삭제되면 team 이 SET_NULL 로 비므로, 대상 팀을 알 수 있게 기록 시점 값을 따로 남긴다.
+    team_snapshot_id = models.UUIDField(null=True, blank=True)
+    team_snapshot_name = models.CharField(max_length=100, null=True, blank=True)
     actor = models.CharField(max_length=50, default="system")
     created_at = models.DateTimeField(auto_now_add=True)
 

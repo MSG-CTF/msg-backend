@@ -199,13 +199,22 @@ def _get_team_for_update(team_id):
 
 
 def _record_event(event_type, message, actor, *, severity=AdminEvent.Severity.INFO,
-                  team=None, challenge=None, instance_id=None):
-    """관리자 조작을 admin_events 에 남긴다. 호출부의 트랜잭션 안에서 불러 조작과 함께 커밋되게 한다."""
+                  team=None, challenge=None, instance_id=None, deleted_team=None):
+    """관리자 조작을 admin_events 에 남긴다. 호출부의 트랜잭션 안에서 불러 조작과 함께 커밋되게 한다.
+
+    deleted_team 은 이미 지운 팀의 (team_id, team_name) 이다. 외래키로는 걸 수 없어 스냅샷만 남긴다.
+    """
+    if team is not None:
+        snapshot_id, snapshot_name = team.team_id, team.team_name
+    else:
+        snapshot_id, snapshot_name = deleted_team or (None, None)
     AdminEvent.objects.create(
         type=event_type,
         severity=severity,
         message=message,
         team=team,
+        team_snapshot_id=snapshot_id,
+        team_snapshot_name=snapshot_name,
         challenge=challenge,
         instance_id=instance_id,
         actor=actor,
@@ -1447,7 +1456,8 @@ def event_list(request):
             uuid.UUID(str(team_id))
         except (ValueError, TypeError, AttributeError):
             raise InvalidRequest("team_id 형식이 올바르지 않습니다")
-        queryset = queryset.filter(team_id=team_id)
+        # 삭제된 팀의 이벤트도 걸리도록 스냅샷까지 본다.
+        queryset = queryset.filter(Q(team_id=team_id) | Q(team_snapshot_id=team_id))
 
     page = _page_number(request.query_params.get("page"), 1, MAX_PAGE)
     size = min(_page_number(request.query_params.get("size"), 50), MAX_PAGE_SIZE)
@@ -1462,8 +1472,8 @@ def event_list(request):
             "type": e.type,
             "severity": e.severity,
             "message": e.message,
-            "team_id": str(e.team_id) if e.team_id else None,
-            "team_name": e.team.team_name if e.team_id else None,
+            "team_id": str(e.team_id or e.team_snapshot_id) if (e.team_id or e.team_snapshot_id) else None,
+            "team_name": e.team.team_name if e.team_id else e.team_snapshot_name,
             "challenge_id": str(e.challenge_id) if e.challenge_id else None,
             "challenge_title": e.challenge.title if e.challenge_id else None,
             "instance_id": str(e.instance_id) if e.instance_id else None,
@@ -1862,6 +1872,7 @@ def _team_delete(request, team_id):
             f"팀 삭제: {deleted_name} ({deleted_id}), 계정 {member_count}개와 기록 함께 삭제: {reason}",
             request.user.login_id,
             severity=AdminEvent.Severity.CRITICAL,
+            deleted_team=(deleted_id, deleted_name),
         )
 
     # 푼 팀 수로 매기는 동적 점수를 다시 계산한다. 플래그 제출과 같은 문제 → 팀 순서로

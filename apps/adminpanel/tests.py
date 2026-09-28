@@ -3667,6 +3667,54 @@ class AdminTeamManageTests(TestCase):
         self.assertEqual(str(event.challenge_id), res.data["data"]["challenge_id"])
 
 
+@override_settings(CACHES=LOCMEM)
+class AdminEventTeamSnapshotTests(TestCase):
+    """팀을 지워도 이벤트 로그에서 대상 팀을 알 수 있어야 한다."""
+
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.team = Team.objects.create(team_name="지울팀")
+        User.objects.create_user(
+            login_id="root", password="pw1234", nickname="운영자", team=None, role=Role.ADMIN,
+        )
+        res = self.client.post(
+            "/api/v1/auth/login", {"login_id": "root", "password": "pw1234"}, format="json",
+        )
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {res.data['data']['access_token']}")
+
+    def events(self, **params):
+        return self.client.get("/api/v1/admin/events", params).data["data"]["events"]
+
+    def test_deleted_team_is_kept_in_events(self):
+        team_id = str(self.team.team_id)
+        self.client.post(f"/api/v1/admin/teams/{team_id}/ban", {"ban_reason": "부정행위"}, format="json")
+
+        self.client.delete(f"/api/v1/admin/teams/{team_id}", {"reason": "정리"}, format="json")
+
+        rows = self.events()
+        self.assertEqual([r["type"] for r in rows], ["TEAM_DELETED", "TEAM_BANNED"])
+        for row in rows:
+            self.assertEqual(row["team_id"], team_id)
+            self.assertEqual(row["team_name"], "지울팀")
+
+    def test_team_filter_finds_deleted_team_events(self):
+        team_id = str(self.team.team_id)
+        self.client.delete(f"/api/v1/admin/teams/{team_id}", {"reason": "정리"}, format="json")
+
+        rows = self.events(team_id=team_id)
+        self.assertEqual([r["type"] for r in rows], ["TEAM_DELETED"])
+
+    def test_live_team_shows_current_name(self):
+        """팀이 살아 있으면 기록 당시가 아니라 지금 이름을 보여준다."""
+        team_id = str(self.team.team_id)
+        self.client.post(f"/api/v1/admin/teams/{team_id}/ban", {"ban_reason": "x"}, format="json")
+        self.client.patch(f"/api/v1/admin/teams/{team_id}", {"team_name": "새이름", "reason": "x"}, format="json")
+
+        names = {r["team_name"] for r in self.events()}
+        self.assertEqual(names, {"새이름"})
+
+
 class PaymentCheckoutLockOrderTest(TransactionTestCase):
     """결제와 QR 재발급이 겹쳐도 교착으로 500 이 나지 않아야 한다.
 
