@@ -6,11 +6,21 @@ from urllib.request import HTTPRedirectHandler
 
 from django.core.cache import cache
 from django.test import TestCase, override_settings
+from django.utils import timezone
 
 from apps.challenge.models import Challenge
 from apps.challenge.services import hash_flag
-from apps.instances.models import ChallengeRelease, ChallengeRuntimeConfig
-from apps.instances.poller import github_request, list_bundle_artifacts, poll_once, register_bundle
+from apps.instances.models import (
+    ChallengeRelease,
+    ChallengeRuntimeConfig,
+    PollerArtifact,
+)
+from apps.instances.poller import (
+    github_request,
+    list_bundle_artifacts,
+    poll_once,
+    register_bundle,
+)
 
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 
@@ -146,6 +156,23 @@ class GithubRequestTests(TestCase):
 
 
 class ListBundleArtifactsTests(TestCase):
+    def test_returns_new_artifacts_oldest_first(self):
+        responses = [
+            json.dumps(
+                {
+                    "artifacts": [
+                        publish_artifact(12, "new-publish-bundle"),
+                        publish_artifact(11, "old-publish-bundle"),
+                    ]
+                }
+            ).encode("utf-8")
+        ]
+
+        with patch("apps.instances.poller.urlopen", fake_urlopen(responses)):
+            artifacts = list_bundle_artifacts(token="test-token")
+
+        self.assertEqual([artifact["id"] for artifact in artifacts], [11, 12])
+
     @override_settings(RELEASE_POLL_LIMIT=2)
     def test_lists_unexpired_publish_bundles_across_all_pages(self):
         responses = [
@@ -185,6 +212,33 @@ class ListBundleArtifactsTests(TestCase):
             artifacts = list_bundle_artifacts(token="test-token")
 
         self.assertEqual([artifact["id"] for artifact in artifacts], [2, 3])
+
+    @override_settings(RELEASE_POLL_LIMIT=3)
+    def test_stops_listing_at_processed_artifact_boundary(self):
+        PollerArtifact.objects.create(
+            artifact_id=10,
+            kind=PollerArtifact.Kind.RELEASE,
+            payload=publish_artifact(10, "old-publish-bundle"),
+            processed_at=timezone.now(),
+        )
+        responses = [
+            json.dumps(
+                {
+                    "total_count": 100,
+                    "artifacts": [
+                        publish_artifact(12, "new-publish-bundle"),
+                        publish_artifact(11, "test-output"),
+                        publish_artifact(10, "old-publish-bundle"),
+                    ],
+                }
+            ).encode("utf-8")
+        ]
+
+        with patch("apps.instances.poller.urlopen", fake_urlopen(responses)):
+            artifacts = list_bundle_artifacts(token="test-token")
+
+        self.assertEqual([artifact["id"] for artifact in artifacts], [12])
+        self.assertIsNone(PollerArtifact.objects.get(pk=12).processed_at)
 
 
 @override_settings(CACHES=LOCMEM)
@@ -311,6 +365,33 @@ class PollOnceTests(PollerTestBase):
         self.assertEqual(summary["error"], 0)
         self.assertEqual(ChallengeRelease.objects.count(), 1)
 
+    def test_poll_once_does_not_redownload_processed_artifact(self):
+        artifact = publish_artifact(11, "web-basic-100-1-x-publish-bundle")
+        artifacts_page = json.dumps({"artifacts": [artifact]}).encode("utf-8")
+        responses = [
+            artifacts_page,
+            workflow_run(11),
+            bundle_zip(bundle(revision=1, challenge_id=self.challenge.challenge_id)),
+            artifacts_page,
+        ]
+        requested_urls = []
+
+        def opener(request, timeout=10):
+            requested_urls.append(request.full_url)
+            return FakeResponse(responses.pop(0))
+
+        with patch("apps.instances.poller.urlopen", opener):
+            first = poll_once(token="test-token")
+            second = poll_once(token="test-token")
+
+        self.assertEqual(first["registered"], 1)
+        self.assertEqual(second["registered"], 0)
+        self.assertEqual(second["duplicate"], 0)
+        self.assertEqual(len(requested_urls), 4)
+        self.assertEqual(sum("/actions/runs/" in url for url in requested_urls), 1)
+        self.assertEqual(sum("/zip" in url for url in requested_urls), 1)
+        self.assertIsNotNone(PollerArtifact.objects.get(pk=11).processed_at)
+
     def test_poll_once_rejects_failed_workflow_run(self):
         artifacts_page = json.dumps(
             {"artifacts": [publish_artifact(11, "web-basic-100-1-x-publish-bundle")]}
@@ -323,6 +404,29 @@ class PollOnceTests(PollerTestBase):
         self.assertEqual(summary["invalid"], 1)
         self.assertEqual(summary["registered"], 0)
         self.assertEqual(ChallengeRelease.objects.count(), 0)
+        self.assertIsNotNone(PollerArtifact.objects.get(pk=11).processed_at)
+
+    def test_poll_once_retries_running_workflow_after_success(self):
+        artifact = publish_artifact(20, "web-basic-1-1-x-publish-bundle")
+        responses = [
+            json.dumps({"artifacts": [artifact]}).encode("utf-8"),
+            workflow_run(20, status="in_progress", conclusion=None),
+            json.dumps({"artifacts": []}).encode("utf-8"),
+            workflow_run(20),
+            bundle_zip(bundle(revision=1, challenge_id=self.challenge.challenge_id)),
+        ]
+
+        with patch("apps.instances.poller.urlopen", fake_urlopen(responses)):
+            pending = poll_once(token="test-token")
+            record = PollerArtifact.objects.get(pk=20)
+            self.assertEqual(pending["registered"], 0)
+            self.assertIsNone(record.processed_at)
+
+            completed = poll_once(token="test-token")
+
+        self.assertEqual(completed["registered"], 1)
+        record.refresh_from_db()
+        self.assertIsNotNone(record.processed_at)
 
     def test_poll_once_rejects_wrong_branch(self):
         artifacts_page = json.dumps(
