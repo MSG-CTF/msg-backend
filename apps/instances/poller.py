@@ -35,9 +35,10 @@ def github_request(path, token=None, timeout=10):
         "Accept": "application/vnd.github+json",
         "User-Agent": "msg-backend-release-poller",
     }
-    if token:
-        headers["Authorization"] = "Bearer " + token
     request = Request(base + path, headers=headers)
+    if token:
+        # Artifact downloads redirect to signed external storage URLs.
+        request.add_unredirected_header("Authorization", "Bearer " + token)
     # 위에서 scheme을 http와 https로 제한한 운영 설정만 사용한다
     with urlopen(request, timeout=timeout) as response:  # nosec B310
         return response.read()

@@ -2,6 +2,7 @@ import io
 import json
 import zipfile
 from unittest.mock import patch
+from urllib.request import HTTPRedirectHandler
 
 from django.core.cache import cache
 from django.test import TestCase, override_settings
@@ -9,7 +10,7 @@ from django.test import TestCase, override_settings
 from apps.challenge.models import Challenge
 from apps.challenge.services import hash_flag
 from apps.instances.models import ChallengeRelease, ChallengeRuntimeConfig
-from apps.instances.poller import list_bundle_artifacts, poll_once, register_bundle
+from apps.instances.poller import github_request, list_bundle_artifacts, poll_once, register_bundle
 
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 
@@ -117,6 +118,31 @@ def fake_urlopen(responses):
         return FakeResponse(queue.pop(0))
 
     return opener
+
+
+class GithubRequestTests(TestCase):
+    def test_does_not_forward_token_to_redirected_artifact_storage(self):
+        requests = []
+
+        def opener(request, timeout=10):
+            requests.append(request)
+            return FakeResponse(b"{}")
+
+        with patch("apps.instances.poller.urlopen", opener):
+            github_request("/test", token="test-token")
+
+        request = requests[0]
+        self.assertEqual(request.get_header("Authorization"), "Bearer test-token")
+
+        redirected = HTTPRedirectHandler().redirect_request(
+            request,
+            None,
+            302,
+            "Found",
+            {},
+            "https://artifact-storage.example/bundle.zip",
+        )
+        self.assertIsNone(redirected.get_header("Authorization"))
 
 
 class ListBundleArtifactsTests(TestCase):
