@@ -1919,7 +1919,7 @@ def _node_from_target(target):
         "node_id": target.get("resource_target_id"),
         "node_name": target.get("name"),
         "status": "HEALTHY" if healthy else "DEGRADED",
-        "running_instances": (target.get("container_storage_usage") or {}).get(
+        "container_count": (target.get("container_storage_usage") or {}).get(
             "total_container_count"
         ),
         "cpu_usage_percent": _usage_percent(usage, capacity, "cpu_millicores"),
@@ -1952,8 +1952,8 @@ def admin_resources(request):
 
     for account in accounts.values():
         nodes = account["nodes"]
-        counts = [n["running_instances"] for n in nodes if n["running_instances"] is not None]
-        account["running_instances"] = sum(counts) if counts else None
+        counts = [n["container_count"] for n in nodes if n["container_count"] is not None]
+        account["container_count"] = sum(counts) if counts else None
         account["status"] = (
             "HEALTHY" if all(n["status"] == "HEALTHY" for n in nodes) else "DEGRADED"
         )

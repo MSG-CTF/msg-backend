@@ -3835,12 +3835,12 @@ class AdminResourcesTests(TestCase):
         self.assertEqual(account["provider"], "GCP")
         self.assertEqual(account["scope_id"], "example-project")
         self.assertEqual(account["status"], "HEALTHY")
-        self.assertEqual(account["running_instances"], 2)
+        self.assertEqual(account["container_count"], 2)
         self.assertEqual(account["nodes"], [{
             "node_id": "00000000-0000-4000-8000-000000000001",
             "node_name": "vm-a",
             "status": "HEALTHY",
-            "running_instances": 2,
+            "container_count": 2,
             "cpu_usage_percent": 30,
             "memory_usage_percent": 38,
         }])
@@ -3856,7 +3856,7 @@ class AdminResourcesTests(TestCase):
         self.assertEqual(data["total_count"], 1)
         account = data["accounts"][0]
         self.assertEqual(len(account["nodes"]), 2)
-        self.assertEqual(account["running_instances"], 4)
+        self.assertEqual(account["container_count"], 4)
         self.assertEqual(account["status"], "DEGRADED")
         self.assertEqual([n["status"] for n in account["nodes"]], ["HEALTHY", "DEGRADED"])
 
@@ -3867,8 +3867,8 @@ class AdminResourcesTests(TestCase):
         node = res.data["data"]["accounts"][0]["nodes"][0]
         self.assertIsNone(node["cpu_usage_percent"])
         self.assertIsNone(node["memory_usage_percent"])
-        self.assertIsNone(node["running_instances"])
-        self.assertIsNone(res.data["data"]["accounts"][0]["running_instances"])
+        self.assertIsNone(node["container_count"])
+        self.assertIsNone(res.data["data"]["accounts"][0]["container_count"])
 
     def test_stopped_vm_is_degraded(self):
         res = self.get([_target(status="STOPPED")])
