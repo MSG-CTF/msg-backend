@@ -12,6 +12,9 @@ IMAGE_REF_PATTERN = re.compile(
     r"[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?"
     r"@sha256:[0-9a-f]{64}$"
 )
+CONTAINER_NAME_PATTERN = re.compile(
+    r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+)
 
 SUPPORTED_SCHEMA_VERSION = "2.0"
 MAX_CONTAINERS = 8
@@ -99,6 +102,10 @@ def _validate_containers(raw_containers):
         if not isinstance(raw, dict):
             raise ReleaseValidationError("workload.containers 항목 형식이 올바르지 않습니다")
         name = _require_string(raw.get("name"), "container.name")
+        if not CONTAINER_NAME_PATTERN.fullmatch(name):
+            raise ReleaseValidationError(
+                "container.name은 63자 이하의 DNS label 형식이어야 합니다"
+            )
         if name in names:
             raise ReleaseValidationError("컨테이너 이름이 중복됩니다")
         names.add(name)

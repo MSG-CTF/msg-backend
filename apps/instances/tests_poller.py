@@ -34,6 +34,7 @@ def bundle(
     revision=1,
     slug="web-basic",
     name="Web Basic",
+    container_name="app",
     digest=DIGEST_A,
     scan_result="PASS",
     challenge_id=None,
@@ -53,7 +54,7 @@ def bundle(
         "workload": {
             "containers": [
                 {
-                    "name": "app",
+                    "name": container_name,
                     "image": f"ghcr.io/msg-ctf/challenges/{slug}/app@sha256:{digest}",
                     "ports": [{"port": 8080, "public": True}],
                 }
@@ -319,6 +320,12 @@ class RegisterBundleTests(PollerTestBase):
 
     def test_invalid_bundle_is_skipped(self):
         status, _ = register_bundle(bundle(scan_result="FAIL"))
+        self.assertEqual(status, "invalid")
+        self.assertEqual(ChallengeRelease.objects.count(), 0)
+
+    def test_bundle_with_invalid_container_name_is_skipped(self):
+        status, _ = register_bundle(bundle(container_name="web_app"))
+
         self.assertEqual(status, "invalid")
         self.assertEqual(ChallengeRelease.objects.count(), 0)
 
