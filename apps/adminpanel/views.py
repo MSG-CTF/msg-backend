@@ -567,19 +567,27 @@ def payment_checkout(request):
     item_name = item_name.strip()
 
     now = timezone.now().replace(microsecond=0)
+    token_hash = hash_token(raw_token)
+
+    # QR 재발급이 팀 → 토큰 순으로 잠그므로 같은 순서를 따른다. 반대로 잠그면 둘이 겹칠 때
+    # 교착으로 한쪽이 500 이 된다. 토큰의 팀은 바뀌지 않아 team_id 는 잠그지 않고 읽는다.
+    owner_team_id = (
+        PaymentToken.objects.filter(token_hash=token_hash)
+        .values_list("team_id", flat=True)
+        .first()
+    )
+    if owner_team_id is None:
+        raise PaymentTokenInvalid()
 
     with transaction.atomic():
-        token = (
-            PaymentToken.objects.select_for_update()
-            .filter(token_hash=hash_token(raw_token))
-            .first()
-        )
+        team = Team.objects.select_for_update(no_key=True).get(pk=owner_team_id)
+        # 팀을 잠그기 전에 재발급이 이 토큰을 무효화했을 수 있어 잠근 뒤 다시 본다.
+        token = PaymentToken.objects.select_for_update().filter(token_hash=token_hash).first()
         if token is None or token.status != PaymentTokenStatus.ACTIVE:
             raise PaymentTokenInvalid()
         if token.expires_at < now:
             raise PaymentTokenExpired()
 
-        team = Team.objects.select_for_update(no_key=True).get(pk=token.team_id)
         if team.is_banned:
             raise TeamBanned()
         if team.mileage < amount:
