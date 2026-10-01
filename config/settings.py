@@ -236,3 +236,31 @@ if (
 
 SCHEDULER_TIMEOUT_SECONDS = int(os.getenv("SCHEDULER_TIMEOUT_SECONDS", "5"))
 INSTANCE_EXTEND_MINUTES = int(os.getenv("INSTANCE_EXTEND_MINUTES", "30"))
+
+
+def _validated_base_url(name, default):
+    # 스케줄러 URL 과 같은 규칙. 사용자 정보·경로·query·fragment 없는 http(s) 주소만 받는다.
+    url = os.getenv(name, default).rstrip("/")
+    parts = urlsplit(url)
+    try:
+        parts.port
+    except ValueError as error:
+        raise ImproperlyConfigured(f"{name} 포트가 올바르지 않습니다.") from error
+    if (
+        parts.scheme not in {"http", "https"}
+        or not parts.hostname
+        or parts.username
+        or parts.password
+        or parts.path not in {"", "/"}
+        or parts.query
+        or parts.fragment
+    ):
+        raise ImproperlyConfigured(
+            f"{name}은 사용자 정보, 경로, query, fragment가 없는 http 또는 https 주소여야 합니다."
+        )
+    return url
+
+
+RESOURCE_BROKER_BASE_URL = _validated_base_url("RESOURCE_BROKER_BASE_URL", "http://127.0.0.1:8002")
+RESOURCE_BROKER_TIMEOUT_SECONDS = int(os.getenv("RESOURCE_BROKER_TIMEOUT_SECONDS", "5"))
+INVENTORY_API_TOKEN = os.getenv("INVENTORY_API_TOKEN", "")
