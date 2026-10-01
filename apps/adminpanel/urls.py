@@ -26,4 +26,5 @@ urlpatterns = [
     ),
     path("admin/settings", views.settings_view),
     path("admin/events", views.event_list),
+    path("admin/resources", views.admin_resources),
 ]
