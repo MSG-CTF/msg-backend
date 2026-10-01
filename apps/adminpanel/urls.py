@@ -9,6 +9,7 @@ urlpatterns = [
     path("admin/teams/<str:team_id>", views.team_detail),
     path("admin/dashboard", views.dashboard),
     path("admin/challenges", views.challenge_list),
+    path("admin/challenges/<uuid:challenge_id>", views.challenge_detail),
     path("admin/payment/checkout", views.payment_checkout),
     path("admin/payment/history", views.payment_history),
     path("admin/payment/<str:history_id>/refund", views.payment_refund),
