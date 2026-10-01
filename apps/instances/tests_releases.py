@@ -230,6 +230,49 @@ class ReleaseRegisterTests(ReleaseTestBase):
         self.assertEqual(res.status_code, 400)
         self.assertEqual(res.data["code"], "RELEASE_INVALID")
 
+    def test_register_rejects_invalid_container_names(self):
+        self.auth("root")
+
+        for name in ("web_app", "Web", "-web", "web-", "a" * 64):
+            with self.subTest(name=name):
+                res = self.register(
+                    containers=[
+                        {
+                            "name": name,
+                            "image": (
+                                "ghcr.io/msg-ctf/challenges/web-basic/"
+                                f"app@sha256:{DIGEST_A}"
+                            ),
+                            "ports": [{"port": 8080, "public": True}],
+                        }
+                    ]
+                )
+
+                self.assertEqual(res.status_code, 400)
+                self.assertEqual(res.data["code"], "RELEASE_INVALID")
+
+        self.assertEqual(ChallengeRelease.objects.count(), 0)
+
+    def test_register_accepts_63_character_container_name(self):
+        self.auth("root")
+        name = "a" * 63
+
+        res = self.register(
+            containers=[
+                {
+                    "name": name,
+                    "image": (
+                        "ghcr.io/msg-ctf/challenges/web-basic/"
+                        f"app@sha256:{DIGEST_A}"
+                    ),
+                    "ports": [{"port": 8080, "public": True}],
+                }
+            ]
+        )
+
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data["data"]["containers"][0]["name"], name)
+
     def test_register_rejects_failed_scan(self):
         # scan_result가 PASS가 아니면 거절한다
         self.auth("root")

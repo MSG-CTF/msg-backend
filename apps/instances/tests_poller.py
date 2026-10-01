@@ -2,6 +2,7 @@ import io
 import json
 import zipfile
 from unittest.mock import patch
+from urllib.request import HTTPRedirectHandler
 
 from django.core.cache import cache
 from django.test import TestCase, override_settings
@@ -14,7 +15,12 @@ from apps.instances.models import (
     ChallengeRuntimeConfig,
     PollerArtifact,
 )
-from apps.instances.poller import list_bundle_artifacts, poll_once, register_bundle
+from apps.instances.poller import (
+    github_request,
+    list_bundle_artifacts,
+    poll_once,
+    register_bundle,
+)
 
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 
@@ -28,6 +34,7 @@ def bundle(
     revision=1,
     slug="web-basic",
     name="Web Basic",
+    container_name="app",
     digest=DIGEST_A,
     scan_result="PASS",
     challenge_id=None,
@@ -47,7 +54,7 @@ def bundle(
         "workload": {
             "containers": [
                 {
-                    "name": "app",
+                    "name": container_name,
                     "image": f"ghcr.io/msg-ctf/challenges/{slug}/app@sha256:{digest}",
                     "ports": [{"port": 8080, "public": True}],
                 }
@@ -124,7 +131,49 @@ def fake_urlopen(responses):
     return opener
 
 
+class GithubRequestTests(TestCase):
+    def test_does_not_forward_token_to_redirected_artifact_storage(self):
+        requests = []
+
+        def opener(request, timeout=10):
+            requests.append(request)
+            return FakeResponse(b"{}")
+
+        with patch("apps.instances.poller.urlopen", opener):
+            github_request("/test", token="test-token")
+
+        request = requests[0]
+        self.assertEqual(request.get_header("Authorization"), "Bearer test-token")
+
+        redirected = HTTPRedirectHandler().redirect_request(
+            request,
+            None,
+            302,
+            "Found",
+            {},
+            "https://artifact-storage.example/bundle.zip",
+        )
+        self.assertIsNone(redirected.get_header("Authorization"))
+
+
 class ListBundleArtifactsTests(TestCase):
+    def test_returns_new_artifacts_oldest_first(self):
+        responses = [
+            json.dumps(
+                {
+                    "artifacts": [
+                        publish_artifact(12, "new-publish-bundle"),
+                        publish_artifact(11, "old-publish-bundle"),
+                    ]
+                }
+            ).encode("utf-8")
+        ]
+
+        with patch("apps.instances.poller.urlopen", fake_urlopen(responses)):
+            artifacts = list_bundle_artifacts(token="test-token")
+
+        self.assertEqual([artifact["id"] for artifact in artifacts], [11, 12])
+
     @override_settings(RELEASE_POLL_LIMIT=2)
     def test_lists_unexpired_publish_bundles_across_all_pages(self):
         responses = [
@@ -274,6 +323,12 @@ class RegisterBundleTests(PollerTestBase):
         self.assertEqual(status, "invalid")
         self.assertEqual(ChallengeRelease.objects.count(), 0)
 
+    def test_bundle_with_invalid_container_name_is_skipped(self):
+        status, _ = register_bundle(bundle(container_name="web_app"))
+
+        self.assertEqual(status, "invalid")
+        self.assertEqual(ChallengeRelease.objects.count(), 0)
+
     def test_revision_mismatch_bundle_is_skipped(self):
         artifact_data = bundle(revision=1)
         artifact_data["registry_revision"] = 2
@@ -316,6 +371,33 @@ class PollOnceTests(PollerTestBase):
         self.assertEqual(summary["duplicate"], 1)
         self.assertEqual(summary["error"], 0)
         self.assertEqual(ChallengeRelease.objects.count(), 1)
+
+    def test_poll_once_does_not_redownload_processed_artifact(self):
+        artifact = publish_artifact(11, "web-basic-100-1-x-publish-bundle")
+        artifacts_page = json.dumps({"artifacts": [artifact]}).encode("utf-8")
+        responses = [
+            artifacts_page,
+            workflow_run(11),
+            bundle_zip(bundle(revision=1, challenge_id=self.challenge.challenge_id)),
+            artifacts_page,
+        ]
+        requested_urls = []
+
+        def opener(request, timeout=10):
+            requested_urls.append(request.full_url)
+            return FakeResponse(responses.pop(0))
+
+        with patch("apps.instances.poller.urlopen", opener):
+            first = poll_once(token="test-token")
+            second = poll_once(token="test-token")
+
+        self.assertEqual(first["registered"], 1)
+        self.assertEqual(second["registered"], 0)
+        self.assertEqual(second["duplicate"], 0)
+        self.assertEqual(len(requested_urls), 4)
+        self.assertEqual(sum("/actions/runs/" in url for url in requested_urls), 1)
+        self.assertEqual(sum("/zip" in url for url in requested_urls), 1)
+        self.assertIsNotNone(PollerArtifact.objects.get(pk=11).processed_at)
 
     def test_poll_once_rejects_failed_workflow_run(self):
         artifacts_page = json.dumps(
