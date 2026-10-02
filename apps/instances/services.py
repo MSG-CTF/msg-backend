@@ -359,7 +359,7 @@ def build_scheduler_create_body(user, team, challenge, runtime_config, release):
     # Scheduler 인스턴스 생성 요청 body를 현재 릴리스 값으로 만든다
     validate_release_for_scheduler(release)
     containers = release.containers.order_by("name")
-    return {
+    body = {
         "team_id": str(team.team_id),
         "user_id": str(user.user_id),
         "challenge_id": str(challenge.challenge_id),
@@ -378,6 +378,9 @@ def build_scheduler_create_body(user, team, challenge, runtime_config, release):
         "ttl_minutes": runtime_config.ttl_minutes,
         "hard_timeout_minutes": runtime_config.hard_timeout_minutes,
     }
+    if release.healthcheck is not None:
+        body["healthcheck"] = release.healthcheck
+    return body
 
 
 def call_scheduler_create(user, team, challenge, runtime_config, release, auth_header=None):

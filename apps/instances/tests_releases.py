@@ -744,6 +744,51 @@ class ReleaseInstanceCreateTests(ReleaseTestBase):
             source_cell=self.challenge_cell,
         )
 
+    @patch("apps.instances.services.scheduler_request")
+    def test_create_preserves_registered_healthcheck(self, scheduler_request):
+        healthcheck = {"type": "http", "port": 8080, "path": "/health"}
+        cases = (
+            ("artifact", healthcheck),
+            ("workload", healthcheck),
+            ("artifact", {}),
+            ("artifact", None),
+        )
+        for revision, (location, expected) in enumerate(cases, start=1):
+            with self.subTest(location=location, healthcheck=expected):
+                self.auth("root")
+                payload = artifact_payload(revision=revision)
+                target = payload["artifact"]
+                if location == "workload":
+                    target = target["workload"]
+                if expected is not None:
+                    target["healthcheck"] = expected
+
+                registered = self.client.post(self.base_url, payload, format="json")
+                self.assertEqual(registered.status_code, 200)
+                release_id = registered.data["data"]["release_id"]
+                release = ChallengeRelease.objects.get(pk=release_id)
+                self.assertEqual(release.healthcheck, expected)
+                self.assertEqual(self.activate(release_id).status_code, 200)
+
+                scheduler_request.return_value = {
+                    "instance_id": str(uuid.uuid4()),
+                    "status": "REQUESTED",
+                }
+                self.auth("player")
+                response = self.client.post(
+                    self.player_url,
+                    {"challenge_id": str(self.challenge.pk)},
+                    format="json",
+                )
+
+                self.assertEqual(response.status_code, 202)
+                body = scheduler_request.call_args.kwargs["body"]
+                self.assertEqual(body["registry_revision"], revision)
+                if expected is None:
+                    self.assertNotIn("healthcheck", body)
+                else:
+                    self.assertEqual(body["healthcheck"], expected)
+
     def test_create_without_current_release_fails(self):
         # 활성 릴리스가 없으면 인스턴스를 만들 수 없다
         self.auth("root")
