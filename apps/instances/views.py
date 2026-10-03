@@ -18,6 +18,7 @@ from apps.instances.services import (
     call_scheduler_reset,
     create_instance_from_scheduler,
     get_challenge_runtime_config,
+    mark_instance_replaced,
     scheduler_auth_header,
     serialize_instance,
     update_instance_from_scheduler,
@@ -29,6 +30,16 @@ MAX_EXTEND_COUNT = 3
 def lock_instance_user(user):
     # 같은 사용자의 인스턴스 변경 요청을 순차 처리하기 위해 잠금 row를 잡는다
     InstanceLock.objects.select_for_update().get_or_create(user=user)
+
+
+def can_create_instance_for_challenge(team, challenge):
+    if not challenge.is_published:
+        return False
+
+    return TeamChallengeAccess.objects.filter(
+        team=team,
+        challenge=challenge,
+    ).exists()
 
 
 class InstanceCreateView(APIView):
@@ -49,12 +60,15 @@ class InstanceCreateView(APIView):
         if challenge is None:
             return fail("CHALLENGE_NOT_FOUND", "존재하지 않는 문제 ID입니다.", 404)
 
-        if not TeamChallengeAccess.objects.filter(team=team, challenge=challenge).exists():
+        if not can_create_instance_for_challenge(team, challenge):
             return fail("CHALLENGE_LOCKED", "아직 개방되지 않은 문제입니다.", 403)
 
         runtime_config = get_challenge_runtime_config(challenge)
-        if runtime_config is None:
+        if runtime_config is None or runtime_config.current_release_id is None:
+            # 활성 릴리스가 없으면 배포할 이미지가 없는 문제다
             return fail("RUNTIME_CONFIG_NOT_FOUND", "문제 실행 설정이 없습니다.", 404)
+
+        release = runtime_config.current_release
 
         with transaction.atomic():
             lock_instance_user(user)
@@ -65,6 +79,7 @@ class InstanceCreateView(APIView):
                     team,
                     challenge,
                     runtime_config,
+                    release,
                     scheduler_auth_header(request),
                 )
             except SchedulerError as error:
@@ -80,13 +95,18 @@ class InstanceCreateView(APIView):
                     .first()
                 )
 
-            instance = create_instance_from_scheduler(
-                scheduler_data,
-                user=user,
-                team=team,
-                challenge=challenge,
-                replaced_instance=replaced_instance,
-            )
+            try:
+                instance = create_instance_from_scheduler(
+                    scheduler_data,
+                    user=user,
+                    team=team,
+                    challenge=challenge,
+                    replaced_instance=replaced_instance,
+                    release=release,
+                )
+            except SchedulerError as error:
+                return fail(error.code, error.message, error.status_code)
+            mark_instance_replaced(replaced_instance)
 
         message = "인스턴스 생성 요청이 접수되었습니다."
         if replaced_instance is not None:
@@ -163,13 +183,18 @@ class InstanceResetView(APIView):
             except SchedulerError as error:
                 return fail(error.code, error.message, error.status_code)
 
-            new_instance = create_instance_from_scheduler(
-                scheduler_data,
-                user=instance.user,
-                team=instance.team,
-                challenge=instance.challenge,
-                replaced_instance=instance,
-            )
+            try:
+                new_instance = create_instance_from_scheduler(
+                    scheduler_data,
+                    user=instance.user,
+                    team=instance.team,
+                    challenge=instance.challenge,
+                    replaced_instance=instance,
+                    release=instance.release,
+                )
+            except SchedulerError as error:
+                return fail(error.code, error.message, error.status_code)
+            mark_instance_replaced(instance)
             response_data = serialize_instance(new_instance, include_replaced=True)
 
         return ok(
@@ -211,7 +236,10 @@ class InstanceExtendView(APIView):
             except SchedulerError as error:
                 return fail(error.code, error.message, error.status_code)
 
-            update_instance_from_scheduler(instance, scheduler_data)
+            try:
+                update_instance_from_scheduler(instance, scheduler_data)
+            except SchedulerError as error:
+                return fail(error.code, error.message, error.status_code)
             instance.extend_count += 1
             instance.save(update_fields=["extend_count", "updated_at"])
             response_data = serialize_instance(instance)
@@ -250,14 +278,20 @@ class MyInstanceView(APIView):
             if challenge is None:
                 return fail("CHALLENGE_NOT_FOUND", "존재하지 않는 문제 ID입니다.", 404)
 
-            instance = create_instance_from_scheduler(
-                scheduler_data,
-                user=request.user,
-                team=team,
-                challenge=challenge,
-            )
+            try:
+                instance = create_instance_from_scheduler(
+                    scheduler_data,
+                    user=request.user,
+                    team=team,
+                    challenge=challenge,
+                )
+            except SchedulerError as error:
+                return fail(error.code, error.message, error.status_code)
         else:
-            update_instance_from_scheduler(instance, scheduler_data)
+            try:
+                update_instance_from_scheduler(instance, scheduler_data)
+            except SchedulerError as error:
+                return fail(error.code, error.message, error.status_code)
 
         return ok(
             serialize_instance(instance, include_title=True),

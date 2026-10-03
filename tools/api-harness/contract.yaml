@@ -142,3 +142,8 @@ common_error_codes:
   # 관리자 계정 등록 (adminpanel)
   - {http: 409, code: LOGIN_ID_TAKEN}
   - {http: 409, code: TEAM_ALREADY_HAS_LEADER}
+  # 문제 릴리스 관리 (/admin/challenges/{id}/releases)
+  - {http: 400, code: RELEASE_INVALID}
+  - {http: 400, code: RELEASE_NOT_DEPLOYABLE}
+  - {http: 404, code: RELEASE_NOT_FOUND}
+  - {http: 409, code: RELEASE_DUPLICATED}
