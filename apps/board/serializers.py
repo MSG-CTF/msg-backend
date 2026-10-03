@@ -7,7 +7,7 @@ from apps.challenge.models import Challenge
 class CellSerializer(serializers.ModelSerializer):
     class Meta:
         model = Cell
-        fields = ["cell_index", "type", "difficulty", "name"]
+        fields = ["cell_index", "type", "difficulty", "line_number", "name"]
 
 
 class ChanceCardSerializer(serializers.ModelSerializer):
