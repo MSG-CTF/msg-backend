@@ -255,13 +255,31 @@ class BoardApiTestCase(TestCase):
         self.assertEqual(len(body["data"]["cells"]), 36)
         cells = body["data"]["cells"]
         self.assertEqual([cell["cell_index"] for cell in cells], list(range(1, 37)))
+        expected_lines = {
+            1: [2, 3, 4, 5, 6],
+            2: [8, 9, 10, 11, 12],
+            3: [13, 14, 15, 17, 18],
+            4: [19, 20, 22, 23, 24],
+            5: [26, 27, 28, 29, 31],
+            6: [32, 33, 34, 35, 36],
+        }
+        for line_number, cell_indexes in expected_lines.items():
+            self.assertEqual(
+                [cell["cell_index"] for cell in cells if cell["line_number"] == line_number],
+                cell_indexes,
+            )
         self.assertEqual(
-            {cell["cell_index"]: (cell["type"], cell["name"], cell["difficulty"])
+            {
+                cell["cell_index"]: (
+                    cell["type"], cell["name"], cell["difficulty"], cell["line_number"]
+                )
              for cell in cells if cell["type"] != "CHALLENGE"},
             {
-                1: ("START", "출발", None), 7: ("CHANCE", "찬스", None),
-                16: ("ROULETTE", "룰렛", None), 21: ("AIRPORT", "세계여행", None),
-                25: ("ROULETTE", "룰렛", None), 30: ("CHANCE", "황금열쇠", None),
+                1: ("START", "출발", None, None), 7: ("CHANCE", "찬스", None, None),
+                16: ("ROULETTE", "룰렛", None, None),
+                21: ("AIRPORT", "세계여행", None, None),
+                25: ("ROULETTE", "룰렛", None, None),
+                30: ("CHANCE", "황금열쇠", None, None),
             },
         )
 

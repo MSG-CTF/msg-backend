@@ -57,11 +57,19 @@ class Cell(models.Model):
     cell_index = models.PositiveSmallIntegerField(primary_key=True)
     type = models.CharField(max_length=20, choices=CellType.choices)
     difficulty = models.CharField(max_length=10, choices=Difficulty.choices, null=True, blank=True)
+    line_number = models.PositiveSmallIntegerField(null=True, blank=True)
     name = models.CharField(max_length=50)
 
     class Meta:
         db_table = "cells"
         ordering = ["cell_index"]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(line_number__isnull=True)
+                | models.Q(line_number__gte=1, line_number__lte=6),
+                name="cell_line_number_between_1_and_6",
+            ),
+        ]
 
     def __str__(self):
         return f"{self.cell_index}: {self.name}"
