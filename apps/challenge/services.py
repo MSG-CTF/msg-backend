@@ -7,6 +7,7 @@ from django.db.models import Sum
 from apps.accounts.models import Team
 from apps.koth.models import KothSolve
 from apps.ranking.scoring import calculate_dynamic_score
+from apps.ranking.models import LineMonopoly
 from apps.signature.models import SignatureSolve
 
 from .models import Solve
@@ -76,4 +77,10 @@ def get_team_total_score(team_id):
         )["total"]
         or Decimal("0")
     )
-    return jeopardy_score + koth_score + signature_score
+    line_score = (
+        LineMonopoly.objects.filter(team_id=team_id).aggregate(
+            total=Sum("earned_score")
+        )["total"]
+        or Decimal("0")
+    )
+    return jeopardy_score + koth_score + signature_score + line_score
