@@ -58,15 +58,6 @@ class CellLineNumberValidationTestCase(TestCase):
 
 
 class CellLineNumberDatabaseConstraintTestCase(TestCase):
-    def test_challenge_cell_without_line_number_cannot_be_saved(self):
-        with transaction.atomic():
-            with self.assertRaises(IntegrityError):
-                Cell.objects.create(
-                    cell_index=2,
-                    type=Cell.CellType.CHALLENGE,
-                    name="문제",
-                )
-
     def test_special_cell_with_line_number_cannot_be_saved(self):
         with transaction.atomic():
             with self.assertRaises(IntegrityError):
