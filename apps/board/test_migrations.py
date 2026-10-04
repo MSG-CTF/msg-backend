@@ -208,8 +208,20 @@ class StartCompletionMigrationTestCase(TransactionTestCase):
         Consumption = self.old_apps.get_model("board", "TeamCellConsumption")
         Roll = self.old_apps.get_model("board", "DiceRoll")
         Pending = self.old_apps.get_model("board", "PendingDiceRoll")
+        special_cell_types = {
+            1: "START",
+            7: "CHANCE",
+            16: "ROULETTE",
+            21: "AIRPORT",
+            25: "ROULETTE",
+            30: "CHANCE",
+        }
         Cell.objects.bulk_create([
-            Cell(cell_index=index, type="START" if index == 1 else "CHALLENGE", name=str(index))
+            Cell(
+                cell_index=index,
+                type=special_cell_types.get(index, "CHALLENGE"),
+                name=str(index),
+            )
             for index in range(1, 37)
         ])
         next_reset = timezone.now() - timedelta(minutes=5)
