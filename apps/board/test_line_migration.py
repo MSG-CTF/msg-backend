@@ -68,3 +68,31 @@ class CellLineMigrationTestCase(TransactionTestCase):
             ),
             [None] * 6,
         )
+
+
+class CellLineConstraintMigrationTestCase(TransactionTestCase):
+    migrate_from = [("board", "0005_exclude_start_from_completion")]
+    migrate_to = [("board", "0007_cell_line_number_matches_type")]
+
+    def setUp(self):
+        executor = MigrationExecutor(connection)
+        self.latest_migrations = executor.loader.graph.leaf_nodes()
+        self.addCleanup(self.restore_latest_schema)
+        executor.migrate(self.migrate_from)
+        self.old_apps = executor.loader.project_state(self.migrate_from).apps
+
+    def restore_latest_schema(self):
+        MigrationExecutor(connection).migrate(self.latest_migrations)
+
+    def test_legacy_standalone_challenge_is_normalized_before_constraint(self):
+        Cell = self.old_apps.get_model("board", "Cell")
+        Cell.objects.create(cell_index=1, type="CHALLENGE", name="legacy challenge")
+        Cell.objects.create(cell_index=7, type="CHANCE", name="legacy chance")
+
+        executor = MigrationExecutor(connection)
+        executor.migrate(self.migrate_to)
+        apps = executor.loader.project_state(self.migrate_to).apps
+        migrated_cells = apps.get_model("board", "Cell").objects
+
+        self.assertEqual(migrated_cells.get(cell_index=1).line_number, 1)
+        self.assertIsNone(migrated_cells.get(cell_index=7).line_number)
