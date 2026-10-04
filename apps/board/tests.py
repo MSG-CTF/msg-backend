@@ -35,13 +35,10 @@ LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"
 
 
 class CellLineNumberValidationTestCase(TestCase):
-    def test_challenge_cell_requires_a_line_number(self):
+    def test_standalone_challenge_cell_may_omit_a_line_number(self):
         cell = Cell(cell_index=2, type=Cell.CellType.CHALLENGE, name="문제")
 
-        with self.assertRaises(ValidationError) as raised:
-            cell.full_clean()
-
-        self.assertIn("line_number", raised.exception.message_dict)
+        cell.full_clean()
 
     def test_special_cell_rejects_a_line_number(self):
         cell = Cell(
@@ -58,14 +55,14 @@ class CellLineNumberValidationTestCase(TestCase):
 
 
 class CellLineNumberDatabaseConstraintTestCase(TestCase):
-    def test_challenge_cell_without_line_number_cannot_be_saved(self):
-        with transaction.atomic():
-            with self.assertRaises(IntegrityError):
-                Cell.objects.create(
-                    cell_index=2,
-                    type=Cell.CellType.CHALLENGE,
-                    name="문제",
-                )
+    def test_challenge_cell_without_line_number_can_be_saved(self):
+        cell = Cell.objects.create(
+            cell_index=2,
+            type=Cell.CellType.CHALLENGE,
+            name="문제",
+        )
+
+        self.assertIsNone(cell.line_number)
 
     def test_special_cell_with_line_number_cannot_be_saved(self):
         with transaction.atomic():

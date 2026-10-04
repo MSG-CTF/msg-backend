@@ -84,7 +84,7 @@ class CellLineConstraintMigrationTestCase(TransactionTestCase):
     def restore_latest_schema(self):
         MigrationExecutor(connection).migrate(self.latest_migrations)
 
-    def test_legacy_standalone_challenge_is_normalized_before_constraint(self):
+    def test_legacy_standalone_challenge_remains_without_a_line(self):
         Cell = self.old_apps.get_model("board", "Cell")
         Cell.objects.create(cell_index=1, type="CHALLENGE", name="legacy challenge")
         Cell.objects.create(cell_index=7, type="CHANCE", name="legacy chance")
@@ -94,5 +94,5 @@ class CellLineConstraintMigrationTestCase(TransactionTestCase):
         apps = executor.loader.project_state(self.migrate_to).apps
         migrated_cells = apps.get_model("board", "Cell").objects
 
-        self.assertEqual(migrated_cells.get(cell_index=1).line_number, 1)
+        self.assertIsNone(migrated_cells.get(cell_index=1).line_number)
         self.assertIsNone(migrated_cells.get(cell_index=7).line_number)
