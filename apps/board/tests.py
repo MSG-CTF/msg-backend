@@ -4,8 +4,9 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 from django.core.cache import cache
+from django.core.exceptions import ValidationError
 from django.core.management import call_command
-from django.db import close_old_connections
+from django.db import IntegrityError, close_old_connections, transaction
 from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient, APIRequestFactory
@@ -31,6 +32,50 @@ from apps.challenge.models import Challenge, Solve
 from apps.teams.models import MileageHistory
 
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
+
+
+class CellLineNumberValidationTestCase(TestCase):
+    def test_challenge_cell_requires_a_line_number(self):
+        cell = Cell(cell_index=2, type=Cell.CellType.CHALLENGE, name="문제")
+
+        with self.assertRaises(ValidationError) as raised:
+            cell.full_clean()
+
+        self.assertIn("line_number", raised.exception.message_dict)
+
+    def test_special_cell_rejects_a_line_number(self):
+        cell = Cell(
+            cell_index=7,
+            type=Cell.CellType.CHANCE,
+            line_number=1,
+            name="찬스",
+        )
+
+        with self.assertRaises(ValidationError) as raised:
+            cell.full_clean()
+
+        self.assertIn("line_number", raised.exception.message_dict)
+
+
+class CellLineNumberDatabaseConstraintTestCase(TestCase):
+    def test_challenge_cell_without_line_number_cannot_be_saved(self):
+        with transaction.atomic():
+            with self.assertRaises(IntegrityError):
+                Cell.objects.create(
+                    cell_index=2,
+                    type=Cell.CellType.CHALLENGE,
+                    name="문제",
+                )
+
+    def test_special_cell_with_line_number_cannot_be_saved(self):
+        with transaction.atomic():
+            with self.assertRaises(IntegrityError):
+                Cell.objects.create(
+                    cell_index=7,
+                    type=Cell.CellType.CHANCE,
+                    line_number=1,
+                    name="찬스",
+                )
 
 
 @override_settings(CACHES=LOCMEM)

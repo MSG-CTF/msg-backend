@@ -13,7 +13,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.accounts.models import Team, User
-from apps.board.management.commands.seed_board import CHANCE_CARDS, SPECIAL_CELLS
+from apps.board.management.commands.seed_board import CELL_LINE_NUMBERS, CHANCE_CARDS, SPECIAL_CELLS
 from apps.board.models import Cell, ChanceCard, IdempotencyRequest, TeamBoardState, TeamCellConsumption, TeamChanceCard
 from apps.board.services import grant_mileage
 from apps.teams.models import MileageHistory
@@ -25,7 +25,12 @@ class BoardRuntimeInvariantTests(TransactionTestCase):
     def setUp(self):
         cache.clear()
         Cell.objects.bulk_create([
-            Cell(cell_index=index, type=SPECIAL_CELLS.get(index, ("CHALLENGE", "문제"))[0], name=str(index))
+            Cell(
+                cell_index=index,
+                type=SPECIAL_CELLS.get(index, ("CHALLENGE", "문제"))[0],
+                line_number=CELL_LINE_NUMBERS.get(index),
+                name=str(index),
+            )
             for index in range(1, 37)
         ])
         ChanceCard.objects.bulk_create([ChanceCard(**card) for card in CHANCE_CARDS])
