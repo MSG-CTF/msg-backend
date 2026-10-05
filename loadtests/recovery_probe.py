@@ -1,10 +1,14 @@
 import json
 import sys
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
 url = sys.argv[1]
+parsed_url = urllib.parse.urlsplit(url)
+if parsed_url.scheme not in {"http", "https"} or not parsed_url.hostname:
+    raise SystemExit("recovery probe URL must use http or https and include a host")
 limit = float(sys.argv[2])
 output = Path(sys.argv[3])
 started = time.perf_counter()
@@ -16,7 +20,8 @@ while time.perf_counter() - started < limit:
     attempts += 1
     try:
         request = urllib.request.Request(url, headers={"X-Forwarded-Proto": "https"})
-        with urllib.request.urlopen(request, timeout=1) as response:
+        # The scheme and host are validated above; file and custom schemes are rejected.
+        with urllib.request.urlopen(request, timeout=1) as response:  # nosec B310
             recovered = response.status == 200
         if recovered:
             break
