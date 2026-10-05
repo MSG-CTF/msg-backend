@@ -249,28 +249,36 @@ def _step(cursor, direction):
 
 
 def compute_movement(consumed_indexes, from_index, steps, direction=1):
-    """물리 거리(steps)만큼 이동한 칸이 이미 소모됐으면, 소모되지 않은 칸이 나올 때까지 같은 방향으로 계속 진행한다."""
+    """소모되지 않은 칸을 기준으로 steps칸 이동하고, 지나간 실제 경로를 반환한다."""
+    consumed_indexes = set(consumed_indexes)
     movement_path = []
+    skipped_cells = []
     cursor = from_index
     passed_start = False
+    remaining_completion_indexes = (
+        set(range(START_CELL_INDEX + 1, LAST_CELL_INDEX + 1)) - consumed_indexes
+    )
+    final_completion_index = (
+        next(iter(remaining_completion_indexes))
+        if len(remaining_completion_indexes) == 1
+        else None
+    )
 
     for _ in range(steps):
-        cursor = _step(cursor, direction)
-        if cursor == START_CELL_INDEX:
-            passed_start = True
-        movement_path.append(cursor)
-
-    skipped_cells = []
-    guard = 0
-    while cursor in consumed_indexes:
-        skipped_cells.append(cursor)
-        cursor = _step(cursor, direction)
-        if cursor == START_CELL_INDEX:
-            passed_start = True
-        movement_path.append(cursor)
-        guard += 1
-        if guard > BOARD_SIZE:
-            raise BoardNotReady()
+        guard = 0
+        while True:
+            cursor = _step(cursor, direction)
+            if cursor == START_CELL_INDEX:
+                passed_start = True
+            movement_path.append(cursor)
+            if cursor not in consumed_indexes:
+                break
+            skipped_cells.append(cursor)
+            guard += 1
+            if guard >= BOARD_SIZE:
+                raise BoardNotReady()
+        if cursor == final_completion_index:
+            break
 
     return cursor, movement_path, skipped_cells, passed_start
 

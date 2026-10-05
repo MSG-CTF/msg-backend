@@ -94,9 +94,9 @@ class StartCompletionTestCase(TestCase):
             response = self.post("dice/roll", "legacy-start")
         self.assertEqual(response.status_code, 200, response.data)
         self.assertEqual(response.data["data"]["current_position"], 36)
-        self.assertEqual(response.data["data"]["movement_path"], [36, *range(1, 37)])
-        self.assertEqual(response.data["data"]["skipped_cells"], list(range(1, 36)))
-        self.assertEqual(response.data["data"]["start_reward"], {"mileage_gained": 100, "roll_gained": 0})
+        self.assertEqual(response.data["data"]["movement_path"], [36])
+        self.assertEqual(response.data["data"]["skipped_cells"], [])
+        self.assertEqual(response.data["data"]["start_reward"], {"mileage_gained": 0, "roll_gained": 0})
         self.assertTrue(self.client.get("/api/v1/board/me").data["data"]["board_completed"])
 
     def test_first_start_landing_is_consumed_and_next_landing_skips_with_mileage_only(self):
