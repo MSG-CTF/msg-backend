@@ -16,7 +16,14 @@ from apps.board.models import (
 
 @admin.register(Cell)
 class CellAdmin(admin.ModelAdmin):
-    list_display = ["cell_index", "type", "difficulty", "name"]
+    list_display = ["cell_index", "type", "difficulty", "line_number", "name"]
+    readonly_fields = ["cell_index", "type", "line_number"]
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(ChanceCard)

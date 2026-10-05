@@ -4,8 +4,9 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 from django.core.cache import cache
+from django.core.exceptions import ValidationError
 from django.core.management import call_command
-from django.db import close_old_connections
+from django.db import IntegrityError, close_old_connections, transaction
 from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient, APIRequestFactory
@@ -31,6 +32,47 @@ from apps.challenge.models import Challenge, Solve
 from apps.teams.models import MileageHistory
 
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
+
+
+class CellLineNumberValidationTestCase(TestCase):
+    def test_standalone_challenge_cell_may_omit_a_line_number(self):
+        cell = Cell(cell_index=2, type=Cell.CellType.CHALLENGE, name="문제")
+
+        cell.full_clean()
+
+    def test_special_cell_rejects_a_line_number(self):
+        cell = Cell(
+            cell_index=7,
+            type=Cell.CellType.CHANCE,
+            line_number=1,
+            name="찬스",
+        )
+
+        with self.assertRaises(ValidationError) as raised:
+            cell.full_clean()
+
+        self.assertIn("line_number", raised.exception.message_dict)
+
+
+class CellLineNumberDatabaseConstraintTestCase(TestCase):
+    def test_challenge_cell_without_line_number_can_be_saved(self):
+        cell = Cell.objects.create(
+            cell_index=2,
+            type=Cell.CellType.CHALLENGE,
+            name="문제",
+        )
+
+        self.assertIsNone(cell.line_number)
+
+    def test_special_cell_with_line_number_cannot_be_saved(self):
+        with transaction.atomic():
+            with self.assertRaises(IntegrityError):
+                Cell.objects.create(
+                    cell_index=7,
+                    type=Cell.CellType.CHANCE,
+                    line_number=1,
+                    name="찬스",
+                )
 
 
 @override_settings(CACHES=LOCMEM)
@@ -276,19 +318,41 @@ class BoardApiTestCase(TestCase):
         self.assertEqual(len(body["data"]["cells"]), 36)
         cells = body["data"]["cells"]
         self.assertEqual([cell["cell_index"] for cell in cells], list(range(1, 37)))
+        expected_lines = {
+            1: [2, 3, 4, 5, 6],
+            2: [8, 9, 10, 11, 12],
+            3: [13, 14, 15, 17, 18],
+            4: [19, 20, 22, 23, 24],
+            5: [26, 27, 28, 29, 31],
+            6: [32, 33, 34, 35, 36],
+        }
+        for line_number, cell_indexes in expected_lines.items():
+            self.assertEqual(
+                [
+                    cell["cell_index"]
+                    for cell in cells
+                    if cell["line_number"] == line_number
+                ],
+                cell_indexes,
+            )
         self.assertEqual(
             {
-                cell["cell_index"]: (cell["type"], cell["name"], cell["difficulty"])
+                cell["cell_index"]: (
+                    cell["type"],
+                    cell["name"],
+                    cell["difficulty"],
+                    cell["line_number"],
+                )
                 for cell in cells
                 if cell["type"] != "CHALLENGE"
             },
             {
-                1: ("START", "출발", None),
-                7: ("CHANCE", "찬스", None),
-                16: ("ROULETTE", "룰렛", None),
-                21: ("AIRPORT", "세계여행", None),
-                25: ("ROULETTE", "룰렛", None),
-                30: ("CHANCE", "황금열쇠", None),
+                1: ("START", "출발", None, None),
+                7: ("CHANCE", "찬스", None, None),
+                16: ("ROULETTE", "룰렛", None, None),
+                21: ("AIRPORT", "세계여행", None, None),
+                25: ("ROULETTE", "룰렛", None, None),
+                30: ("CHANCE", "황금열쇠", None, None),
             },
         )
 

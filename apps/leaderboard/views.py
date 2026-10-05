@@ -7,6 +7,7 @@ from apps.common.utils import num
 from apps.koth.models import KothSolve
 from apps.ranking.ranking import build_team_ranking
 from apps.signature.models import SignatureSolve
+from apps.ranking.models import LineMonopoly
 
 TOP_TEAM_COUNT = 8
 TOP3_COUNT = 3
@@ -57,6 +58,18 @@ def collect_solves_map():
             }
         )
 
+    line_monopolies = LineMonopoly.objects.all()
+    for monopoly in line_monopolies:
+        team_id = str(monopoly.team_id)
+        solves_map.setdefault(team_id, []).append(
+            {
+                "challenge_id": None,
+                "source_type": "LINE",
+                "solved_at": monopoly.monopolized_at,
+                "points": monopoly.earned_score,
+            }
+        )
+
     for rows in solves_map.values():
         rows.sort(key=lambda row: row["solved_at"])
 
@@ -74,9 +87,11 @@ def build_team_data(teams, solves_map):
         jeopardy_score = Decimal("0")
         koth_score = Decimal("0")
         signature_score = Decimal("0")
+        line_score = Decimal("0")
         jeopardy_at = None
         koth_at = None
         signature_at = None
+        line_at = None
 
         for row in rows:
             if row["source_type"] == "JEOPARDY":
@@ -87,10 +102,14 @@ def build_team_data(teams, solves_map):
                 koth_score += row["points"]
                 if koth_at is None or row["solved_at"] < koth_at:
                     koth_at = row["solved_at"]
-            else:
+            elif row["source_type"] == "SIGNATURE":
                 signature_score += row["points"]
                 if signature_at is None or row["solved_at"] > signature_at:
                     signature_at = row["solved_at"]
+            else:
+                line_score += row["points"]
+                if line_at is None or row["solved_at"] > line_at:
+                    line_at = row["solved_at"]
 
         team_data.append(
             {
@@ -100,6 +119,7 @@ def build_team_data(teams, solves_map):
                 "mileage": team.mileage,
                 "koth_score": koth_score,
                 "signature_score": signature_score,
+                "line_score": line_score,
                 "jeopardy_solved_at": jeopardy_at,
                 "koth_solved_at": koth_at,
                 "signature_solved_at": signature_at,
@@ -126,6 +146,7 @@ def leaderboard(request):
                 "team_id": row["team_id"],
                 "team_name": row["team_name"],
                 "team_score": num(row["team_score"]),
+                "solved_count": sum(event["source_type"] != "LINE" for event in rows),
                 "is_top3": row["rank"] <= TOP3_COUNT,
                 "solves": [
                     {
@@ -133,6 +154,7 @@ def leaderboard(request):
                         "source_type": r["source_type"],
                         "solved_at": format_datetime(r["solved_at"]),
                         "points": num(r["points"]),
+                        "counts_as_solve": r["source_type"] != "LINE",
                     }
                     for r in rows
                 ],

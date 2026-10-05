@@ -130,6 +130,10 @@ class BoardSpecMigrationTestCase(TransactionTestCase):
             "quarantine_escape_codes", connection.introspection.table_names()
         )
 
+        # Current ORM models can only be used after the historical migration
+        # assertions have completed and the schema is restored to the latest state.
+        MigrationExecutor(connection).migrate(self.latest_migrations)
+
         # Continue through the real API from the migrated pending landing.
         client = APIClient()
         client.force_authenticate(user=User.objects.get(pk=user.pk))

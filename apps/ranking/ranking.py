@@ -17,7 +17,10 @@ def build_team_ranking(team_data, limit=None):
 
     for row in team_data:
         total = (
-            row["jeopardy_score"] + row["koth_score"] + row.get("signature_score", 0)
+            row["jeopardy_score"]
+            + row["koth_score"]
+            + row.get("signature_score", 0)
+            + row.get("line_score", 0)
         )
 
         last_solved_at = resolve_last_solved_at(

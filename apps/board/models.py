@@ -1,5 +1,6 @@
 import uuid
 
+from django.core.exceptions import ValidationError
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db import models
 
@@ -61,11 +62,32 @@ class Cell(models.Model):
     difficulty = models.CharField(
         max_length=10, choices=Difficulty.choices, null=True, blank=True
     )
+    line_number = models.PositiveSmallIntegerField(null=True, blank=True)
     name = models.CharField(max_length=50)
+
+    def clean(self):
+        super().clean()
+
+        if self.type == self.CellType.CHALLENGE and self.line_number is None:
+            raise ValidationError({"line_number": "문제 칸에는 라인 번호가 필요합니다."})
+        if self.type != self.CellType.CHALLENGE and self.line_number is not None:
+            raise ValidationError({"line_number": "라인 번호는 문제 칸에만 지정할 수 있습니다."})
 
     class Meta:
         db_table = "cells"
         ordering = ["cell_index"]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(line_number__isnull=True)
+                | models.Q(line_number__gte=1, line_number__lte=6),
+                name="cell_line_number_between_1_and_6",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(line_number__isnull=True)
+                | models.Q(type="CHALLENGE"),
+                name="cell_line_number_matches_type",
+            ),
+        ]
 
     def __str__(self):
         return f"{self.cell_index}: {self.name}"

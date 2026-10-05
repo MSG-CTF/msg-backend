@@ -14,7 +14,11 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.accounts.models import Team, User
-from apps.board.management.commands.seed_board import CHANCE_CARDS, SPECIAL_CELLS
+from apps.board.management.commands.seed_board import (
+    CELL_LINE_NUMBERS,
+    CHANCE_CARDS,
+    SPECIAL_CELLS,
+)
 from apps.board.models import (
     Cell,
     ChanceCard,
@@ -40,6 +44,7 @@ class BoardRuntimeInvariantTests(TransactionTestCase):
                 Cell(
                     cell_index=index,
                     type=SPECIAL_CELLS.get(index, ("CHALLENGE", "문제"))[0],
+                    line_number=CELL_LINE_NUMBERS.get(index),
                     name=str(index),
                 )
                 for index in range(1, 37)

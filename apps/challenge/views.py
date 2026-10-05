@@ -31,6 +31,7 @@ from apps.common.permissions import IsAuthenticated
 from apps.accounts.models import Team
 from apps.board.models import TeamBoardState, TeamChallengeAccess
 from apps.board.services import complete_challenge_from_submission
+from apps.ranking.services import check_and_record_line_monopoly
 from apps.teams.models import MileageHistory, MileageType
 
 
@@ -262,6 +263,7 @@ class ChallengeSubmitView(APIView):
             )
 
             update_dynamic_score_and_team_scores(challenge)
+            check_and_record_line_monopoly(team, challenge)
             team_score = get_team_total_score(team.pk)
             team.refresh_from_db(fields=["mileage"])
 

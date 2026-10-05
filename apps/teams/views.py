@@ -40,6 +40,9 @@ def team_me(request):
     signature_score = team.signature_solves.aggregate(total=Sum("earned_score"))[
         "total"
     ] or Decimal("0")
+    line_score = team.line_monopolies.aggregate(total=Sum("earned_score"))[
+        "total"
+    ] or Decimal("0")
 
     members = [
         {
@@ -55,10 +58,13 @@ def team_me(request):
         {
             "team_id": str(team.team_id),
             "team_name": team.team_name,
-            "team_score": num(jeopardy_score + koth_score + signature_score),
+            "team_score": num(
+                jeopardy_score + koth_score + signature_score + line_score
+            ),
             "jeopardy_score": num(jeopardy_score),
             "koth_score": num(koth_score),
             "signature_score": num(signature_score),
+            "line_score": num(line_score),
             "mileage": team.mileage,
             "is_banned": team.is_banned,
             "ban_reason": team.ban_reason,
