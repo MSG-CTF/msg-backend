@@ -83,8 +83,9 @@ class Cell(models.Model):
                 name="cell_line_number_between_1_and_6",
             ),
             models.CheckConstraint(
-                condition=models.Q(line_number__isnull=True)
-                | models.Q(type="CHALLENGE"),
+                condition=(
+                    models.Q(line_number__isnull=True) | models.Q(type="CHALLENGE")
+                ),
                 name="cell_line_number_matches_type",
             ),
         ]
