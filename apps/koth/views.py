@@ -2,8 +2,11 @@ import logging
 import uuid
 from decimal import Decimal
 
+from django.conf import settings
 from django.core.cache import cache
 from django.db import transaction
+from django.db.models import Count, OuterRef, Prefetch, Subquery
+from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
@@ -43,28 +46,34 @@ def _public_challenge_url(challenge):
     return challenge.challenge_url or None
 
 
-def _challenge_payload(challenge, include_times=True):
-    leader = (
-        challenge.solves.filter(earned_score__gt=0, team__is_banned=False)
-        .order_by("-earned_score", "solved_at", "team__team_name", "team_id")
-        .select_related("team")
-        .first()
+def _challenges_with_owner():
+    # Fetch only the winner's fields, not every solve and its complete Team object.
+    leaders = KothSolve.objects.filter(
+        challenge_id=OuterRef("pk"), earned_score__gt=0, team__is_banned=False
+    ).order_by("-earned_score", "solved_at", "team__team_name", "team_id")
+    return KothChallenge.objects.annotate(
+        owner_team_id=Subquery(leaders.values("team_id")[:1]),
+        owner_team_name=Subquery(leaders.values("team__team_name")[:1]),
+        owner_score=Subquery(leaders.values("earned_score")[:1]),
     )
+
+
+def _challenge_payload(challenge, include_times=True):
     data = {
         "koth_challenge_id": str(challenge.koth_challenge_id),
         "title": challenge.title,
         "challenge_url": _public_challenge_url(challenge),
         "status": challenge.status,
         "open_group": challenge.open_group,
-        "current_owner_team_id": str(leader.team_id)
-        if leader and leader.earned_score > 0
-        else None,
-        "current_owner_team_name": leader.team.team_name
-        if leader and leader.earned_score > 0
-        else None,
-        "current_score": num(leader.earned_score)
-        if leader and leader.earned_score > 0
-        else 0,
+        "current_owner_team_id": (
+            str(uuid.UUID(str(challenge.owner_team_id)))
+            if challenge.owner_team_id
+            else None
+        ),
+        "current_owner_team_name": challenge.owner_team_name,
+        "current_score": (
+            num(challenge.owner_score) if challenge.owner_score is not None else 0
+        ),
     }
     if include_times:
         data.update(
@@ -78,22 +87,28 @@ def _challenge_payload(challenge, include_times=True):
 def clubs(request):
     from .models import KothClub
 
-    club_rows = KothClub.objects.prefetch_related("challenges__solves__team").all()
+    club_rows = KothClub.objects.prefetch_related(
+        Prefetch(
+            "challenges", queryset=_challenges_with_owner(), to_attr="owned_challenges"
+        )
+    )
     club_data = [
         {
             "club_id": str(club.club_id),
             "name": club.name,
-            "challenges": [_challenge_payload(c) for c in club.challenges.all()],
+            "challenges": [_challenge_payload(c) for c in club.owned_challenges],
         }
         for club in club_rows
     ]
-    challenges = KothChallenge.objects.all()
+    challenges = [challenge for club in club_data for challenge in club["challenges"]]
     return ok(
         {
             "clubs": club_data,
             "total_count": len(club_data),
-            "challenge_count": challenges.count(),
-            "active_count": challenges.filter(status="ACTIVE").count(),
+            "challenge_count": len(challenges),
+            "active_count": sum(
+                challenge["status"] == "ACTIVE" for challenge in challenges
+            ),
         }
     )
 
@@ -108,12 +123,16 @@ def club_detail(request, club_id):
     from .models import KothClub
 
     try:
-        club = KothClub.objects.prefetch_related("challenges__solves__team").get(
-            pk=club_id
-        )
+        club = KothClub.objects.prefetch_related(
+            Prefetch(
+                "challenges",
+                queryset=_challenges_with_owner(),
+                to_attr="owned_challenges",
+            )
+        ).get(pk=club_id)
     except KothClub.DoesNotExist:
         raise ClubNotFound()
-    challenges = [_challenge_payload(challenge) for challenge in club.challenges.all()]
+    challenges = [_challenge_payload(challenge) for challenge in club.owned_challenges]
     return ok(
         {
             "club_id": str(club.club_id),
@@ -134,23 +153,30 @@ def _request_team(request):
 @permission_classes([IsAuthenticated])
 def me(request):
     team = _request_team(request)
+    higher_scores = (
+        KothSolve.objects.filter(
+            challenge_id=OuterRef("challenge_id"),
+            earned_score__gt=OuterRef("earned_score"),
+            team__is_banned=False,
+        )
+        .order_by()
+        .values("challenge_id")
+        .annotate(total=Count("pk"))
+        .values("total")
+    )
     solves = {
-        solve.challenge_id: solve for solve in KothSolve.objects.filter(team=team)
+        solve.challenge_id: solve
+        for solve in KothSolve.objects.filter(team=team).annotate(
+            higher_count=Subquery(higher_scores)
+        )
     }
     challenge_data = []
-    for challenge in KothChallenge.objects.select_related("club").all():
+    for challenge in KothChallenge.objects.all():
         solve = solves.get(challenge.koth_challenge_id)
         score = solve.earned_score if solve else Decimal("0")
         rank = None
         if score > 0 and not team.is_banned:
-            rank = (
-                1
-                + KothSolve.objects.filter(
-                    challenge=challenge,
-                    earned_score__gt=score,
-                    team__is_banned=False,
-                ).count()
-            )
+            rank = 1 + (solve.higher_count or 0)
         challenge_data.append(
             {
                 "koth_challenge_id": str(challenge.koth_challenge_id),
@@ -190,34 +216,49 @@ def leaderboard(request):
     except (ValueError, TypeError, AttributeError):
         raise InvalidKothChallengeId()
 
+    # Authentication runs before this view. Only cache the shared JSON ranking;
+    # browsable HTML can contain request-specific content and must never be shared.
+    cache_seconds = settings.KOTH_LEADERBOARD_CACHE_SECONDS
+    cache_key = f"koth:leaderboard:json:v1:{parsed_id}"
+    cacheable = cache_seconds > 0 and request.accepted_media_type == "application/json"
+    if cacheable:
+        try:
+            cached_content = cache.get(cache_key)
+        except Exception:
+            cached_content = None
+        if cached_content is not None:
+            return HttpResponse(cached_content, content_type="application/json")
+
     try:
         challenge = KothChallenge.objects.get(pk=parsed_id)
     except KothChallenge.DoesNotExist:
         raise KothChallengeNotFound()
 
     solves = (
-        KothSolve.objects.select_related("team")
-        .filter(challenge=challenge, earned_score__gt=0, team__is_banned=False)
+        KothSolve.objects.filter(
+            challenge=challenge, earned_score__gt=0, team__is_banned=False
+        )
         .order_by("-earned_score", "solved_at", "team__team_name", "team_id")
+        .values("team_id", "team__team_name", "earned_score", "solved_at")
     )
     rows = []
     previous_score = None
     rank = 0
     for index, solve in enumerate(solves, start=1):
-        if solve.earned_score != previous_score:
+        if solve["earned_score"] != previous_score:
             rank = index
-            previous_score = solve.earned_score
+            previous_score = solve["earned_score"]
         rows.append(
             {
                 "rank": rank,
-                "team_id": str(solve.team_id),
-                "team_name": solve.team.team_name,
-                "earned_score": num(solve.earned_score),
-                "solved_at": solve.solved_at,
+                "team_id": str(solve["team_id"]),
+                "team_name": solve["team__team_name"],
+                "earned_score": num(solve["earned_score"]),
+                "solved_at": solve["solved_at"],
             }
         )
 
-    return ok(
+    response = ok(
         {
             "koth_challenge_id": str(challenge.koth_challenge_id),
             "title": challenge.title,
@@ -227,6 +268,18 @@ def leaderboard(request):
             "updated_at": timezone.now(),
         }
     )
+    if cacheable:
+
+        def cache_rendered_response(rendered):
+            try:
+                # Cache only bytes: hits avoid both JSON encoding and rebuilding
+                # the 1,000-row Python object graph from a pickled Response.
+                cache.set(cache_key, rendered.content, timeout=cache_seconds)
+            except Exception:
+                pass  # Redis is an optional read optimization, not a dependency.
+
+        response.add_post_render_callback(cache_rendered_response)
+    return response
 
 
 @api_view(["GET"])
