@@ -256,12 +256,18 @@ class BoardApiTestCase(TestCase):
         cells = body["data"]["cells"]
         self.assertEqual([cell["cell_index"] for cell in cells], list(range(1, 37)))
         self.assertEqual(
-            {cell["cell_index"]: (cell["type"], cell["name"], cell["difficulty"])
+            [cell["line_number"] for cell in cells],
+            [line_number for line_number in range(1, 7) for _ in range(6)],
+        )
+        self.assertEqual(
+            {cell["cell_index"]: (
+                cell["type"], cell["name"], cell["difficulty"], cell["line_number"],
+            )
              for cell in cells if cell["type"] != "CHALLENGE"},
             {
-                1: ("START", "출발", None), 7: ("CHANCE", "찬스", None),
-                16: ("ROULETTE", "룰렛", None), 21: ("AIRPORT", "세계여행", None),
-                25: ("ROULETTE", "룰렛", None), 30: ("CHANCE", "황금열쇠", None),
+                1: ("START", "출발", None, 1), 7: ("CHANCE", "찬스", None, 2),
+                16: ("ROULETTE", "룰렛", None, 3), 21: ("AIRPORT", "세계여행", None, 4),
+                25: ("ROULETTE", "룰렛", None, 5), 30: ("CHANCE", "황금열쇠", None, 5),
             },
         )
 

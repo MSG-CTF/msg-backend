@@ -5,9 +5,17 @@ from apps.challenge.models import Challenge
 
 
 class CellSerializer(serializers.ModelSerializer):
+    line_number = serializers.SerializerMethodField()
+
+    def get_line_number(self, cell):
+        """Return the fixed six-cell board section containing this cell."""
+        if not 1 <= cell.cell_index <= 36:
+            return None
+        return (cell.cell_index - 1) // 6 + 1
+
     class Meta:
         model = Cell
-        fields = ["cell_index", "type", "difficulty", "name"]
+        fields = ["cell_index", "type", "difficulty", "line_number", "name"]
 
 
 class ChanceCardSerializer(serializers.ModelSerializer):
