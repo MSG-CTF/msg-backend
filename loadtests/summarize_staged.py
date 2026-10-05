@@ -9,10 +9,28 @@ ROOT = Path(__file__).resolve().parent
 RESULTS = ROOT / "results"
 STAGES = [100, 300, 500, 1000]
 SCENARIOS = [
-    "board_get", "board_me", "cell_current", "opened_challenges", "chance_catalog", "dice_status",
-    "koth_clubs", "koth_club_detail", "koth_me", "koth_leaderboard", "koth_team_token",
-    "koth_verify_token", "koth_internal_teams", "dice_roll", "dice_confirm", "airport_move",
-    "chance_now", "chance_discard", "chance_use", "chance_confirm", "cell_open", "roulette_spin",
+    "board_get",
+    "board_me",
+    "cell_current",
+    "opened_challenges",
+    "chance_catalog",
+    "dice_status",
+    "koth_clubs",
+    "koth_club_detail",
+    "koth_me",
+    "koth_leaderboard",
+    "koth_team_token",
+    "koth_verify_token",
+    "koth_internal_teams",
+    "dice_roll",
+    "dice_confirm",
+    "airport_move",
+    "chance_now",
+    "chance_discard",
+    "chance_use",
+    "chance_confirm",
+    "cell_open",
+    "roulette_spin",
 ]
 LABELS = {
     "board_get": "GET /api/v1/board",
@@ -51,13 +69,24 @@ def mem_mib(value):
     if not match:
         return 0.0
     number, unit = float(match.group(1)), match.group(2)
-    return number * {"KiB": 1 / 1024, "KB": 1 / 1024, "MiB": 1, "MB": 1, "GiB": 1024, "GB": 1024}[unit]
+    return (
+        number
+        * {"KiB": 1 / 1024, "KB": 1 / 1024, "MiB": 1, "MB": 1, "GiB": 1024, "GB": 1024}[
+            unit
+        ]
+    )
 
 
 def resources(path):
     result = {
-        "api_cpu": 0.0, "api_mem_mib": 0.0, "db_cpu": 0.0, "redis_cpu": 0.0,
-        "db_active": 0, "db_connections": 0, "db_lock_waits": 0, "redis_ping_ms": 0.0,
+        "api_cpu": 0.0,
+        "api_mem_mib": 0.0,
+        "db_cpu": 0.0,
+        "redis_cpu": 0.0,
+        "db_active": 0,
+        "db_connections": 0,
+        "db_lock_waits": 0,
+        "redis_ping_ms": 0.0,
     }
     if not path.exists():
         return result
@@ -68,18 +97,32 @@ def resources(path):
             continue
         name = item.get("Name") or item.get("Container")
         if name == "msg-loadtest-api-1":
-            result["api_cpu"] = max(result["api_cpu"], float(item["CPUPerc"].rstrip("%")))
-            result["api_mem_mib"] = max(result["api_mem_mib"], mem_mib(item["MemUsage"].split("/")[0].strip()))
+            result["api_cpu"] = max(
+                result["api_cpu"], float(item["CPUPerc"].rstrip("%"))
+            )
+            result["api_mem_mib"] = max(
+                result["api_mem_mib"], mem_mib(item["MemUsage"].split("/")[0].strip())
+            )
         elif name == "msg-loadtest-db-1":
             result["db_cpu"] = max(result["db_cpu"], float(item["CPUPerc"].rstrip("%")))
         elif name == "msg-loadtest-redis-1":
-            result["redis_cpu"] = max(result["redis_cpu"], float(item["CPUPerc"].rstrip("%")))
+            result["redis_cpu"] = max(
+                result["redis_cpu"], float(item["CPUPerc"].rstrip("%"))
+            )
         elif item.get("kind") == "postgres":
-            result["db_active"] = max(result["db_active"], item.get("active_connections", 0))
-            result["db_connections"] = max(result["db_connections"], item.get("total_connections", 0))
-            result["db_lock_waits"] = max(result["db_lock_waits"], item.get("lock_waits", 0))
+            result["db_active"] = max(
+                result["db_active"], item.get("active_connections", 0)
+            )
+            result["db_connections"] = max(
+                result["db_connections"], item.get("total_connections", 0)
+            )
+            result["db_lock_waits"] = max(
+                result["db_lock_waits"], item.get("lock_waits", 0)
+            )
         elif item.get("kind") == "redis_ping":
-            result["redis_ping_ms"] = max(result["redis_ping_ms"], item.get("latency_ms", 0))
+            result["redis_ping_ms"] = max(
+                result["redis_ping_ms"], item.get("latency_ms", 0)
+            )
     return result
 
 
@@ -93,14 +136,27 @@ for scenario in SCENARIOS:
             if not stat_path.exists():
                 continue
             failure_path = directory / f"{basename}_failures.csv"
-            failure_text = failure_path.read_text(encoding="utf-8") if failure_path.exists() else ""
+            failure_text = (
+                failure_path.read_text(encoding="utf-8")
+                if failure_path.exists()
+                else ""
+            )
             row = stats_row(stat_path)
-            if row is None or "TOKEN_EXPIRED" in failure_text or int(row["Request Count"]) != users:
+            if (
+                row is None
+                or "TOKEN_EXPIRED" in failure_text
+                or int(row["Request Count"]) != users
+            ):
                 continue
             selected[(scenario, users)] = (directory, row, failure_text)
             break
 
-missing = [(scenario, users) for scenario in SCENARIOS for users in STAGES if (scenario, users) not in selected]
+missing = [
+    (scenario, users)
+    for scenario in SCENARIOS
+    for users in STAGES
+    if (scenario, users) not in selected
+]
 if missing:
     raise SystemExit(f"Missing valid staged results: {missing}")
 
@@ -110,13 +166,29 @@ for scenario in SCENARIOS:
         directory, source, failure_text = selected[(scenario, users)]
         count = int(source["Request Count"])
         failures = int(source["Failure Count"])
-        failure_rows = list(csv.DictReader(failure_text.splitlines())) if failure_text.strip() else []
-        four_xx = sum(int(item["Occurrences"]) for item in failure_rows if re.search(r"HTTP 4\d\d", item["Error"]))
-        five_xx = sum(int(item["Occurrences"]) for item in failure_rows if re.search(r"HTTP 5\d\d", item["Error"]))
+        failure_rows = (
+            list(csv.DictReader(failure_text.splitlines()))
+            if failure_text.strip()
+            else []
+        )
+        four_xx = sum(
+            int(item["Occurrences"])
+            for item in failure_rows
+            if re.search(r"HTTP 4\d\d", item["Error"])
+        )
+        five_xx = sum(
+            int(item["Occurrences"])
+            for item in failure_rows
+            if re.search(r"HTTP 5\d\d", item["Error"])
+        )
         unfinished = max(0, users - count)
         effective_failures = failures + unfinished
         recovery_path = directory / f"{scenario}-{users}-recovery.json"
-        recovery = json.loads(recovery_path.read_text(encoding="utf-8")) if recovery_path.exists() else {}
+        recovery = (
+            json.loads(recovery_path.read_text(encoding="utf-8"))
+            if recovery_path.exists()
+            else {}
+        )
         row = {
             "scenario": scenario,
             "api": LABELS[scenario],
@@ -160,26 +232,36 @@ summary = []
 for scenario in SCENARIOS:
     series = sorted(by_api[scenario], key=lambda row: row["users"])
     first_breach = next((row["users"] for row in series if not row["slo_p95_3s"]), None)
-    summary.append({
-        "scenario": scenario,
-        "api": LABELS[scenario],
-        "first_p95_breach_users": first_breach,
-        "avg_100_ms": series[0]["avg_ms"],
-        "p95_100_ms": series[0]["p95_ms"],
-        "avg_1000_ms": series[-1]["avg_ms"],
-        "p95_1000_ms": series[-1]["p95_ms"],
-        "failure_1000_pct": series[-1]["failure_pct"],
-        "slowdown_avg": round(series[-1]["avg_ms"] / max(series[0]["avg_ms"], 0.001), 2),
-        "max_recovery_seconds": max(row["recovery_seconds"] for row in series),
-        "max_api_cpu": max(row["api_cpu"] for row in series),
-        "max_db_cpu": max(row["db_cpu"] for row in series),
-        "max_lock_waits": max(row["db_lock_waits"] for row in series),
-    })
+    summary.append(
+        {
+            "scenario": scenario,
+            "api": LABELS[scenario],
+            "first_p95_breach_users": first_breach,
+            "avg_100_ms": series[0]["avg_ms"],
+            "p95_100_ms": series[0]["p95_ms"],
+            "avg_1000_ms": series[-1]["avg_ms"],
+            "p95_1000_ms": series[-1]["p95_ms"],
+            "failure_1000_pct": series[-1]["failure_pct"],
+            "slowdown_avg": round(
+                series[-1]["avg_ms"] / max(series[0]["avg_ms"], 0.001), 2
+            ),
+            "max_recovery_seconds": max(row["recovery_seconds"] for row in series),
+            "max_api_cpu": max(row["api_cpu"] for row in series),
+            "max_db_cpu": max(row["db_cpu"] for row in series),
+            "max_lock_waits": max(row["db_lock_waits"] for row in series),
+        }
+    )
 
-query_profile = json.loads((ROOT / "runtime" / "query-profile.json").read_text(encoding="utf-8"))
+query_profile = json.loads(
+    (ROOT / "runtime" / "query-profile.json").read_text(encoding="utf-8")
+)
 race_files = [
-    "race-same-key.json", "race-unique-keys.json", "race-roulette_spin.json",
-    "race-chance_now.json", "race-cell_open.json", "race-koth-team-token.json",
+    "race-same-key.json",
+    "race-unique-keys.json",
+    "race-roulette_spin.json",
+    "race-chance_now.json",
+    "race-cell_open.json",
+    "race-koth-team-token.json",
 ]
 races = []
 for filename in race_files:
@@ -198,18 +280,22 @@ payload = {
     "races": races,
 }
 json_path = RESULTS / "board-koth-staged-analysis-20260927.json"
-json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+json_path.write_text(
+    json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+)
 
 total_requests = sum(row["requests"] for row in rows)
 total_completed = sum(row["completed_requests"] for row in rows)
 total_failures = sum(row["effective_failures"] for row in rows)
 total_5xx = sum(row["5xx"] for row in rows)
 passing_at_100 = sum(row["slo_p95_3s"] for row in rows if row["users"] == 100)
-worst = max((row for row in rows if row["users"] == 1000), key=lambda row: row["failure_pct"])
+worst = max(
+    (row for row in rows if row["users"] == 1000), key=lambda row: row["failure_pct"]
+)
 
 data_json = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
 html_path = RESULTS / "부하테스트_단계별_그래프_20260927.html"
-html_text = f'''<!doctype html>
+html_text = f"""<!doctype html>
 <html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Board/KOTH 단계별 부하테스트</title>
 <style>
@@ -246,28 +332,49 @@ const worst=[...DATA.rows.filter(x=>x.users===1000)].sort((a,b)=>b.failure_pct-a
 const qp=document.querySelector('#queryTable tbody');DATA.query_profile.forEach(x=>{{const tr=document.createElement('tr');tr.innerHTML=`<td>${{x.api}}</td><td>${{x.elapsed_ms_median.toFixed(1)}}ms</td><td>${{x.queries_median}}</td><td>${{x.sql_ms_median.toFixed(1)}}ms</td><td>${{(x.response_bytes/1024).toFixed(1)}}KB</td>`;qp.append(tr)}});
 const dt=document.querySelector('#detail tbody');DATA.rows.forEach(x=>{{const tr=document.createElement('tr'),bad=!x.slo_p95_3s;tr.innerHTML=`<td>${{x.api}}</td><td>${{x.users}}</td><td>${{x.completed_requests}}/${{x.requests}}</td><td>${{x.rps}}</td><td>${{fmt(x.min_ms)}}</td><td>${{fmt(x.avg_ms)}}</td><td class="${{bad?'bad':'good'}}">${{fmt(x.p95_ms)}}</td><td>${{fmt(x.p99_ms)}}</td><td>${{fmt(x.max_ms)}}</td><td class="${{x.failure_pct?'bad':'good'}}">${{x.failure_pct.toFixed(1)}}%</td><td>${{x['5xx']}}</td><td>${{x.recovered?x.recovery_seconds.toFixed(1)+'s':'15s+'}}</td>`;dt.append(tr)}});
 const rt=document.querySelector('#race tbody');DATA.races.forEach(x=>{{const tr=document.createElement('tr'),statuses=Object.entries(x.status_counts).map(([k,v])=>k+': '+v).join(', ');tr.innerHTML=`<td>${{x.scenario||'dice_roll'}}${{x.same_key?' (동일 키)':''}}</td><td>${{x.concurrency}}</td><td>${{statuses}}</td><td>${{fmt(x.avg_ms)}}</td><td>${{fmt(x.p95_ms)}}</td><td class="good">통과</td>`;rt.append(tr)}});
-</script></body></html>'''
+</script></body></html>"""
 html_path.write_text(html_text, encoding="utf-8")
 
 md_path = RESULTS / "부하테스트_단계별_분석_20260927.md"
 lines = [
-    "# Board/KOTH 단계별 부하테스트 분석", "",
-    "## 결론", "",
-    "단일 요청 자체는 2~88ms지만, 2개 Gunicorn sync 워커에 100~1,000개 요청을 동시에 투입해 워커 대기열이 생기면서 응답시간이 수초~20초로 늘었습니다. 3초 목표를 만족하려면 워커/인스턴스 확장과 함께 KOTH 캐시, 큰 응답 페이지네이션, Board 상태 조회 쿼리 축소가 필요합니다.", "",
-    "## 검증된 결과 범위", "",
+    "# Board/KOTH 단계별 부하테스트 분석",
+    "",
+    "## 결론",
+    "",
+    "단일 요청 자체는 2~88ms지만, 2개 Gunicorn sync 워커에 100~1,000개 요청을 동시에 투입해 워커 대기열이 생기면서 응답시간이 수초~20초로 늘었습니다. 3초 목표를 만족하려면 워커/인스턴스 확장과 함께 KOTH 캐시, 큰 응답 페이지네이션, Board 상태 조회 쿼리 축소가 필요합니다.",
+    "",
+    "## 검증된 결과 범위",
+    "",
     f"- 22개 API × 4단계에서 목표 {total_requests:,}건을 모두 기록했습니다. 미완료 요청은 0건입니다.",
     f"- 20초 시간초과는 {total_failures:,}건, 4xx는 {sum(row['4xx'] for row in rows)}건, 5xx는 {total_5xx}건입니다.",
     "- p95 3초 이하·실패 0건을 함께 적용하면 100명에서 18/22개, 300명에서 1/22개, 500명과 1,000명에서 0/22개가 통과했습니다.",
     f"- API CPU 최고 {max(row['api_cpu'] for row in rows):.1f}%, 메모리 최고 {max(row['api_mem_mib'] for row in rows):.1f}MiB, DB CPU 최고 {max(row['db_cpu'] for row in rows):.1f}%, DB 잠금 대기 최고 {max(row['db_lock_waits'] for row in rows)}건이었습니다.",
-    "- 동일 동작 100건 경합 검사에서 중복 주사위·칸 소비·찬스카드·문제 선택·룰렛 보상·KOTH 토큰 불변식이 모두 유지됐습니다.", "",
-    "## API별 임계점", "",
+    "- 동일 동작 100건 경합 검사에서 중복 주사위·칸 소비·찬스카드·문제 선택·룰렛 보상·KOTH 토큰 불변식이 모두 유지됐습니다.",
+    "",
+    "## API별 임계점",
+    "",
     "| API | p95 100명 | p95 1,000명 | 최초 p95 3초 초과 | 1,000명 실패율 | 평균 악화 | 최대 복구 |",
     "|---|---:|---:|---:|---:|---:|---:|",
 ]
 for item in summary:
-    breach = f"{item['first_p95_breach_users']}명" if item["first_p95_breach_users"] else "통과"
-    lines.append(f"| `{item['api']}` | {item['p95_100_ms']:.0f}ms | {item['p95_1000_ms']:.0f}ms | {breach} | {item['failure_1000_pct']:.1f}% | {item['slowdown_avg']:.1f}배 | {item['max_recovery_seconds']:.1f}s |")
-lines += ["", "## 원인", "", "1. API는 2 vCPU, Gunicorn sync 워커 2개였습니다. 동시 요청 중 두 건만 실행되고 나머지는 소켓/워커 큐에서 기다립니다.", "2. 단일 요청 프로파일에서 `board/me`는 17ms·14 SQL, `koth/clubs`는 88ms·7 SQL이었습니다. 초 단위 지연의 대부분은 실행시간이 아니라 큐 대기입니다.", "3. KOTH 리더보드는 약 151KB, 내부 팀 목록은 약 80KB를 매번 직렬화합니다. 클럽 목록/상세는 solve 정렬과 현재 소유자 계산 비용도 있습니다.", "4. `board/me`, `cell/current`, `dice/status`는 조회 요청에서도 상태 생성·충전 반영을 위해 트랜잭션과 `select_for_update`를 사용합니다.", "5. 3초를 절대 최대시간으로 적용하면 순간 동시 시작 모델에서는 100명부터 일부 API가 실패합니다. 운영 SLO는 p95 3초 이하와 실패율 1% 미만을 함께 보는 편이 적절합니다."]
+    breach = (
+        f"{item['first_p95_breach_users']}명"
+        if item["first_p95_breach_users"]
+        else "통과"
+    )
+    lines.append(
+        f"| `{item['api']}` | {item['p95_100_ms']:.0f}ms | {item['p95_1000_ms']:.0f}ms | {breach} | {item['failure_1000_pct']:.1f}% | {item['slowdown_avg']:.1f}배 | {item['max_recovery_seconds']:.1f}s |"
+    )
+lines += [
+    "",
+    "## 원인",
+    "",
+    "1. API는 2 vCPU, Gunicorn sync 워커 2개였습니다. 동시 요청 중 두 건만 실행되고 나머지는 소켓/워커 큐에서 기다립니다.",
+    "2. 단일 요청 프로파일에서 `board/me`는 17ms·14 SQL, `koth/clubs`는 88ms·7 SQL이었습니다. 초 단위 지연의 대부분은 실행시간이 아니라 큐 대기입니다.",
+    "3. KOTH 리더보드는 약 151KB, 내부 팀 목록은 약 80KB를 매번 직렬화합니다. 클럽 목록/상세는 solve 정렬과 현재 소유자 계산 비용도 있습니다.",
+    "4. `board/me`, `cell/current`, `dice/status`는 조회 요청에서도 상태 생성·충전 반영을 위해 트랜잭션과 `select_for_update`를 사용합니다.",
+    "5. 3초를 절대 최대시간으로 적용하면 순간 동시 시작 모델에서는 100명부터 일부 API가 실패합니다. 운영 SLO는 p95 3초 이하와 실패율 1% 미만을 함께 보는 편이 적절합니다.",
+]
 md_path.write_text("\n".join(lines), encoding="utf-8")
 
 print(csv_path)

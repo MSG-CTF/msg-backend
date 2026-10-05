@@ -46,7 +46,9 @@ COUNT = int(os.getenv("LOADTEST_ACCOUNT_COUNT", "1000"))
 def guard():
     db_name = settings.DATABASES["default"]["NAME"]
     if db_name != "msg_loadtest" or os.getenv("LOADTEST_CONFIRM_ISOLATED") != "YES":
-        raise SystemExit(f"Refusing to modify database {db_name!r}; isolated load-test guard failed")
+        raise SystemExit(
+            f"Refusing to modify database {db_name!r}; isolated load-test guard failed"
+        )
 
 
 def write_runtime(users, challenge, club, internal_token):
@@ -55,11 +57,13 @@ def write_runtime(users, challenge, club, internal_token):
         writer = csv.DictWriter(handle, fieldnames=["login_id", "team_id", "token"])
         writer.writeheader()
         for user in users:
-            writer.writerow({
-                "login_id": user.login_id,
-                "team_id": str(user.team_id),
-                "token": issue_access_token(user),
-            })
+            writer.writerow(
+                {
+                    "login_id": user.login_id,
+                    "team_id": str(user.team_id),
+                    "token": issue_access_token(user),
+                }
+            )
     first_team = users[0].team
     raw_team_token = build_team_token(first_team.team_id)
     meta = {
@@ -94,9 +98,16 @@ def seed():
 
     teams = [Team(team_name=f"load_team_{i:04d}") for i in range(1, COUNT + 1)]
     Team.objects.bulk_create(teams, batch_size=500)
-    teams = list(Team.objects.filter(team_name__startswith="load_team_").order_by("team_name"))
+    teams = list(
+        Team.objects.filter(team_name__startswith="load_team_").order_by("team_name")
+    )
     users = [
-        User(login_id=f"load_user_{i:04d}", nickname=f"Load {i:04d}", team=team, is_leader=True)
+        User(
+            login_id=f"load_user_{i:04d}",
+            nickname=f"Load {i:04d}",
+            team=team,
+            is_leader=True,
+        )
         for i, team in enumerate(teams, start=1)
     ]
     User.objects.bulk_create(users, batch_size=500)
@@ -146,7 +157,9 @@ def seed():
 @transaction.atomic
 def prepare_scenario(name):
     guard()
-    teams = list(Team.objects.filter(team_name__startswith="load_team_").order_by("team_name"))
+    teams = list(
+        Team.objects.filter(team_name__startswith="load_team_").order_by("team_name")
+    )
     if len(teams) != COUNT:
         raise SystemExit("Run the seed command first")
 
@@ -175,48 +188,84 @@ def prepare_scenario(name):
     )
 
     if name == "dice_confirm":
-        PendingDiceRoll.objects.bulk_create([
-            PendingDiceRoll(
-                team=team, dice_a=2, dice_b=3, rolled_number=5,
-                previous_position=1, candidate_position=6,
-                movement_path=[2, 3, 4, 5, 6], skipped_cells=[],
-                passed_start=False, board_event_code="CHALLENGE",
-            ) for team in teams
-        ], batch_size=500)
+        PendingDiceRoll.objects.bulk_create(
+            [
+                PendingDiceRoll(
+                    team=team,
+                    dice_a=2,
+                    dice_b=3,
+                    rolled_number=5,
+                    previous_position=1,
+                    candidate_position=6,
+                    movement_path=[2, 3, 4, 5, 6],
+                    skipped_cells=[],
+                    passed_start=False,
+                    board_event_code="CHALLENGE",
+                )
+                for team in teams
+            ],
+            batch_size=500,
+        )
     elif name in {"chance_use", "chance_confirm", "chance_discard"}:
-        card_id = "card_extra_roll" if name == "chance_use" else "card_roll_twice_choose"
+        card_id = (
+            "card_extra_roll" if name == "chance_use" else "card_roll_twice_choose"
+        )
         source = 7
-        draws = [TeamChanceCard(team=team, source_cell_id=source, card_id=card_id) for team in teams]
+        draws = [
+            TeamChanceCard(team=team, source_cell_id=source, card_id=card_id)
+            for team in teams
+        ]
         if name == "chance_confirm":
             for draw in draws:
                 draw.pending_first_number = 4
                 draw.pending_second_number = 8
-            PendingDiceRoll.objects.bulk_create([
-                PendingDiceRoll(
-                    team=team, dice_a=2, dice_b=2, rolled_number=4,
-                    previous_position=1, candidate_position=5,
-                    movement_path=[2, 3, 4, 5], skipped_cells=[],
-                    passed_start=False, board_event_code="CHALLENGE",
-                ) for team in teams
-            ], batch_size=500)
+            PendingDiceRoll.objects.bulk_create(
+                [
+                    PendingDiceRoll(
+                        team=team,
+                        dice_a=2,
+                        dice_b=2,
+                        rolled_number=4,
+                        previous_position=1,
+                        candidate_position=5,
+                        movement_path=[2, 3, 4, 5],
+                        skipped_cells=[],
+                        passed_start=False,
+                        board_event_code="CHALLENGE",
+                    )
+                    for team in teams
+                ],
+                batch_size=500,
+            )
         TeamChanceCard.objects.bulk_create(draws, batch_size=500)
         if name == "chance_discard":
-            TeamChanceCard.objects.bulk_create([
-                TeamChanceCard(team=team, source_cell_id=30, card_id="card_free_travel")
-                for team in teams
-            ], batch_size=500)
+            TeamChanceCard.objects.bulk_create(
+                [
+                    TeamChanceCard(
+                        team=team, source_cell_id=30, card_id="card_free_travel"
+                    )
+                    for team in teams
+                ],
+                batch_size=500,
+            )
         if name == "chance_use":
             TeamBoardState.objects.filter(team__in=teams).update(dice_rolls_left=1)
     elif name == "cell_open":
         challenges = list(
-            Challenge.objects.filter(difficulty=Cell.Difficulty.HARD, board_meta__isnull=False)
-            .order_by("board_meta__challenge_number")[:3]
+            Challenge.objects.filter(
+                difficulty=Cell.Difficulty.HARD, board_meta__isnull=False
+            ).order_by("board_meta__challenge_number")[:3]
         )
-        TeamCellCandidate.objects.bulk_create([
-            TeamCellCandidate(team=team, cell_id=2, challenge=challenge, display_order=order)
-            for team in teams
-            for order, challenge in enumerate(challenges, start=1)
-        ], batch_size=1000)
+        TeamCellCandidate.objects.bulk_create(
+            [
+                TeamCellCandidate(
+                    team=team, cell_id=2, challenge=challenge, display_order=order
+                )
+                for team in teams
+                for order, challenge in enumerate(challenges, start=1)
+            ],
+            batch_size=1000,
+        )
         meta_path = RUNTIME / "meta.json"
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         meta["board_challenge_id"] = str(challenges[0].challenge_id)

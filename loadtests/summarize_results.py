@@ -76,7 +76,9 @@ race_table = [
 for row in race_rows:
     scenario = row.get("scenario", "dice_roll")
     key_mode = "동일 키" if row.get("same_key") else "서로 다른 키"
-    statuses = ", ".join(f"{code}: {count}" for code, count in row["status_counts"].items())
+    statuses = ", ".join(
+        f"{code}: {count}" for code, count in row["status_counts"].items()
+    )
     race_table.append(
         f"| `{scenario}` ({key_mode}) | {row['concurrency']} | {statuses} | "
         f"{row['avg_ms']:.0f}ms | {row['p95_ms']:.0f}ms | 통과 |"

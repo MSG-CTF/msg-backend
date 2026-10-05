@@ -27,28 +27,50 @@ with output.open("w", encoding="utf-8") as handle:
             handle.write(json.dumps(row) + "\n")
         db = subprocess.run(
             [
-                "docker", "exec", "msg-loadtest-db-1", "psql", "-U", "msg_loadtest",
-                "-d", "msg_loadtest", "-At", "-c",
+                "docker",
+                "exec",
+                "msg-loadtest-db-1",
+                "psql",
+                "-U",
+                "msg_loadtest",
+                "-d",
+                "msg_loadtest",
+                "-At",
+                "-c",
                 "select json_build_object('active_connections',count(*) filter (where state='active'),'total_connections',count(*),'lock_waits',count(*) filter (where wait_event_type='Lock')) from pg_stat_activity where datname='msg_loadtest'",
             ],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         try:
             db_row = json.loads(db.stdout.strip())
-            db_row.update({"kind": "postgres", "captured_at": datetime.now(timezone.utc).isoformat()})
+            db_row.update(
+                {
+                    "kind": "postgres",
+                    "captured_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
             handle.write(json.dumps(db_row) + "\n")
         except json.JSONDecodeError:
             pass
         redis_started = time.perf_counter()
         redis = subprocess.run(
             ["docker", "exec", "msg-loadtest-redis-1", "redis-cli", "PING"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
-        handle.write(json.dumps({
-            "kind": "redis_ping",
-            "ok": redis.returncode == 0 and redis.stdout.strip() == "PONG",
-            "latency_ms": (time.perf_counter() - redis_started) * 1000,
-            "captured_at": datetime.now(timezone.utc).isoformat(),
-        }) + "\n")
+        handle.write(
+            json.dumps(
+                {
+                    "kind": "redis_ping",
+                    "ok": redis.returncode == 0 and redis.stdout.strip() == "PONG",
+                    "latency_ms": (time.perf_counter() - redis_started) * 1000,
+                    "captured_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            + "\n"
+        )
         handle.flush()
         time.sleep(1)

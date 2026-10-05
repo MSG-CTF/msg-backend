@@ -1,14 +1,26 @@
+import http.client
 import json
 import sys
 import time
 import urllib.parse
-import urllib.request
 from pathlib import Path
 
 url = sys.argv[1]
 parsed_url = urllib.parse.urlsplit(url)
 if parsed_url.scheme not in {"http", "https"} or not parsed_url.hostname:
     raise SystemExit("recovery probe URL must use http or https and include a host")
+try:
+    port = parsed_url.port
+except ValueError as exc:
+    raise SystemExit("recovery probe URL contains an invalid port") from exc
+connection_class = (
+    http.client.HTTPSConnection
+    if parsed_url.scheme == "https"
+    else http.client.HTTPConnection
+)
+request_target = parsed_url.path or "/"
+if parsed_url.query:
+    request_target = f"{request_target}?{parsed_url.query}"
 limit = float(sys.argv[2])
 output = Path(sys.argv[3])
 started = time.perf_counter()
@@ -18,15 +30,20 @@ last_error = None
 
 while time.perf_counter() - started < limit:
     attempts += 1
+    connection = connection_class(parsed_url.hostname, port=port, timeout=1)
     try:
-        request = urllib.request.Request(url, headers={"X-Forwarded-Proto": "https"})
-        # The scheme and host are validated above; file and custom schemes are rejected.
-        with urllib.request.urlopen(request, timeout=1) as response:  # nosec B310
-            recovered = response.status == 200
+        connection.request(
+            "GET", request_target, headers={"X-Forwarded-Proto": "https"}
+        )
+        response = connection.getresponse()
+        recovered = response.status == 200
+        response.read()
         if recovered:
             break
     except Exception as exc:
         last_error = type(exc).__name__
+    finally:
+        connection.close()
     time.sleep(0.5)
 
 result = {

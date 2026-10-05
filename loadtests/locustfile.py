@@ -38,7 +38,11 @@ def stop_after_expected(name, **kwargs):
     if EXPECTED_REQUESTS <= 0 or name != SCENARIO:
         return
     _completed_requests += 1
-    if _completed_requests >= EXPECTED_REQUESTS and _runner is not None and not _quit_scheduled:
+    if (
+        _completed_requests >= EXPECTED_REQUESTS
+        and _runner is not None
+        and not _quit_scheduled
+    ):
         _quit_scheduled = True
         gevent.spawn_later(3.0, _runner.quit)
 
@@ -53,7 +57,12 @@ READ_SCENARIOS = {
     "koth_clubs": ("GET", "/api/v1/koth/clubs", None, False),
     "koth_club_detail": ("GET", f"/api/v1/koth/clubs/{META['club_id']}", None, False),
     "koth_me": ("GET", "/api/v1/koth/me", None, True),
-    "koth_leaderboard": ("GET", f"/api/v1/koth/leaderboard?koth_challenge_id={META['koth_challenge_id']}", None, True),
+    "koth_leaderboard": (
+        "GET",
+        f"/api/v1/koth/leaderboard?koth_challenge_id={META['koth_challenge_id']}",
+        None,
+        True,
+    ),
 }
 
 WRITE_SCENARIOS = {
@@ -87,8 +96,13 @@ class ApiUser(HttpUser):
 
     def checked(self, method, path, *, headers=None, json_body=None):
         with self.client.request(
-            method, path, headers=headers, json=json_body,
-            name=SCENARIO, catch_response=True, timeout=REQUEST_TIMEOUT,
+            method,
+            path,
+            headers=headers,
+            json=json_body,
+            name=SCENARIO,
+            catch_response=True,
+            timeout=REQUEST_TIMEOUT,
         ) as response:
             if response.status_code != 200:
                 response.failure(f"HTTP {response.status_code}: {response.text[:200]}")
@@ -121,7 +135,9 @@ class ApiUser(HttpUser):
             headers = dict(self.auth)
             headers["Idempotency-Key"] = str(uuid.uuid4())
             self.checked(
-                "POST", "/api/v1/board/cell/open", headers=headers,
+                "POST",
+                "/api/v1/board/cell/open",
+                headers=headers,
                 json_body={"challenge_id": META["board_challenge_id"]},
             )
             raise StopUser()
@@ -131,16 +147,30 @@ class ApiUser(HttpUser):
             raise StopUser()
 
         if SCENARIO == "koth_verify_token":
-            headers = {"X-Internal-Token": META["internal_token"], "X-Forwarded-Proto": "https"}
-            body = {"koth_challenge_id": META["koth_challenge_id"], "team_token": META["valid_team_token"]}
-            self.checked("POST", "/internal/koth/team_tokens/verify", headers=headers, json_body=body)
+            headers = {
+                "X-Internal-Token": META["internal_token"],
+                "X-Forwarded-Proto": "https",
+            }
+            body = {
+                "koth_challenge_id": META["koth_challenge_id"],
+                "team_token": META["valid_team_token"],
+            }
+            self.checked(
+                "POST",
+                "/internal/koth/team_tokens/verify",
+                headers=headers,
+                json_body=body,
+            )
             if ONESHOT:
                 raise StopUser()
             return
 
         if SCENARIO == "koth_internal_teams":
             path = f"/internal/teams?koth_challenge_id={META['koth_challenge_id']}"
-            headers = {"X-Internal-Token": META["internal_token"], "X-Forwarded-Proto": "https"}
+            headers = {
+                "X-Internal-Token": META["internal_token"],
+                "X-Forwarded-Proto": "https",
+            }
             self.checked("GET", path, headers=headers)
             if ONESHOT:
                 raise StopUser()

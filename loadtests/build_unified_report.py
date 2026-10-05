@@ -97,7 +97,11 @@ for scenario, points in by_api.items():
     p100 = points[100]
     p1000 = points[1000]
     threshold = next(
-        (u for u in (100, 300, 500, 1000) if float(points[u]["p95_ms"]) > 3000 or float(points[u]["failure_pct"]) > 0),
+        (
+            u
+            for u in (100, 300, 500, 1000)
+            if float(points[u]["p95_ms"]) > 3000 or float(points[u]["failure_pct"]) > 0
+        ),
         None,
     )
     cls, label = status_class(float(p100["p95_ms"]), float(p100["failure_pct"]))
@@ -122,16 +126,20 @@ worker_cards = "".join(
 )
 
 
-steady_chart_points = [(int(r["users"]), float(r["p95_ms"])/1000, float(r["rps"])) for r in steady_agg]
+steady_chart_points = [
+    (int(r["users"]), float(r["p95_ms"]) / 1000, float(r["rps"])) for r in steady_agg
+]
 
 
-def polyline(values: list[float], ymax: float, width: int = 680, height: int = 250) -> str:
+def polyline(
+    values: list[float], ymax: float, width: int = 680, height: int = 250
+) -> str:
     left, top, right, bottom = 56, 20, 20, 42
-    plot_w, plot_h = width-left-right, height-top-bottom
+    plot_w, plot_h = width - left - right, height - top - bottom
     pts = []
     for i, val in enumerate(values):
-        x = left + (plot_w * i / max(1, len(values)-1))
-        y = top + plot_h * (1 - val/ymax)
+        x = left + (plot_w * i / max(1, len(values) - 1))
+        y = top + plot_h * (1 - val / ymax)
         pts.append(f"{x:.1f},{y:.1f}")
     return " ".join(pts)
 
@@ -140,7 +148,7 @@ p95_values = [p[1] for p in steady_chart_points]
 rps_values = [p[2] for p in steady_chart_points]
 p95_poly = polyline(p95_values, 24)
 rps_poly = polyline(rps_values, 50)
-x_positions = [56 + (604*i/3) for i in range(4)]
+x_positions = [56 + (604 * i / 3) for i in range(4)]
 p95_marks = "".join(
     f"<circle cx='{x_positions[i]:.1f}' cy='{20 + 188*(1-v/24):.1f}' r='5'/><text x='{x_positions[i]:.1f}' y='{10 + 188*(1-v/24):.1f}' text-anchor='middle'>{v:.1f}s</text>"
     for i, v in enumerate(p95_values)
@@ -149,7 +157,10 @@ rps_marks = "".join(
     f"<circle cx='{x_positions[i]:.1f}' cy='{20 + 188*(1-v/50):.1f}' r='5'/><text x='{x_positions[i]:.1f}' y='{10 + 188*(1-v/50):.1f}' text-anchor='middle'>{v:.1f}</text>"
     for i, v in enumerate(rps_values)
 )
-x_labels = "".join(f"<text x='{x_positions[i]:.1f}' y='238' text-anchor='middle'>{u:,}명</text>" for i, (u, _, _) in enumerate(steady_chart_points))
+x_labels = "".join(
+    f"<text x='{x_positions[i]:.1f}' y='238' text-anchor='middle'>{u:,}명</text>"
+    for i, (u, _, _) in enumerate(steady_chart_points)
+)
 
 
 doc = f"""<!doctype html>

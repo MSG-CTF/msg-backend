@@ -18,15 +18,24 @@ def main():
     parser.add_argument("--concurrency", type=int, default=100)
     parser.add_argument("--same-key", action="store_true")
     parser.add_argument(
-        "--scenario", default="dice_roll",
-        choices=["dice_roll", "roulette_spin", "chance_now", "cell_open", "koth_team_token"],
+        "--scenario",
+        default="dice_roll",
+        choices=[
+            "dice_roll",
+            "roulette_spin",
+            "chance_now",
+            "cell_open",
+            "koth_team_token",
+        ],
     )
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
 
     account_path = Path(__file__).parent / "runtime" / "accounts.csv"
     account = next(csv.DictReader(account_path.open(encoding="utf-8")))
-    meta = json.loads((Path(__file__).parent / "runtime" / "meta.json").read_text(encoding="utf-8"))
+    meta = json.loads(
+        (Path(__file__).parent / "runtime" / "meta.json").read_text(encoding="utf-8")
+    )
     barrier = threading.Barrier(args.concurrency)
     shared_key = str(uuid.uuid4())
 
@@ -49,7 +58,9 @@ def main():
             method = "GET"
             path = "/api/v1/koth/team_token"
         if method == "POST":
-            headers["Idempotency-Key"] = shared_key if args.same_key else str(uuid.uuid4())
+            headers["Idempotency-Key"] = (
+                shared_key if args.same_key else str(uuid.uuid4())
+            )
         barrier.wait()
         started = time.perf_counter()
         try:
@@ -75,7 +86,9 @@ def main():
             }
 
     with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
-        rows = list(as_completed([pool.submit(fire, i) for i in range(args.concurrency)]))
+        rows = list(
+            as_completed([pool.submit(fire, i) for i in range(args.concurrency)])
+        )
         rows = [future.result() for future in rows]
 
     elapsed = [row["elapsed_ms"] for row in rows]
@@ -83,7 +96,10 @@ def main():
         "concurrency": args.concurrency,
         "scenario": args.scenario,
         "same_key": args.same_key,
-        "status_counts": {str(code): sum(row["status"] == code for row in rows) for code in sorted({r["status"] for r in rows})},
+        "status_counts": {
+            str(code): sum(row["status"] == code for row in rows)
+            for code in sorted({r["status"] for r in rows})
+        },
         "min_ms": min(elapsed),
         "max_ms": max(elapsed),
         "avg_ms": statistics.fmean(elapsed),
@@ -92,8 +108,15 @@ def main():
     }
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps({key: value for key, value in summary.items() if key != "responses"}, indent=2))
+    output.write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    print(
+        json.dumps(
+            {key: value for key, value in summary.items() if key != "responses"},
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":

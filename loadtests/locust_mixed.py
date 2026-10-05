@@ -22,15 +22,26 @@ class MixedBoardKothUser(FastHttpUser):
 
     def on_start(self):
         account = next(ACCOUNTS)
-        self.auth = {"Authorization": f"Bearer {account['token']}", "X-Forwarded-Proto": "https"}
+        self.auth = {
+            "Authorization": f"Bearer {account['token']}",
+            "X-Forwarded-Proto": "https",
+        }
         self.public = {"X-Forwarded-Proto": "https"}
 
     def get(self, path, name, authenticated=True):
         headers = self.auth if authenticated else self.public
-        with self.client.get(path, name=name, headers=headers, catch_response=True) as response:
+        with self.client.get(
+            path, name=name, headers=headers, catch_response=True
+        ) as response:
             if response.status_code != 200:
-                error = f" ({getattr(response, 'error', None)!r})" if response.status_code == 0 else ""
-                response.failure(f"HTTP {response.status_code}: {response.text[:160]}{error}")
+                error = (
+                    f" ({getattr(response, 'error', None)!r})"
+                    if response.status_code == 0
+                    else ""
+                )
+                response.failure(
+                    f"HTTP {response.status_code}: {response.text[:160]}{error}"
+                )
 
     @task(20)
     def board(self):
@@ -74,4 +85,7 @@ class MixedBoardKothUser(FastHttpUser):
 
     @task(2)
     def leaderboard(self):
-        self.get(f"/api/v1/koth/leaderboard?koth_challenge_id={META['koth_challenge_id']}", "koth_leaderboard")
+        self.get(
+            f"/api/v1/koth/leaderboard?koth_challenge_id={META['koth_challenge_id']}",
+            "koth_leaderboard",
+        )
