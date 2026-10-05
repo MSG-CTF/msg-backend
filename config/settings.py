@@ -109,6 +109,9 @@ DATABASES = {
         "PASSWORD": os.getenv("POSTGRES_PASSWORD", "postgres"),
         "HOST": os.getenv("POSTGRES_HOST", "localhost"),
         "PORT": os.getenv("POSTGRES_PORT", "5432"),
+        # Reuse one connection per WSGI worker instead of reconnecting on every request.
+        "CONN_MAX_AGE": int(os.getenv("POSTGRES_CONN_MAX_AGE", "60")),
+        "CONN_HEALTH_CHECKS": True,
     }
 }
 
@@ -193,6 +196,8 @@ REFRESH_TOKEN_HOURS = 12
 # 생성한다. 기존 개발 환경은 JWT_SECRET을 fallback으로 사용하되 운영에서는
 # 반드시 별도 값을 설정한다.
 KOTH_TEAM_TOKEN_SECRET = os.getenv("KOTH_TEAM_TOKEN_SECRET", JWT_SECRET)
+# Shared rankings may lag score/team changes by at most this many seconds.
+KOTH_LEADERBOARD_CACHE_SECONDS = max(0, int(os.getenv("KOTH_LEADERBOARD_CACHE_SECONDS", "1")))
 
 
 REST_FRAMEWORK = {

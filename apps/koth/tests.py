@@ -1,4 +1,5 @@
 import os
+import time
 from datetime import datetime, timezone as dt_timezone
 from decimal import Decimal
 from unittest.mock import patch
@@ -97,6 +98,64 @@ class KothApiTests(TestCase):
                     club=self.club, title="Duplicate", status=KothChallengeStatus.SCHEDULED,
                     open_group=7, inbound_internal_token_hash=hash_token("duplicate-secret"),
                 )
+
+    def test_clubs_fetch_only_owner_fields_with_constant_query_count(self):
+        teams = Team.objects.bulk_create([Team(team_name=f"bulk-{i:03}") for i in range(100)])
+        KothSolve.objects.bulk_create([
+            KothSolve(team=team, challenge=self.challenge, earned_score=i + 1, solved_at=timezone.now())
+            for i, team in enumerate(teams)
+        ])
+        KothClub.objects.create(name="Empty club")
+        with self.assertNumQueries(2), patch.object(
+            KothSolve, "from_db", side_effect=AssertionError("Loading all solve objects is unnecessary")
+        ):
+            response = self.client.get("/api/v1/koth/clubs")
+        data = response.data["data"]
+        self.assertEqual(data["total_count"], 7)
+        self.assertEqual(data["challenge_count"], 6)
+        self.assertEqual(data["active_count"], 1)
+        challenge = next(c for c in data["clubs"] if c["club_id"] == str(self.club.pk))["challenges"][0]
+        self.assertEqual(challenge["current_owner_team_id"], str(teams[-1].pk))
+        self.assertEqual(challenge["current_score"], 100)
+        unowned = next(c for c in data["clubs"] if c["club_id"] == str(self.clubs[1].pk))["challenges"][0]
+        self.assertIsNone(unowned["current_owner_team_id"])
+        self.assertIsNone(unowned["current_owner_team_name"])
+        self.assertEqual(unowned["current_score"], 0)
+
+    def test_owner_ties_and_updates_remain_visible_immediately(self):
+        first_at = datetime(2026, 9, 3, 7, 0, tzinfo=dt_timezone.utc)
+        later_at = datetime(2026, 9, 3, 7, 15, tzinfo=dt_timezone.utc)
+        self.team.team_name = "A"
+        self.team.save(update_fields=["team_name"])
+        self.other.team_name = "B"
+        self.other.save(update_fields=["team_name"])
+        own = KothSolve.objects.create(team=self.team, challenge=self.challenge, earned_score=100, solved_at=later_at)
+        KothSolve.objects.create(team=self.other, challenge=self.challenge, earned_score=100, solved_at=first_at)
+        url = f"/api/v1/koth/clubs/{self.club.pk}"
+        with self.assertNumQueries(2):
+            response = self.client.get(url)
+        self.assertEqual(response.data["data"]["challenges"][0]["current_owner_team_id"], str(self.other.pk))
+        own.solved_at = first_at
+        own.save(update_fields=["solved_at"])
+        self.assertEqual(self.client.get(url).data["data"]["challenges"][0]["current_owner_team_id"], str(self.team.pk))
+        self.team.is_banned = True
+        self.team.save(update_fields=["is_banned"])
+        self.assertEqual(self.client.get(url).data["data"]["challenges"][0]["current_owner_team_id"], str(self.other.pk))
+
+    def test_me_ranks_multiple_challenges_without_per_challenge_queries(self):
+        challenges = list(KothChallenge.objects.all())
+        KothSolve.objects.bulk_create([
+            KothSolve(team=self.team, challenge=challenge, earned_score=10, solved_at=timezone.now())
+            for challenge in challenges
+        ])
+        KothSolve.objects.create(team=self.other, challenge=self.challenge, earned_score=20, solved_at=timezone.now())
+        KothSolve.objects.create(team=self.banned, challenge=self.challenge, earned_score=30, solved_at=timezone.now())
+        self.auth()
+        with self.assertNumQueries(3):
+            response = self.client.get("/api/v1/koth/me")
+        data = response.data["data"]
+        self.assertEqual(data["total_koth_score"], 60)
+        self.assertEqual([c["rank"] for c in data["challenges"]], [2, 1, 1, 1, 1, 1])
 
     def test_challenge_url_is_available_on_all_challenge_responses_and_can_be_cleared(self):
         # The score endpoint is configured, but it must not be used as a public URL.
@@ -254,6 +313,84 @@ class KothApiTests(TestCase):
         self.assertEqual([row["rank"] for row in data["leaderboard"]], [1, 1, 3])
         self.assertEqual([row["earned_score"] for row in data["leaderboard"]], [100, 100, 40])
         self.assertTrue(all(row["solved_at"] is not None for row in data["leaderboard"]))
+
+    @override_settings(KOTH_LEADERBOARD_CACHE_SECONDS=60)
+    def test_leaderboard_cache_reuses_json_but_still_authenticates_and_separates_challenges(self):
+        KothSolve.objects.create(team=self.team, challenge=self.challenge, earned_score=40, solved_at=timezone.now())
+        self.auth()
+        url = f"/api/v1/koth/leaderboard?koth_challenge_id={self.challenge.pk}"
+        first = self.client.get(url)
+        self.assertEqual(first.status_code, 200)
+        self.auth("other")
+        with self.assertNumQueries(1):  # The requesting user is still authenticated against the DB.
+            second = self.client.get(url)
+        self.assertEqual(second.content, first.content)
+        self.assertEqual(second.json(), first.json())
+        self.assertEqual(second["Content-Type"], first["Content-Type"])
+
+        other_challenge = KothChallenge.objects.exclude(pk=self.challenge.pk).first()
+        separate = self.client.get(f"/api/v1/koth/leaderboard?koth_challenge_id={other_challenge.pk}")
+        self.assertEqual(separate.data["data"]["koth_challenge_id"], str(other_challenge.pk))
+        self.assertEqual(separate.data["data"]["total_count"], 0)
+        self.client.credentials()
+        self.assertEqual(self.client.get(url).status_code, 401)
+        self.client.credentials(HTTP_AUTHORIZATION="Bearer invalid-token")
+        self.assertEqual(self.client.get(url).status_code, 401)
+
+    @override_settings(KOTH_LEADERBOARD_CACHE_SECONDS=1)
+    def test_leaderboard_cache_expires_and_reflects_score_and_ban_changes(self):
+        KothSolve.objects.create(team=self.team, challenge=self.challenge, earned_score=40, solved_at=timezone.now())
+        KothSolve.objects.create(team=self.other, challenge=self.challenge, earned_score=10, solved_at=timezone.now())
+        self.auth()
+        url = f"/api/v1/koth/leaderboard?koth_challenge_id={self.challenge.pk}"
+        now = time.time()
+        with patch("django.core.cache.backends.locmem.time.time", return_value=now):
+            first = self.client.get(url)
+            KothSolve.objects.filter(team=self.team, challenge=self.challenge).update(earned_score=100)
+            Team.objects.filter(pk=self.other.pk).update(is_banned=True)
+            self.assertEqual(self.client.get(url).content, first.content)
+        with patch("django.core.cache.backends.locmem.time.time", return_value=now + 1.01):
+            refreshed = self.client.get(url)
+        rows = refreshed.data["data"]["leaderboard"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["team_id"], str(self.team.pk))
+        self.assertEqual(rows[0]["earned_score"], 100)
+        self.assertEqual(rows[0]["rank"], 1)
+
+    def test_leaderboard_cache_failure_falls_back_to_database(self):
+        KothSolve.objects.create(team=self.team, challenge=self.challenge, earned_score=40, solved_at=timezone.now())
+        self.auth()
+        with patch("apps.koth.views.cache.get", side_effect=ConnectionError), patch(
+            "apps.koth.views.cache.set", side_effect=ConnectionError
+        ) as cache_set:
+            response = self.client.get(f"/api/v1/koth/leaderboard?koth_challenge_id={self.challenge.pk}")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["data"]["leaderboard"][0]["earned_score"], 40)
+        cache_set.assert_called_once()
+
+    @override_settings(KOTH_LEADERBOARD_CACHE_SECONDS=0)
+    def test_leaderboard_cache_can_be_disabled_for_immediate_updates(self):
+        KothSolve.objects.create(team=self.team, challenge=self.challenge, earned_score=40, solved_at=timezone.now())
+        self.auth()
+        url = f"/api/v1/koth/leaderboard?koth_challenge_id={self.challenge.pk}"
+        with patch("apps.koth.views.cache.get") as cache_get, patch("apps.koth.views.cache.set") as cache_set:
+            self.client.get(url)
+            KothSolve.objects.filter(team=self.team, challenge=self.challenge).update(earned_score=100)
+            response = self.client.get(url)
+        self.assertEqual(response.data["data"]["leaderboard"][0]["earned_score"], 100)
+        cache_get.assert_not_called()
+        cache_set.assert_not_called()
+
+    def test_leaderboard_browsable_html_does_not_use_shared_json_cache(self):
+        self.auth()
+        url = f"/api/v1/koth/leaderboard?koth_challenge_id={self.challenge.pk}"
+        self.client.get(url)
+        with patch("apps.koth.views.cache.get") as cache_get, patch("apps.koth.views.cache.set") as cache_set:
+            response = self.client.get(url, HTTP_ACCEPT="text/html")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response["Content-Type"].startswith("text/html"))
+        cache_get.assert_not_called()
+        cache_set.assert_not_called()
 
     def test_team_token_requires_team(self):
         self.auth("none")
