@@ -2,7 +2,7 @@ import random
 from datetime import timedelta
 
 from django.db import transaction
-from django.db.models import F, Q
+from django.db.models import Count, Exists, F, OuterRef, Q, Subquery
 from django.utils import timezone
 
 from apps.accounts.models import Team
@@ -83,6 +83,36 @@ def _board_state_queryset():
     return TeamBoardState.objects.select_related("position", "active_challenge_access")
 
 
+def _board_state_read_queryset(
+    *, include_completion=False, include_pending=False, include_cards=False
+):
+    annotations = {}
+    if include_completion:
+        completed_consumptions = (
+            TeamCellConsumption.objects.filter(
+                team_id=OuterRef("team_id"),
+                cell_id__gt=START_CELL_INDEX,
+                cell_id__lte=LAST_CELL_INDEX,
+            )
+            .values("team_id")
+            .annotate(total=Count("pk"))
+            .filter(total__gte=BOARD_SIZE - 1)
+        )
+        annotations["board_completed"] = Exists(completed_consumptions)
+    if include_pending:
+        annotations["has_pending_roll"] = Exists(
+            PendingDiceRoll.objects.filter(team_id=OuterRef("team_id"))
+        )
+    if include_cards:
+        annotations["has_chance_cards"] = Exists(
+            TeamChanceCard.objects.filter(
+                team_id=OuterRef("team_id"),
+                card_id__in=ChanceCard.CardId.values,
+            )
+        )
+    return _board_state_queryset().annotate(**annotations)
+
+
 def get_or_create_board_state(team):
     with transaction.atomic():
         # Mutations and due recharges serialize on the team's state row.
@@ -100,11 +130,19 @@ def get_or_create_board_state(team):
         return apply_pending_dice_recharge(state)
 
 
-def get_board_state_for_read(team):
+def get_board_state_for_read(
+    team, *, include_completion=False, include_pending=False, include_cards=False
+):
     """Avoid a write transaction when a read cannot change recharge state."""
-    state = _board_state_queryset().filter(team=team).first()
+    read_states = _board_state_read_queryset(
+        include_completion=include_completion,
+        include_pending=include_pending,
+        include_cards=include_cards,
+    )
+    state = read_states.filter(team=team).first()
     if state is None:
-        return get_or_create_board_state(team)
+        get_or_create_board_state(team)
+        return read_states.get(team=team)
 
     now = timezone.now()
     recharge_update_required = (
@@ -113,7 +151,8 @@ def get_board_state_for_read(team):
         else state.next_dice_reset_at is None or now >= state.next_dice_reset_at
     )
     if recharge_update_required:
-        return get_or_create_board_state(team)
+        get_or_create_board_state(team)
+        return read_states.get(team=team)
     return state
 
 
@@ -578,8 +617,8 @@ def spin_roulette(team):
 
 
 def get_current_cell_candidates(team):
-    state = get_board_state_for_read(team)
-    if PendingDiceRoll.objects.filter(team=team).exists():
+    state = get_board_state_for_read(team, include_pending=True)
+    if state.has_pending_roll:
         raise PendingRollUnresolved()
 
     cell = state.position
@@ -836,25 +875,23 @@ def get_challenges_progress_summary(team):
 
 
 def build_cell_states(team):
-    consumed_indexes = sorted(get_consumed_indexes(team))
-    accesses = {
-        access["source_cell_id"]: access
-        for access in TeamChallengeAccess.objects.filter(team=team).values(
-            "source_cell_id", "status", "challenge__category"
-        )
-    }
+    accesses = TeamChallengeAccess.objects.filter(
+        team=team,
+        source_cell_id=OuterRef("cell_id"),
+    )
+    consumed_cells = TeamCellConsumption.objects.filter(team=team).annotate(
+        access_status=Subquery(accesses.values("status")[:1]),
+        challenge_category=Subquery(accesses.values("challenge__category")[:1]),
+    )
 
     states = []
-    for cell_index in consumed_indexes:
-        access = accesses.get(cell_index)
-        if (
-            access is not None
-            and access["status"] == TeamChallengeAccess.Status.CLEARED
-        ):
+    consumed_cell_indexes = []
+    for consumption in consumed_cells.order_by("cell_id"):
+        cell_index = consumption.cell_id
+        consumed_cell_indexes.append(cell_index)
+        if consumption.access_status == TeamChallengeAccess.Status.CLEARED:
             status = "CLEARED"
-        elif (
-            access is not None and access["status"] == TeamChallengeAccess.Status.OPENED
-        ):
+        elif consumption.access_status == TeamChallengeAccess.Status.OPENED:
             status = "OPENED"
         else:
             status = "CONSUMED"
@@ -862,12 +899,10 @@ def build_cell_states(team):
             {
                 "cell_index": cell_index,
                 "status": status,
-                "category": (
-                    access["challenge__category"] if access is not None else None
-                ),
+                "category": consumption.challenge_category,
             }
         )
-    return states, consumed_indexes
+    return states, consumed_cell_indexes
 
 
 # ---------------------------------------------------------------------------

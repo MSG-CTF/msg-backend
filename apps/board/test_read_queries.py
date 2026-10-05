@@ -36,27 +36,27 @@ class BoardReadQueryTests(TestCase):
         force_authenticate(request, user=user)
         return request, view.as_view()
 
-    def test_board_me_stable_state_uses_four_domain_queries(self):
+    def test_board_me_stable_state_uses_two_domain_queries(self):
         request, view = self.authenticated_request(
             "/api/v1/board/me", BoardMeView, "board-me-queries"
-        )
-        with self.assertNumQueries(4):
-            response = view(request)
-        self.assertEqual(response.status_code, 200)
-
-    def test_cell_current_stable_state_uses_two_domain_queries(self):
-        request, view = self.authenticated_request(
-            "/api/v1/board/cell/current", CellCurrentView, "cell-current-queries"
         )
         with self.assertNumQueries(2):
             response = view(request)
         self.assertEqual(response.status_code, 200)
 
-    def test_dice_status_stable_state_uses_three_domain_queries(self):
+    def test_cell_current_stable_state_uses_one_domain_query(self):
+        request, view = self.authenticated_request(
+            "/api/v1/board/cell/current", CellCurrentView, "cell-current-queries"
+        )
+        with self.assertNumQueries(1):
+            response = view(request)
+        self.assertEqual(response.status_code, 200)
+
+    def test_dice_status_stable_state_uses_one_domain_query(self):
         request, view = self.authenticated_request(
             "/api/v1/board/dice/status", DiceStatusView, "dice-status-queries"
         )
-        with self.assertNumQueries(3):
+        with self.assertNumQueries(1):
             response = view(request)
         self.assertEqual(response.status_code, 200)
 

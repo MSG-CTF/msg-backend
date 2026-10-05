@@ -34,7 +34,6 @@ from .services import (
     get_current_cell_candidates,
     get_board_state_for_read,
     get_opened_challenges_summary,
-    is_board_completed,
     is_challenge_timer_running,
     move_team_via_airport,
     solve_active_challenge,
@@ -116,11 +115,11 @@ class BoardMeView(APIView):
 
     def get(self, request, *args, **kwargs):
         team = _get_team(request)
-        state = get_board_state_for_read(team)
-        cell_states, consumed_cell_indexes = build_cell_states(team)
-        board_completed = is_board_completed(
-            team, consumed_indexes=consumed_cell_indexes
+        state = get_board_state_for_read(
+            team, include_completion=True, include_cards=True
         )
+        cell_states, consumed_cell_indexes = build_cell_states(team)
+        board_completed = state.board_completed
         active_access = state.active_challenge_access
 
         return ok(
@@ -134,8 +133,12 @@ class BoardMeView(APIView):
                 "board_completed": board_completed,
                 "consumed_cell_indexes": consumed_cell_indexes,
                 "cell_states": cell_states,
-                "chance_cards": build_chance_cards_view(
-                    team, state, board_completed=board_completed
+                "chance_cards": (
+                    build_chance_cards_view(
+                        team, state, board_completed=board_completed
+                    )
+                    if state.has_chance_cards
+                    else []
                 ),
                 "active_challenge": _serialize_active_challenge(active_access),
             }
@@ -211,8 +214,15 @@ class DiceStatusView(APIView):
 
     def get(self, request, *args, **kwargs):
         team = _get_team(request)
-        state = get_board_state_for_read(team)
-        blocked_reason = compute_blocked_reason(team, state)
+        state = get_board_state_for_read(
+            team, include_completion=True, include_pending=True
+        )
+        blocked_reason = compute_blocked_reason(
+            team,
+            state,
+            board_completed=state.board_completed,
+            has_pending=state.has_pending_roll,
+        )
         active_access = state.active_challenge_access
         timer_running = bool(
             active_access is not None
