@@ -1,4 +1,5 @@
 """KOTH 보안 수정 회귀 테스트 — BK-03(예정 문제 URL), F08(no-store), BK-08(검증 반복 제한)."""
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 
 from django.core.cache import cache
@@ -9,7 +10,14 @@ from rest_framework.test import APIClient
 from apps.accounts.models import Team, User
 from apps.common.jwt import hash_token
 from apps.koth.models import (
-    KothChallenge, KothChallengeStatus, KothClub, KothTokenVerificationAttempt,
+    KothChallenge,
+    KothChallengeStatus,
+    KothClub,
+    KothTokenVerificationAttempt,
+)
+from apps.koth.views import (
+    VERIFY_FAIL_MAX_PER_WINDOW,
+    _register_verify_failure,
 )
 
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
@@ -21,33 +29,55 @@ class KothSecurityFixTests(TestCase):
         cache.clear()
         self.client = APIClient()
         self.team = Team.objects.create(team_name="sec-team")
-        User.objects.create_user(login_id="sec_me", password="pw1234", nickname="me", team=self.team)
+        User.objects.create_user(
+            login_id="sec_me", password="pw1234", nickname="me", team=self.team
+        )
         self.club_a = KothClub.objects.create(name="SA")
         self.club_b = KothClub.objects.create(name="SB")
         self.active = KothChallenge.objects.create(
-            club=self.club_a, title="active", status=KothChallengeStatus.ACTIVE, open_group=1,
-            inbound_internal_token_hash=hash_token("tok-A"), challenge_url="https://a.example/live")
+            club=self.club_a,
+            title="active",
+            status=KothChallengeStatus.ACTIVE,
+            open_group=1,
+            inbound_internal_token_hash=hash_token("tok-A"),
+            challenge_url="https://a.example/live",
+        )
         self.scheduled = KothChallenge.objects.create(
-            club=self.club_b, title="scheduled", status=KothChallengeStatus.SCHEDULED, open_group=2,
-            inbound_internal_token_hash=hash_token("tok-B"), challenge_url="https://b.example/secret")
+            club=self.club_b,
+            title="scheduled",
+            status=KothChallengeStatus.SCHEDULED,
+            open_group=2,
+            inbound_internal_token_hash=hash_token("tok-B"),
+            challenge_url="https://b.example/secret",
+        )
 
     def auth(self):
-        r = self.client.post("/api/v1/auth/login", {"login_id": "sec_me", "password": "pw1234"}, format="json")
-        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {r.data['data']['access_token']}")
+        r = self.client.post(
+            "/api/v1/auth/login",
+            {"login_id": "sec_me", "password": "pw1234"},
+            format="json",
+        )
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {r.data['data']['access_token']}"
+        )
 
     # BK-03
     def test_scheduled_challenge_url_hidden_active_shown(self):
         self.client.credentials()
         r = self.client.get("/api/v1/koth/clubs")
-        urls = {c["name"]: {ch["title"]: ch["challenge_url"] for ch in c["challenges"]}
-                for c in r.data["data"]["clubs"]}
-        self.assertIsNone(urls["SB"]["scheduled"])          # SCHEDULED → 숨김
+        urls = {
+            c["name"]: {ch["title"]: ch["challenge_url"] for ch in c["challenges"]}
+            for c in r.data["data"]["clubs"]
+        }
+        self.assertIsNone(urls["SB"]["scheduled"])  # SCHEDULED → 숨김
         self.assertEqual(urls["SA"]["active"], "https://a.example/live")  # ACTIVE → 공개
 
     def test_scheduled_url_hidden_in_me(self):
         self.auth()
         r = self.client.get("/api/v1/koth/me")
-        by_title = {c["title"]: c["challenge_url"] for c in r.data["data"]["challenges"]}
+        by_title = {
+            c["title"]: c["challenge_url"] for c in r.data["data"]["challenges"]
+        }
         self.assertIsNone(by_title["scheduled"])
         self.assertEqual(by_title["active"], "https://a.example/live")
 
@@ -65,10 +95,28 @@ class KothSecurityFixTests(TestCase):
             r = self.client.post(
                 "/internal/koth/team_tokens/verify",
                 {"koth_challenge_id": cid, "team_token": f"koth_bogus_{i}"},
-                format="json", HTTP_X_INTERNAL_TOKEN="tok-A")
+                format="json",
+                HTTP_X_INTERNAL_TOKEN="tok-A",
+            )
             statuses.append(r.status_code)
-        self.assertIn(429, statuses)                                   # 한도 초과 시 차단
-        self.assertLessEqual(KothTokenVerificationAttempt.objects.count(), 20)  # 로그 증가 제한
+        self.assertIn(429, statuses)  # 한도 초과 시 차단
+        self.assertLessEqual(
+            KothTokenVerificationAttempt.objects.count(), 20
+        )  # 로그 증가 제한
+
+    def test_concurrent_invalid_failures_keep_the_twenty_request_limit(self):
+        request_count = VERIFY_FAIL_MAX_PER_WINDOW * 2
+
+        with ThreadPoolExecutor(max_workers=request_count) as executor:
+            blocked = list(
+                executor.map(
+                    lambda _: _register_verify_failure(self.active),
+                    range(request_count),
+                )
+            )
+
+        self.assertEqual(blocked.count(False), VERIFY_FAIL_MAX_PER_WINDOW)
+        self.assertEqual(blocked.count(True), VERIFY_FAIL_MAX_PER_WINDOW)
 
     def test_valid_verify_not_throttled(self):
         # 유효 토큰은 실패 집계와 무관해야 한다
@@ -77,8 +125,11 @@ class KothSecurityFixTests(TestCase):
         self.client.credentials()
         cid = str(self.active.koth_challenge_id)
         for _ in range(25):
-            r = self.client.post("/internal/koth/team_tokens/verify",
-                                  {"koth_challenge_id": cid, "team_token": token},
-                                  format="json", HTTP_X_INTERNAL_TOKEN="tok-A")
+            r = self.client.post(
+                "/internal/koth/team_tokens/verify",
+                {"koth_challenge_id": cid, "team_token": token},
+                format="json",
+                HTTP_X_INTERNAL_TOKEN="tok-A",
+            )
             self.assertEqual(r.status_code, 200)
             self.assertTrue(r.data["data"]["valid"])

@@ -10,8 +10,14 @@ from rest_framework.permissions import AllowAny
 
 from apps.accounts.models import Team
 from apps.common.exceptions import (
-    ClubNotFound, InvalidClubId, InvalidInternalToken, InvalidKothChallengeId,
-    InvalidRequest, KothChallengeIdRequired, KothChallengeNotFound, KothVerifyThrottled,
+    ClubNotFound,
+    InvalidClubId,
+    InvalidInternalToken,
+    InvalidKothChallengeId,
+    InvalidRequest,
+    KothChallengeIdRequired,
+    KothChallengeNotFound,
+    KothVerifyThrottled,
     UserHasNoTeam,
 )
 from apps.common.jwt import hash_token
@@ -20,7 +26,11 @@ from apps.common.response import ok
 from apps.common.utils import num
 
 from .models import (
-    KothChallenge, KothChallengeStatus, KothSolve, KothTeamToken, KothTokenVerificationAttempt,
+    KothChallenge,
+    KothChallengeStatus,
+    KothSolve,
+    KothTeamToken,
+    KothTokenVerificationAttempt,
 )
 from .tokens import build_team_token, matches_token
 
@@ -46,12 +56,20 @@ def _challenge_payload(challenge, include_times=True):
         "challenge_url": _public_challenge_url(challenge),
         "status": challenge.status,
         "open_group": challenge.open_group,
-        "current_owner_team_id": str(leader.team_id) if leader and leader.earned_score > 0 else None,
-        "current_owner_team_name": leader.team.team_name if leader and leader.earned_score > 0 else None,
-        "current_score": num(leader.earned_score) if leader and leader.earned_score > 0 else 0,
+        "current_owner_team_id": str(leader.team_id)
+        if leader and leader.earned_score > 0
+        else None,
+        "current_owner_team_name": leader.team.team_name
+        if leader and leader.earned_score > 0
+        else None,
+        "current_score": num(leader.earned_score)
+        if leader and leader.earned_score > 0
+        else 0,
     }
     if include_times:
-        data.update({"opened_at": challenge.opened_at, "closed_at": challenge.closed_at})
+        data.update(
+            {"opened_at": challenge.opened_at, "closed_at": challenge.closed_at}
+        )
     return data
 
 
@@ -62,16 +80,22 @@ def clubs(request):
 
     club_rows = KothClub.objects.prefetch_related("challenges__solves__team").all()
     club_data = [
-        {"club_id": str(club.club_id), "name": club.name, "challenges": [_challenge_payload(c) for c in club.challenges.all()]}
+        {
+            "club_id": str(club.club_id),
+            "name": club.name,
+            "challenges": [_challenge_payload(c) for c in club.challenges.all()],
+        }
         for club in club_rows
     ]
     challenges = KothChallenge.objects.all()
-    return ok({
-        "clubs": club_data,
-        "total_count": len(club_data),
-        "challenge_count": challenges.count(),
-        "active_count": challenges.filter(status="ACTIVE").count(),
-    })
+    return ok(
+        {
+            "clubs": club_data,
+            "total_count": len(club_data),
+            "challenge_count": challenges.count(),
+            "active_count": challenges.filter(status="ACTIVE").count(),
+        }
+    )
 
 
 @api_view(["GET"])
@@ -84,11 +108,20 @@ def club_detail(request, club_id):
     from .models import KothClub
 
     try:
-        club = KothClub.objects.prefetch_related("challenges__solves__team").get(pk=club_id)
+        club = KothClub.objects.prefetch_related("challenges__solves__team").get(
+            pk=club_id
+        )
     except KothClub.DoesNotExist:
         raise ClubNotFound()
     challenges = [_challenge_payload(challenge) for challenge in club.challenges.all()]
-    return ok({"club_id": str(club.club_id), "name": club.name, "challenges": challenges, "challenge_count": len(challenges)})
+    return ok(
+        {
+            "club_id": str(club.club_id),
+            "name": club.name,
+            "challenges": challenges,
+            "challenge_count": len(challenges),
+        }
+    )
 
 
 def _request_team(request):
@@ -101,36 +134,48 @@ def _request_team(request):
 @permission_classes([IsAuthenticated])
 def me(request):
     team = _request_team(request)
-    solves = {solve.challenge_id: solve for solve in KothSolve.objects.filter(team=team)}
+    solves = {
+        solve.challenge_id: solve for solve in KothSolve.objects.filter(team=team)
+    }
     challenge_data = []
     for challenge in KothChallenge.objects.select_related("club").all():
         solve = solves.get(challenge.koth_challenge_id)
         score = solve.earned_score if solve else Decimal("0")
         rank = None
         if score > 0 and not team.is_banned:
-            rank = 1 + KothSolve.objects.filter(
-                challenge=challenge,
-                earned_score__gt=score,
-                team__is_banned=False,
-            ).count()
-        challenge_data.append({
-            "koth_challenge_id": str(challenge.koth_challenge_id),
-            "club_id": str(challenge.club_id),
-            "title": challenge.title,
-            "challenge_url": _public_challenge_url(challenge),
-            "status": challenge.status,
-            "earned_score": num(score),
-            "rank": rank,
-            "solved_at": solve.solved_at if solve else None,
-            "opened_at": challenge.opened_at,
-            "closed_at": challenge.closed_at,
-        })
+            rank = (
+                1
+                + KothSolve.objects.filter(
+                    challenge=challenge,
+                    earned_score__gt=score,
+                    team__is_banned=False,
+                ).count()
+            )
+        challenge_data.append(
+            {
+                "koth_challenge_id": str(challenge.koth_challenge_id),
+                "club_id": str(challenge.club_id),
+                "title": challenge.title,
+                "challenge_url": _public_challenge_url(challenge),
+                "status": challenge.status,
+                "earned_score": num(score),
+                "rank": rank,
+                "solved_at": solve.solved_at if solve else None,
+                "opened_at": challenge.opened_at,
+                "closed_at": challenge.closed_at,
+            }
+        )
     total = sum((solve.earned_score for solve in solves.values()), Decimal("0"))
-    return ok({
-        "team_id": str(team.team_id), "team_name": team.team_name, "total_koth_score": num(total),
-        "challenges": challenge_data, "total_count": len(challenge_data),
-        "active_count": sum(row["status"] == "ACTIVE" for row in challenge_data),
-    })
+    return ok(
+        {
+            "team_id": str(team.team_id),
+            "team_name": team.team_name,
+            "total_koth_score": num(total),
+            "challenges": challenge_data,
+            "total_count": len(challenge_data),
+            "active_count": sum(row["status"] == "ACTIVE" for row in challenge_data),
+        }
+    )
 
 
 @api_view(["GET"])
@@ -162,22 +207,26 @@ def leaderboard(request):
         if solve.earned_score != previous_score:
             rank = index
             previous_score = solve.earned_score
-        rows.append({
-            "rank": rank,
-            "team_id": str(solve.team_id),
-            "team_name": solve.team.team_name,
-            "earned_score": num(solve.earned_score),
-            "solved_at": solve.solved_at,
-        })
+        rows.append(
+            {
+                "rank": rank,
+                "team_id": str(solve.team_id),
+                "team_name": solve.team.team_name,
+                "earned_score": num(solve.earned_score),
+                "solved_at": solve.solved_at,
+            }
+        )
 
-    return ok({
-        "koth_challenge_id": str(challenge.koth_challenge_id),
-        "title": challenge.title,
-        "status": challenge.status,
-        "leaderboard": rows,
-        "total_count": len(rows),
-        "updated_at": timezone.now(),
-    })
+    return ok(
+        {
+            "koth_challenge_id": str(challenge.koth_challenge_id),
+            "title": challenge.title,
+            "status": challenge.status,
+            "leaderboard": rows,
+            "total_count": len(rows),
+            "updated_at": timezone.now(),
+        }
+    )
 
 
 @api_view(["GET"])
@@ -193,7 +242,14 @@ def team_token(request):
             # 비밀값이 교체됐을 때는 운영자가 토큰을 의도적으로 재발급할 수 있게 갱신한다.
             stored.token_hash = hash_token(raw_token)
             stored.save(update_fields=["token_hash"])
-    response = ok({"team_id": str(team.team_id), "team_name": team.team_name, "team_token": raw_token, "issued_at": stored.issued_at})
+    response = ok(
+        {
+            "team_id": str(team.team_id),
+            "team_name": team.team_name,
+            "team_token": raw_token,
+            "issued_at": stored.issued_at,
+        }
+    )
     # 팀 토큰은 민감값이므로 브라우저·프록시 캐시에 저장되지 않게 명시한다(F08).
     response["Cache-Control"] = "no-store, private"
     response["Pragma"] = "no-cache"
@@ -201,7 +257,11 @@ def team_token(request):
 
 
 def _internal_challenge(request):
-    challenge_id = request.data.get("koth_challenge_id") if request.method == "POST" else request.query_params.get("koth_challenge_id")
+    challenge_id = (
+        request.data.get("koth_challenge_id")
+        if request.method == "POST"
+        else request.query_params.get("koth_challenge_id")
+    )
     try:
         parsed_id = uuid.UUID(str(challenge_id))
     except (ValueError, TypeError, AttributeError):
@@ -210,7 +270,10 @@ def _internal_challenge(request):
         challenge = KothChallenge.objects.get(pk=parsed_id)
     except KothChallenge.DoesNotExist:
         raise InvalidRequest()
-    if not matches_token(request.headers.get("X-Internal-Token", ""), challenge.inbound_internal_token_hash):
+    if not matches_token(
+        request.headers.get("X-Internal-Token", ""),
+        challenge.inbound_internal_token_hash,
+    ):
         raise InvalidInternalToken()
     return challenge
 
@@ -228,8 +291,20 @@ def _register_verify_failure(challenge):
     """실패 1건을 창 안에서 집계한다. 반환값이 True면 한도 초과(차단)."""
     key = f"koth_verify_fail:{challenge.koth_challenge_id}"
     try:
-        count = cache.get(key, 0) + 1
-        cache.set(key, count, VERIFY_FAIL_WINDOW_SECONDS)
+        # ``add`` creates the counter and its expiry atomically (Redis SET NX EX),
+        # while ``incr`` is atomic across workers. If the key expires between the
+        # two operations, retry creation once instead of dropping this failure.
+        for _ in range(2):
+            if cache.add(key, 1, VERIFY_FAIL_WINDOW_SECONDS):
+                count = 1
+                break
+            try:
+                count = cache.incr(key)
+                break
+            except ValueError:
+                continue
+        else:
+            raise RuntimeError("verify failure counter could not be initialized")
     except Exception:
         # 캐시 장애 시 검증 가용성을 우선해 기존 동작(기록 후 통과)으로 떨어진다.
         logger.warning("koth verify throttle cache unavailable", exc_info=True)
@@ -240,27 +315,38 @@ def _register_verify_failure(challenge):
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def verify_team_token(request):
-    if set(request.data) != {"koth_challenge_id", "team_token"} or not isinstance(request.data.get("team_token"), str):
+    if set(request.data) != {"koth_challenge_id", "team_token"} or not isinstance(
+        request.data.get("team_token"), str
+    ):
         raise InvalidRequest()
     challenge = _internal_challenge(request)
     candidate_hash = hash_token(request.data["team_token"])
-    token = KothTeamToken.objects.select_related("team").filter(token_hash=candidate_hash).first()
+    token = (
+        KothTeamToken.objects.select_related("team")
+        .filter(token_hash=candidate_hash)
+        .first()
+    )
     valid = token is not None and not token.team.is_banned
     if not valid:
         if _register_verify_failure(challenge):
             raise KothVerifyThrottled()
         KothTokenVerificationAttempt.objects.create(challenge=challenge)
-    return ok({
-        "valid": valid,
-        "team_id": str(token.team_id) if valid else None,
-        "team_name": token.team.team_name if valid else None,
-        "koth_challenge_id": str(challenge.koth_challenge_id),
-    })
+    return ok(
+        {
+            "valid": valid,
+            "team_id": str(token.team_id) if valid else None,
+            "team_name": token.team.team_name if valid else None,
+            "koth_challenge_id": str(challenge.koth_challenge_id),
+        }
+    )
 
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def internal_teams(request):
     _internal_challenge(request)
-    teams = [{"team_id": str(team.team_id), "team_name": team.team_name} for team in Team.objects.filter(is_banned=False).order_by("team_name")]
+    teams = [
+        {"team_id": str(team.team_id), "team_name": team.team_name}
+        for team in Team.objects.filter(is_banned=False).order_by("team_name")
+    ]
     return ok({"teams": teams, "total_count": len(teams)})
