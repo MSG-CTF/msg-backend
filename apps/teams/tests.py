@@ -1,5 +1,8 @@
+import datetime
+
 from django.core.cache import cache
 from django.test import TestCase, override_settings
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.accounts.models import Team, User
@@ -41,6 +44,7 @@ class MyPageTests(TestCase):
         self.assertEqual(res.data["data"]["team_name"], "남의팀")
 
     def test_team_me_includes_line_monopoly_score(self):
+        Team.objects.filter(pk=self.team.pk).update(team_score=500)
         LineMonopoly.objects.create(
             team=self.team,
             line_number=1,
@@ -50,8 +54,9 @@ class MyPageTests(TestCase):
 
         data = self.client.get("/api/v1/teams/me").data["data"]
 
+        self.assertEqual(data["jeopardy_score"], 500)
         self.assertEqual(data["line_score"], 225)
-        self.assertEqual(data["team_score"], 575)
+        self.assertEqual(data["team_score"], 725)
 
     def test_admin_without_team_gets_404(self):
         User.objects.create_user(login_id="noteam", password="pw1234",
@@ -148,10 +153,14 @@ class MyPageTests(TestCase):
         self.assertEqual(res.data["data"]["solves"], [])
 
     def test_solves_newest_first(self):
+        now = timezone.now()
         for i in range(3):
-            Solve.objects.create(
+            solve = Solve.objects.create(
                 team=self.team, challenge=self._challenge(title=f"문제{i}"),
                 solved_by_user=self.user, earned_score=10 * i, earned_mileage=0,
+            )
+            Solve.objects.filter(pk=solve.pk).update(
+                solved_at=now + datetime.timedelta(seconds=i)
             )
         res = self.client.get("/api/v1/teams/me/solves")
         titles = [s["challenge_title"] for s in res.data["data"]["solves"]]

@@ -16,6 +16,7 @@ from apps.board.models import Cell, TeamBoardState, TeamChallengeAccess
 from apps.board.services import get_or_create_board_state
 from apps.challenge.models import Challenge, FlagSubmissionLock, Solve
 from apps.challenge.services import hash_flag
+from apps.ranking.models import LineMonopoly
 from apps.teams.models import MileageHistory, MileageType
 
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
@@ -239,6 +240,59 @@ class ChallengeSubmitTests(TestCase):
         )
         self.assertEqual(
             Solve.objects.filter(team=self.team, challenge=self.challenge).count(),
+            1,
+        )
+
+    def test_duplicate_line_bonus_does_not_rollback_the_last_solve(self):
+        Cell.objects.filter(pk=self.cell.pk).update(line_number=1)
+        for index in range(2, 6):
+            cell = Cell.objects.create(
+                cell_index=index,
+                type=Cell.CellType.CHALLENGE,
+                difficulty=Cell.Difficulty.EASY,
+                line_number=1,
+                name=f"line-cell-{index}",
+            )
+            challenge = Challenge.objects.create(
+                title=f"line-challenge-{index}",
+                category=Challenge.CategoryType.WEB,
+                difficulty=Challenge.DifficultyType.EASY,
+                score=1000,
+                current_score=1000,
+                flag_hash=f"line-flag-{index}",
+                is_published=True,
+            )
+            TeamChallengeAccess.objects.create(
+                team=self.team,
+                challenge=challenge,
+                source_cell=cell,
+                status=TeamChallengeAccess.Status.CLEARED,
+            )
+            Solve.objects.create(
+                team=self.team,
+                challenge=challenge,
+                earned_score=1000,
+                earned_mileage=30,
+            )
+
+        LineMonopoly.objects.create(
+            team=self.team,
+            line_number=1,
+            earned_score=225,
+            is_category_bonus=True,
+        )
+
+        response = self.submit("MSG{correct_flag}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Solve.objects.filter(team=self.team).count(), 5)
+        self.team.refresh_from_db()
+        self.assertEqual(self.team.mileage, 30)
+        self.assertEqual(
+            MileageHistory.objects.filter(
+                team=self.team,
+                type=MileageType.CHALLENGE_SOLVE,
+            ).count(),
             1,
         )
 
