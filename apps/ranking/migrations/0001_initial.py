@@ -27,7 +27,7 @@ class Migration(migrations.Migration):
             options={
                 'db_table': 'line_monopolies',
                 'ordering': ['-monopolized_at'],
-                'constraints': [models.UniqueConstraint(fields=('line_number',), name='unique_line_monopoly')],
+                'constraints': [models.UniqueConstraint(fields=('team', 'line_number'), name='unique_team_line_monopoly')],
             },
         ),
     ]

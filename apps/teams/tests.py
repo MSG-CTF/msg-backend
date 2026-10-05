@@ -4,6 +4,7 @@ from rest_framework.test import APIClient
 
 from apps.accounts.models import Team, User
 from apps.challenge.models import Challenge, Solve
+from apps.ranking.models import LineMonopoly
 
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 
@@ -38,6 +39,19 @@ class MyPageTests(TestCase):
         self.auth("stranger")
         res = self.client.get("/api/v1/teams/me")
         self.assertEqual(res.data["data"]["team_name"], "남의팀")
+
+    def test_team_me_includes_line_monopoly_score(self):
+        LineMonopoly.objects.create(
+            team=self.team,
+            line_number=1,
+            earned_score=225,
+            is_category_bonus=True,
+        )
+
+        data = self.client.get("/api/v1/teams/me").data["data"]
+
+        self.assertEqual(data["line_score"], 225)
+        self.assertEqual(data["team_score"], 575)
 
     def test_admin_without_team_gets_404(self):
         User.objects.create_user(login_id="noteam", password="pw1234",
@@ -88,6 +102,19 @@ class MyPageTests(TestCase):
         res = self.client.get("/api/v1/teams/me/solves")
         self.assertEqual(res.data["code"], "SUCCESS")
         self.assertEqual(res.data["data"]["solves"], [])
+
+    def test_solves_does_not_count_line_monopoly_as_a_solve(self):
+        LineMonopoly.objects.create(
+            team=self.team,
+            line_number=1,
+            earned_score=225,
+            is_category_bonus=True,
+        )
+
+        data = self.client.get("/api/v1/teams/me/solves").data["data"]
+
+        self.assertEqual(data["solves"], [])
+        self.assertEqual(data["total_count"], 0)
 
     def test_solves_returns_spec_fields(self):
         ch = self._challenge()

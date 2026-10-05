@@ -20,8 +20,8 @@ class LineMonopoly(models.Model):
         ordering = ["-monopolized_at"]
         constraints = [
             models.UniqueConstraint(
-                fields=["line_number"],
-                name="unique_line_monopoly",
+                fields=["team", "line_number"],
+                name="unique_team_line_monopoly",
             ),
         ]
 

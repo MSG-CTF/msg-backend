@@ -12,7 +12,6 @@ LINE_CATEGORY_BONUS_RATE = Decimal("0.45")
 
 
 def check_and_record_line_monopoly(team, challenge):
-    
     access = (
         TeamChallengeAccess.objects
         .filter(team=team, challenge=challenge)
@@ -63,12 +62,15 @@ def check_and_record_line_monopoly(team, challenge):
     earned_score = (score_sum * rate).quantize(Decimal("0.01"))
 
     try:
-        monopoly = LineMonopoly.objects.create(
-            team=team,
-            line_number=line_number,
-            earned_score=earned_score,
-            is_category_bonus=is_category_bonus,
-        )
+        # The savepoint keeps a duplicate-award IntegrityError from breaking
+        # the surrounding correct-submission transaction.
+        with transaction.atomic():
+            monopoly = LineMonopoly.objects.create(
+                team=team,
+                line_number=line_number,
+                earned_score=earned_score,
+                is_category_bonus=is_category_bonus,
+            )
     except IntegrityError:
         return None
 

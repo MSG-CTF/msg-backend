@@ -133,6 +133,7 @@ def leaderboard(request):
             "team_id": row["team_id"],
             "team_name": row["team_name"],
             "team_score": num(row["team_score"]),
+            "solved_count": sum(event["source_type"] != "LINE" for event in rows),
             "is_top3": row["rank"] <= TOP3_COUNT,
             "solves": [
                 {
@@ -140,6 +141,7 @@ def leaderboard(request):
                     "source_type": r["source_type"],
                     "solved_at": format_datetime(r["solved_at"]),
                     "points": num(r["points"]),
+                    "counts_as_solve": r["source_type"] != "LINE",
                 }
                 for r in rows
             ],
