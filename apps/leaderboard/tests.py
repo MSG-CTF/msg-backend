@@ -30,8 +30,10 @@ class LeaderboardAPITest(TestCase):
             inbound_internal_token_hash=f"hash_{name}",
         )
         return KothSolve.objects.create(
-            team=team, challenge=kc,
-            earned_score=Decimal(score), solved_at=at,
+            team=team,
+            challenge=kc,
+            earned_score=Decimal(score),
+            solved_at=at,
         )
 
     def make_team_with_solve(self, name, score, solved_at=None):

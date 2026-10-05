@@ -150,7 +150,9 @@ CHANCE_CARDS = [
 
 
 class Command(BaseCommand):
-    help = "Seed the fixed board, 30 demo challenges, and the single default team state."
+    help = (
+        "Seed the fixed board, 30 demo challenges, and the single default team state."
+    )
 
     @transaction.atomic
     def handle(self, *args, **options):
@@ -174,7 +176,9 @@ class Command(BaseCommand):
             return
 
         for difficulty, count in DIFFICULTY_COUNTS.items():
-            club_total = sum(len(clubs) for clubs in CATEGORY_CLUB_ASSIGNMENTS[difficulty].values())
+            club_total = sum(
+                len(clubs) for clubs in CATEGORY_CLUB_ASSIGNMENTS[difficulty].values()
+            )
             if club_total != count:
                 self.stderr.write(
                     f"{difficulty} club assignment count({club_total}) != difficulty count({count})"
@@ -203,7 +207,11 @@ class Command(BaseCommand):
         challenges = []
         board_metas = []
         challenge_number = 1
-        for difficulty in [Cell.Difficulty.EASY, Cell.Difficulty.MEDIUM, Cell.Difficulty.HARD]:
+        for difficulty in [
+            Cell.Difficulty.EASY,
+            Cell.Difficulty.MEDIUM,
+            Cell.Difficulty.HARD,
+        ]:
             label = DIFFICULTY_LABELS[difficulty]
             for category, clubs in CATEGORY_CLUB_ASSIGNMENTS[difficulty].items():
                 for club_name in clubs:
@@ -249,12 +257,16 @@ class Command(BaseCommand):
         )
 
         if not User.objects.filter(login_id="demo_leader").exists():
-            leader = User(login_id="demo_leader", nickname="데모팀장", team=team, is_leader=True)
+            leader = User(
+                login_id="demo_leader", nickname="데모팀장", team=team, is_leader=True
+            )
             validate_password("demo1234", user=leader)
             leader.set_password("demo1234")
             leader.save()
         if not User.objects.filter(login_id="demo_member").exists():
-            member = User(login_id="demo_member", nickname="데모팀원", team=team, is_leader=False)
+            member = User(
+                login_id="demo_member", nickname="데모팀원", team=team, is_leader=False
+            )
             validate_password("demo1234", user=member)
             member.set_password("demo1234")
             member.save()

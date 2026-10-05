@@ -47,13 +47,30 @@ class BoardChallengeAdmin(admin.ModelAdmin):
 
 @admin.register(TeamChallengeAccess)
 class TeamChallengeAccessAdmin(admin.ModelAdmin):
-    list_display = ["id", "team", "challenge", "source_cell", "status", "opened_at", "cleared_at"]
+    list_display = [
+        "id",
+        "team",
+        "challenge",
+        "source_cell",
+        "status",
+        "opened_at",
+        "cleared_at",
+    ]
     list_filter = ["status"]
 
 
 @admin.register(TeamCellCandidate)
 class TeamCellCandidateAdmin(admin.ModelAdmin):
-    list_display = ["id", "team", "cell", "challenge", "display_order", "status", "offered_at", "selected_at"]
+    list_display = [
+        "id",
+        "team",
+        "cell",
+        "challenge",
+        "display_order",
+        "status",
+        "offered_at",
+        "selected_at",
+    ]
     list_filter = ["status"]
 
 

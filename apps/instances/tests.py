@@ -61,7 +61,9 @@ class InstanceLockTests(TestCase):
             {"login_id": "instance-user", "password": "pw1234"},
             format="json",
         )
-        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {res.data['data']['access_token']}")
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {res.data['data']['access_token']}"
+        )
 
     @patch("apps.instances.views.call_scheduler_create")
     def test_instance_create_creates_user_lock(self, call_scheduler_create):
@@ -74,8 +76,12 @@ class InstanceLockTests(TestCase):
             "challenge_id": str(self.challenge.challenge_id),
             "status": "REQUESTED",
             "service_url": None,
-            "expires_at": (timezone.now() + datetime.timedelta(minutes=120)).isoformat(),
-            "hard_expires_at": (timezone.now() + datetime.timedelta(minutes=180)).isoformat(),
+            "expires_at": (
+                timezone.now() + datetime.timedelta(minutes=120)
+            ).isoformat(),
+            "hard_expires_at": (
+                timezone.now() + datetime.timedelta(minutes=180)
+            ).isoformat(),
             "replaced_instance_id": None,
         }
 

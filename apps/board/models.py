@@ -35,7 +35,9 @@ class IdempotencyRequest(models.Model):
             ),
         ]
         indexes = [
-            models.Index(fields=["status", "updated_at"], name="idem_status_updated_idx"),
+            models.Index(
+                fields=["status", "updated_at"], name="idem_status_updated_idx"
+            ),
         ]
 
 
@@ -56,7 +58,9 @@ class Cell(models.Model):
 
     cell_index = models.PositiveSmallIntegerField(primary_key=True)
     type = models.CharField(max_length=20, choices=CellType.choices)
-    difficulty = models.CharField(max_length=10, choices=Difficulty.choices, null=True, blank=True)
+    difficulty = models.CharField(
+        max_length=10, choices=Difficulty.choices, null=True, blank=True
+    )
     name = models.CharField(max_length=50)
 
     class Meta:
@@ -116,7 +120,9 @@ class TeamCellConsumption(models.Model):
     class Meta:
         db_table = "team_cell_consumptions"
         constraints = [
-            models.UniqueConstraint(fields=["team", "cell"], name="unique_team_cell_consumption"),
+            models.UniqueConstraint(
+                fields=["team", "cell"], name="unique_team_cell_consumption"
+            ),
         ]
         indexes = [
             models.Index(fields=["team"]),
@@ -238,7 +244,9 @@ class TeamChallengeAccess(models.Model):
         on_delete=models.CASCADE,
         related_name="challenge_accesses",
     )
-    status = models.CharField(max_length=20, choices=Status.choices, default=Status.OPENED)
+    status = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.OPENED
+    )
     opened_at = models.DateTimeField(auto_now_add=True)
     cleared_at = models.DateTimeField(null=True, blank=True)
 
@@ -253,7 +261,7 @@ class TeamChallengeAccess(models.Model):
             models.UniqueConstraint(
                 fields=["team", "source_cell"],
                 name="unique_team_cell_challenge_access",
-            )
+            ),
         ]
         indexes = [
             models.Index(fields=["team", "status"]),
@@ -288,7 +296,9 @@ class TeamCellCandidate(models.Model):
         related_name="board_cell_candidates",
     )
     display_order = models.PositiveSmallIntegerField()
-    status = models.CharField(max_length=20, choices=Status.choices, default=Status.OFFERED)
+    status = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.OFFERED
+    )
     offered_at = models.DateTimeField(auto_now_add=True)
     selected_at = models.DateTimeField(null=True, blank=True)
 

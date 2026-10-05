@@ -17,7 +17,11 @@ from .exceptions import BoardLoadFailed, ChallengeIdRequired, RequestBodyNotAllo
 from .idempotency import idempotent
 from .models import Cell, ChanceCard
 from .permissions import IsTeamLeader
-from .serializers import CellSerializer, ChallengeCandidateSerializer, ChanceCardSerializer
+from .serializers import (
+    CellSerializer,
+    ChallengeCandidateSerializer,
+    ChanceCardSerializer,
+)
 from .services import (
     build_cell_states,
     build_chance_cards_view,
@@ -147,7 +151,8 @@ class CellCurrentView(APIView):
                 "cell_index": cell.cell_index,
                 "type": cell.type,
                 "challenge_candidates": [
-                    ChallengeCandidateSerializer(candidate.challenge).data for candidate in candidates
+                    ChallengeCandidateSerializer(candidate.challenge).data
+                    for candidate in candidates
                 ],
             }
         )
@@ -293,7 +298,11 @@ class ChanceDiscardView(APIView):
     def post(self, request, *args, **kwargs):
         team = _get_team(request)
         payload = _request_object(request)
-        return ok(discard_chance_card(team, payload.get("card_id"), team_card_id=_team_card_id(payload)))
+        return ok(
+            discard_chance_card(
+                team, payload.get("card_id"), team_card_id=_team_card_id(payload)
+            )
+        )
 
 
 class ChanceUseView(APIView):
@@ -306,7 +315,9 @@ class ChanceUseView(APIView):
         team = _get_team(request)
         payload = _request_object(request)
         card_id = payload.get("card_id")
-        return ok(use_chance_card(team, card_id, payload, team_card_id=_team_card_id(payload)))
+        return ok(
+            use_chance_card(team, card_id, payload, team_card_id=_team_card_id(payload))
+        )
 
 
 class ChanceConfirmView(APIView):
@@ -347,7 +358,9 @@ class DebugSolveActiveChallengeView(APIView):
         state, access, is_extra_dice_granted = solve_active_challenge(team)
         return ok(
             {
-                "solved_challenge_id": access.challenge_id if access is not None else None,
+                "solved_challenge_id": (
+                    access.challenge_id if access is not None else None
+                ),
                 "is_extra_dice_granted": is_extra_dice_granted,
                 "dice_rolls_left": state.dice_rolls_left,
             }
