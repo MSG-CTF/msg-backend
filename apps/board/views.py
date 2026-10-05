@@ -170,6 +170,7 @@ class CellOpenView(APIView):
             raise ChallengeIdRequired()
 
         access, solve_deadline_at = open_current_cell_challenge(team, challenge_id)
+        remaining_seconds = max(0, int((solve_deadline_at - timezone.now()).total_seconds()))
 
         return ok(
             {
@@ -177,7 +178,9 @@ class CellOpenView(APIView):
                 "challenge_id": access.challenge_id,
                 "opened_at": access.opened_at,
                 "solve_deadline_at": solve_deadline_at,
-                "remaining_seconds": 900,
+                # 마감시각과 서버 현재 시각의 차이로 계산한다. 고정 900초는 설정 변경·재조회
+                # 시 화면과 서버가 어긋났다(_serialize_active_challenge와 동일 기준).
+                "remaining_seconds": remaining_seconds,
             }
         )
 
