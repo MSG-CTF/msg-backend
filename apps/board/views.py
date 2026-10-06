@@ -28,8 +28,8 @@ from .services import (
     discard_chance_card,
     draw_chance_card,
     get_current_cell_candidates,
+    get_board_state_for_read,
     get_opened_challenges_summary,
-    get_or_create_board_state,
     is_board_completed,
     is_challenge_timer_running,
     move_team_via_airport,
@@ -112,8 +112,9 @@ class BoardMeView(APIView):
 
     def get(self, request, *args, **kwargs):
         team = _get_team(request)
-        state = get_or_create_board_state(team)
+        state = get_board_state_for_read(team)
         cell_states, consumed_cell_indexes = build_cell_states(team)
+        board_completed = is_board_completed(team, consumed_indexes=consumed_cell_indexes)
         active_access = state.active_challenge_access
 
         return ok(
@@ -124,10 +125,10 @@ class BoardMeView(APIView):
                 "next_dice_reset_at": state.next_dice_reset_at,
                 "airport_move_used": state.airport_move_used,
                 "has_passed_start": state.has_passed_start,
-                "board_completed": is_board_completed(team),
+                "board_completed": board_completed,
                 "consumed_cell_indexes": consumed_cell_indexes,
                 "cell_states": cell_states,
-                "chance_cards": build_chance_cards_view(team, state),
+                "chance_cards": build_chance_cards_view(team, state, board_completed=board_completed),
                 "active_challenge": _serialize_active_challenge(active_access),
             }
         )
@@ -201,7 +202,7 @@ class DiceStatusView(APIView):
 
     def get(self, request, *args, **kwargs):
         team = _get_team(request)
-        state = get_or_create_board_state(team)
+        state = get_board_state_for_read(team)
         blocked_reason = compute_blocked_reason(team, state)
         active_access = state.active_challenge_access
         timer_running = bool(

@@ -79,18 +79,41 @@ def get_default_team():
 # ---------------------------------------------------------------------------
 
 
-def get_or_create_board_state(team):
-    start_cell = Cell.objects.filter(cell_index=START_CELL_INDEX).first()
-    if start_cell is None:
-        raise BoardNotReady()
+def _board_state_queryset():
+    return TeamBoardState.objects.select_related("position", "active_challenge_access")
 
+
+def get_or_create_board_state(team):
     with transaction.atomic():
-        # Reads can apply a due recharge, so serialize them with rewards/rolls.
-        state, _ = TeamBoardState.objects.select_for_update().get_or_create(
-            team=team,
-            defaults={"position": start_cell},
-        )
-        state = apply_pending_dice_recharge(state)
+        # Mutations and due recharges serialize on the team's state row.
+        locked_states = _board_state_queryset().select_for_update(of=("self",))
+        try:
+            state = locked_states.get(team=team)
+        except TeamBoardState.DoesNotExist:
+            start_cell = Cell.objects.filter(cell_index=START_CELL_INDEX).first()
+            if start_cell is None:
+                raise BoardNotReady()
+            state, _ = locked_states.get_or_create(
+                team=team,
+                defaults={"position": start_cell},
+            )
+        return apply_pending_dice_recharge(state)
+
+
+def get_board_state_for_read(team):
+    """Avoid a write transaction when a read cannot change recharge state."""
+    state = _board_state_queryset().filter(team=team).first()
+    if state is None:
+        return get_or_create_board_state(team)
+
+    now = timezone.now()
+    recharge_update_required = (
+        state.next_dice_reset_at is not None
+        if state.dice_rolls_left >= MAX_DICE_ROLLS
+        else state.next_dice_reset_at is None or now >= state.next_dice_reset_at
+    )
+    if recharge_update_required:
+        return get_or_create_board_state(team)
     return state
 
 
@@ -147,7 +170,14 @@ def get_consumed_indexes(team):
     return set(TeamCellConsumption.objects.filter(team=team).values_list("cell_id", flat=True))
 
 
-def is_board_completed(team):
+def is_board_completed(team, *, consumed_indexes=None):
+    if consumed_indexes is not None:
+        completed_indexes = {
+            index
+            for index in consumed_indexes
+            if START_CELL_INDEX < index <= LAST_CELL_INDEX
+        }
+        return len(completed_indexes) >= BOARD_SIZE - 1
     return TeamCellConsumption.objects.filter(
         team=team, cell_id__gt=START_CELL_INDEX, cell_id__lte=LAST_CELL_INDEX,
     ).count() >= BOARD_SIZE - 1
@@ -163,8 +193,10 @@ def is_challenge_timer_running(access):
     )
 
 
-def compute_blocked_reason(team, state):
-    if is_board_completed(team):
+def compute_blocked_reason(team, state, *, board_completed=None, has_pending=None):
+    if board_completed is None:
+        board_completed = is_board_completed(team)
+    if board_completed:
         return "BOARD_COMPLETED"
 
     cell = state.position
@@ -174,7 +206,9 @@ def compute_blocked_reason(team, state):
             return "CHALLENGE_NOT_SELECTED"
         # The solve reward window does not prevent spending remaining rolls.
 
-    if PendingDiceRoll.objects.filter(team=team).exists():
+    if has_pending is None:
+        has_pending = PendingDiceRoll.objects.filter(team=team).exists()
+    if has_pending:
         return "PENDING_CONFIRM"
     if state.dice_rolls_left <= 0:
         return "NO_ROLL_LEFT"
@@ -525,7 +559,7 @@ def spin_roulette(team):
 
 
 def get_current_cell_candidates(team):
-    state = get_or_create_board_state(team)
+    state = get_board_state_for_read(team)
     if PendingDiceRoll.objects.filter(team=team).exists():
         raise PendingRollUnresolved()
 
@@ -772,16 +806,18 @@ def get_challenges_progress_summary(team):
 def build_cell_states(team):
     consumed_indexes = sorted(get_consumed_indexes(team))
     accesses = {
-        access.source_cell_id: access
-        for access in TeamChallengeAccess.objects.filter(team=team).select_related("challenge", "challenge__board_meta")
+        access["source_cell_id"]: access
+        for access in TeamChallengeAccess.objects.filter(team=team).values(
+            "source_cell_id", "status", "challenge__category"
+        )
     }
 
     states = []
     for cell_index in consumed_indexes:
         access = accesses.get(cell_index)
-        if access is not None and access.status == TeamChallengeAccess.Status.CLEARED:
+        if access is not None and access["status"] == TeamChallengeAccess.Status.CLEARED:
             status = "CLEARED"
-        elif access is not None and access.status == TeamChallengeAccess.Status.OPENED:
+        elif access is not None and access["status"] == TeamChallengeAccess.Status.OPENED:
             status = "OPENED"
         else:
             status = "CONSUMED"
@@ -789,7 +825,7 @@ def build_cell_states(team):
             {
                 "cell_index": cell_index,
                 "status": status,
-                "category": access.challenge.category if access is not None else None,
+                "category": access["challenge__category"] if access is not None else None,
             }
         )
     return states, consumed_indexes
@@ -821,13 +857,17 @@ def _held_cards_queryset(team):
     )
 
 
-def build_chance_cards_view(team, state):
-    draws = TeamChanceCard.objects.select_related("card").filter(
+def build_chance_cards_view(team, state, *, board_completed=None):
+    draws = list(TeamChanceCard.objects.select_related("card").filter(
         team=team, card_id__in=ChanceCard.CardId.values,
-    ).order_by("drawn_at")
-    blocked_reason = compute_blocked_reason(team, state)
+    ).order_by("drawn_at"))
+    if not draws:
+        return []
     has_pending = PendingDiceRoll.objects.filter(team=team).exists()
-    awaiting_discard = _held_cards_queryset(team).count() >= 2
+    blocked_reason = compute_blocked_reason(
+        team, state, board_completed=board_completed, has_pending=has_pending
+    )
+    awaiting_discard = sum(draw.used_at is None and draw.discarded_at is None for draw in draws) >= 2
 
     result = []
     for draw in draws:
