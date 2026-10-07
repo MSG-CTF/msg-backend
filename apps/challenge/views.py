@@ -124,12 +124,14 @@ class ChallengeFileDownloadView(APIView):
         if bundle is None or bundle.bundle_id != file_id or not default_storage.exists(bundle.object_key):
             return fail("CHALLENGE_FILE_NOT_FOUND", "존재하지 않는 문제 파일입니다.", 404)
 
-        return FileResponse(
+        response = FileResponse(
             default_storage.open(bundle.object_key, "rb"),
             as_attachment=True,
             filename="user-files.zip",
             content_type="application/zip",
         )
+        response["Cache-Control"] = "private, no-store"
+        return response
 
 
 class ChallengeSubmitView(APIView):

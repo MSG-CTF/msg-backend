@@ -477,6 +477,7 @@ class ChallengeUserFilesApiTests(UserFilesTestBase):
         self.assertEqual(file_data["file_name"], "user-files.zip")
         self.assertEqual(file_data["file_size"], len(archive_bytes))
         self.assertEqual(download.status_code, 200)
+        self.assertEqual(download["Cache-Control"], "private, no-store")
         self.assertEqual(b"".join(download.streaming_content), archive_bytes)
 
     def test_download_requires_access_and_rejects_hidden_revision(self):
