@@ -391,7 +391,7 @@ class InstanceLockTests(TestCase):
 
     @patch("apps.instances.services.scheduler_request")
     def test_reset_keeps_original_release_healthcheck_after_activation(self, scheduler_request):
-        healthcheck = {"type": "http", "port": 8080, "path": "/health"}
+        healthcheck = {"container": "web", "port": 8080, "path": "/health"}
         self.release.healthcheck = healthcheck
         self.release.save(update_fields=["healthcheck"])
         old_instance = Instance.objects.create(
@@ -411,7 +411,7 @@ class InstanceLockTests(TestCase):
             ephemeral_storage_mib=1024,
             isolation_profile="WEB",
             source_ref="refs/heads/main",
-            healthcheck={"type": "http", "port": 8080, "path": "/new-health"},
+            healthcheck={"container": "web", "port": 8080, "path": "/new-health"},
         )
         ChallengeRuntimeConfig.objects.filter(challenge=self.challenge).update(
             current_release=new_release,

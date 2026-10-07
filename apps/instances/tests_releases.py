@@ -746,7 +746,7 @@ class ReleaseInstanceCreateTests(ReleaseTestBase):
 
     @patch("apps.instances.services.scheduler_request")
     def test_create_preserves_registered_healthcheck(self, scheduler_request):
-        healthcheck = {"type": "http", "port": 8080, "path": "/health"}
+        healthcheck = {"container": "web", "port": 8080, "path": "/health"}
         cases = (
             ("artifact", healthcheck),
             ("workload", healthcheck),
