@@ -1,12 +1,16 @@
 import hashlib
 import io
+import os
+import subprocess
+import sys
 import tempfile
 import zipfile
+from pathlib import Path
 from unittest.mock import patch
 
 from django.core.files.storage import default_storage
 from django.core.management import call_command
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 from rest_framework.test import APIClient
 
 from apps.accounts.models import Team, User
@@ -29,6 +33,37 @@ from apps.instances.user_files import (
 SHA_A = "1" * 40
 SHA_B = "2" * 40
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
+
+
+class GCSStorageSettingsTests(SimpleTestCase):
+    def test_gcs_environment_configures_default_storage(self):
+        environment = {
+            **os.environ,
+            "GCS_ENABLED": "True",
+            "GCS_PROJECT_ID": "msg-broker",
+            "GCS_BUCKET_NAME": "2026msg_gcs",
+            "GCS_OBJECT_PREFIX": "dev",
+        }
+        script = """
+from config import settings
+storage = settings.STORAGES["default"]
+assert storage["BACKEND"] == "storages.backends.gcloud.GoogleCloudStorage"
+assert storage["OPTIONS"] == {
+    "project_id": "msg-broker",
+    "bucket_name": "2026msg_gcs",
+    "location": "dev",
+}
+"""
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=Path(__file__).resolve().parents[2],
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
 
 def user_archive(files=None):
