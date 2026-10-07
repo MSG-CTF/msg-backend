@@ -28,9 +28,7 @@ DEBUG = os.getenv("DJANGO_DEBUG", "False").lower() == "true"
 
 ALLOWED_HOSTS = [
     host.strip()
-    for host in os.getenv(
-        "DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1"
-    ).split(",")
+    for host in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
     if host.strip()
 ]
 
@@ -65,7 +63,6 @@ INSTALLED_APPS = [
     "apps.leaderboard",
     "apps.koth",
     "apps.signature",
-
 ]
 
 MIDDLEWARE = [
@@ -109,6 +106,9 @@ DATABASES = {
         "PASSWORD": os.getenv("POSTGRES_PASSWORD", "postgres"),
         "HOST": os.getenv("POSTGRES_HOST", "localhost"),
         "PORT": os.getenv("POSTGRES_PORT", "5432"),
+        # Reuse one connection per WSGI worker instead of reconnecting on every request.
+        "CONN_MAX_AGE": int(os.getenv("POSTGRES_CONN_MAX_AGE", "60")),
+        "CONN_HEALTH_CHECKS": True,
     }
 }
 
@@ -193,6 +193,10 @@ REFRESH_TOKEN_HOURS = 12
 # 생성한다. 기존 개발 환경은 JWT_SECRET을 fallback으로 사용하되 운영에서는
 # 반드시 별도 값을 설정한다.
 KOTH_TEAM_TOKEN_SECRET = os.getenv("KOTH_TEAM_TOKEN_SECRET", JWT_SECRET)
+# Shared rankings may lag score/team changes by at most this many seconds.
+KOTH_LEADERBOARD_CACHE_SECONDS = max(
+    0, int(os.getenv("KOTH_LEADERBOARD_CACHE_SECONDS", "1"))
+)
 
 
 REST_FRAMEWORK = {
@@ -207,11 +211,11 @@ REST_FRAMEWORK = {
     "UNAUTHENTICATED_USER": None,
     "DEFAULT_THROTTLE_RATES": {
         "login": "10/min",
-    }
+    },
 }
-SCHEDULER_BASE_URL = os.getenv(
-    "SCHEDULER_BASE_URL", "http://127.0.0.1:8001"
-).rstrip("/")
+SCHEDULER_BASE_URL = os.getenv("SCHEDULER_BASE_URL", "http://127.0.0.1:8001").rstrip(
+    "/"
+)
 _scheduler_url = urlsplit(SCHEDULER_BASE_URL)
 try:
     _scheduler_url.port
@@ -261,6 +265,8 @@ def _validated_base_url(name, default):
     return url
 
 
-RESOURCE_BROKER_BASE_URL = _validated_base_url("RESOURCE_BROKER_BASE_URL", "http://127.0.0.1:8002")
+RESOURCE_BROKER_BASE_URL = _validated_base_url(
+    "RESOURCE_BROKER_BASE_URL", "http://127.0.0.1:8002"
+)
 RESOURCE_BROKER_TIMEOUT_SECONDS = int(os.getenv("RESOURCE_BROKER_TIMEOUT_SECONDS", "5"))
 INVENTORY_API_TOKEN = os.getenv("INVENTORY_API_TOKEN", "")
