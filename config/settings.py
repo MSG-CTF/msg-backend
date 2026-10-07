@@ -243,7 +243,8 @@ INSTANCE_EXTEND_MINUTES = int(os.getenv("INSTANCE_EXTEND_MINUTES", "30"))
 
 
 def _validated_base_url(name, default):
-    # 스케줄러 URL 과 같은 규칙. 사용자 정보·경로·query·fragment 없는 http(s) 주소만 받는다.
+    # 사용자 정보·query·fragment 없는 http(s) 주소만 받는다.
+    # 브로커는 프록시 뒤 /api 아래에 있을 수 있어 경로는 허용한다.
     url = os.getenv(name, default).rstrip("/")
     parts = urlsplit(url)
     try:
@@ -255,12 +256,11 @@ def _validated_base_url(name, default):
         or not parts.hostname
         or parts.username
         or parts.password
-        or parts.path not in {"", "/"}
         or parts.query
         or parts.fragment
     ):
         raise ImproperlyConfigured(
-            f"{name}은 사용자 정보, 경로, query, fragment가 없는 http 또는 https 주소여야 합니다."
+            f"{name}은 사용자 정보, query, fragment가 없는 http 또는 https 주소여야 합니다."
         )
     return url
 
