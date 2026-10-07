@@ -223,13 +223,14 @@ class RegisterUserFilesBundleTests(UserFilesTestBase):
 
         self.assertIsNone(current_user_file_bundle(self.challenge))
 
-    def test_latest_present_false_hides_active_release_file(self):
+    def test_present_false_only_hides_file_after_release_activation(self):
         release_one = self.create_release(1)
+        release_two = self.create_release(2)
         archive_bytes = user_archive()
-        register_user_files_bundle(
+        _, bundle_one = register_user_files_bundle(
             user_manifest(archive_bytes), archive_bytes, user_artifact()
         )
-        ChallengeRuntimeConfig.objects.create(
+        runtime_config = ChallengeRuntimeConfig.objects.create(
             challenge=self.challenge,
             current_release=release_one,
         )
@@ -239,6 +240,10 @@ class RegisterUserFilesBundleTests(UserFilesTestBase):
             user_artifact(artifact_id=2, sha=SHA_B),
         )
 
+        self.assertEqual(current_user_file_bundle(self.challenge), bundle_one)
+
+        runtime_config.current_release = release_two
+        runtime_config.save(update_fields=["current_release"])
         self.assertIsNone(current_user_file_bundle(self.challenge))
 
 

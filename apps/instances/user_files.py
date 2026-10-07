@@ -352,11 +352,8 @@ def current_user_file_bundle(challenge):
         runtime_config = None
 
     bundles = ChallengeUserFileBundle.objects.filter(challenge=challenge)
-    latest = bundles.order_by("-registry_revision", "-created_at").first()
-    if latest is not None and not latest.present:
-        return None
     if runtime_config is None:
-        bundle = latest
+        bundle = bundles.order_by("-registry_revision", "-created_at").first()
     elif runtime_config.current_release is None:
         return None
     else:
