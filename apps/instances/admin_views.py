@@ -1,5 +1,7 @@
 from django.db import transaction
 from django.utils import timezone
+from django.utils.decorators import method_decorator
+from django.views.decorators.cache import never_cache
 from rest_framework.views import APIView
 
 from apps.challenge.models import Challenge
@@ -32,6 +34,7 @@ def _current_release_id(challenge):
     return config.current_release_id
 
 
+@method_decorator(never_cache, name="dispatch")
 class ReleaseListCreateView(APIView):
     permission_classes = [IsAdmin]
 

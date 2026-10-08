@@ -25,7 +25,13 @@
 | API | 권한 | 요청 | 응답 |
 | --- | --- | --- | --- |
 | POST /api/v1/admin/challenges/{challenge_id}/runtime-secrets | 관리자 JWT | name, value | secret_id UUID, name, version |
+| GET /api/v1/admin/challenges/{challenge_id}/runtime-secrets | 관리자 JWT | 없음 | 비밀값 이름, 버전, 저장 시각과 최신 여부 |
 | POST /internal/v1/runtime-secrets/resolve | 런타임 전용 Bearer | secret_ref UUID, container, image | data.env에 값 반환, Cache-Control: no-store |
+
+관리자 릴리스 조회의 컨테이너별 secret_bindings는 주입 이름, 저장 이름, 연결 버전과 최신 여부를 반환합니다
+다른 문제의 비밀값은 연결된 참조가 있어도 조회하지 않으며 저장값 없음으로 표시합니다
+관리자 메타데이터 조회는 값을 복호화하지 않고 원문·hash·암호문을 응답에 포함하지 않습니다
+연결 상태는 릴리스 설정을 뜻하며 실제 컨테이너 주입 검증 결과와는 구분합니다
 
 비밀값은 인증된 암호화로 DB에 저장합니다
 새 등록은 새 버전을 만들며 기존 릴리스의 참조는 바꾸지 않습니다

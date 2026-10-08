@@ -2,7 +2,7 @@ import re
 
 from django.db.models import Max
 
-from apps.instances.models import ChallengeRelease, IsolationProfile, ReleaseContainer
+from apps.instances.models import ChallengeRelease, IsolationProfile, ReleaseContainer, RuntimeSecret
 from apps.instances.services import isoformat_z
 from apps.instances.execution_settings import validate_env, validate_secret_env
 from apps.instances.runtime_secrets import bind_secret_env
@@ -339,6 +339,25 @@ def is_deployable(release):
 
 
 def serialize_release(release, current_release_id=None):
+    containers = list(release.containers.all())
+    references = {reference for container in containers for reference in container.secret_env.values()}
+    records = RuntimeSecret.objects.filter(challenge_id=release.challenge_id, secret_id__in=references).only("secret_id", "name", "version")
+    by_id = {str(record.pk): record for record in records}
+    latest = {row["name"]: row["latest_version"] for row in RuntimeSecret.objects.filter(challenge_id=release.challenge_id).values("name").annotate(latest_version=Max("version"))}
+
+    def secret_bindings(container):
+        rows = []
+        for env_name, reference in sorted(container.secret_env.items()):
+            record = by_id.get(reference)
+            rows.append({
+                "env_name": env_name,
+                "name": record.name if record else None,
+                "version": record.version if record else None,
+                "status": "registered" if record else "missing",
+                "is_latest": bool(record and record.version == latest.get(record.name)),
+            })
+        return rows
+
     return {
         "release_id": str(release.release_id),
         "challenge_id": str(release.challenge_id),
@@ -347,6 +366,13 @@ def serialize_release(release, current_release_id=None):
         "challenge_slug": release.challenge_slug,
         "runtime_type": release.runtime_type,
         "architecture": release.architecture,
+        "isolation_profile": release.isolation_profile,
+        "resource_profile": {
+            "cpu_millicores": release.cpu_millicores,
+            "memory_mib": release.memory_mib,
+            "ephemeral_storage_mib": release.ephemeral_storage_mib,
+        },
+        "healthcheck": release.healthcheck,
         "containers": [
             {
                 "name": container.name,
@@ -354,11 +380,13 @@ def serialize_release(release, current_release_id=None):
                 "ports": container.ports,
                 **({"env": container.env} if container.env else {}),
                 **({"secret_ref": str(container.id)} if container.secret_env else {}),
+                "secret_bindings": secret_bindings(container),
             }
-            for container in release.containers.all()
+            for container in containers
         ],
         "is_current": release.release_id == current_release_id,
         "is_deployable": is_deployable(release),
         "note": release.note,
+        "source_ref": release.source_ref,
         "created_at": isoformat_z(release.created_at),
     }

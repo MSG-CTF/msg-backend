@@ -18,8 +18,29 @@ from apps.instances.runtime_secrets import (
 
 
 @method_decorator(never_cache, name="dispatch")
-class RuntimeSecretCreateView(APIView):
+class RuntimeSecretListCreateView(APIView):
     permission_classes = [IsAdmin]
+
+    def get(self, request, challenge_id):
+        challenge = Challenge.objects.filter(challenge_id=challenge_id).first()
+        if challenge is None:
+            return fail("CHALLENGE_NOT_FOUND", "존재하지 않는 문제 ID입니다", 404)
+        # 조회에는 암호문과 복호화 값을 포함하지 않는다
+        records = RuntimeSecret.objects.filter(challenge=challenge).values(
+            "secret_id", "name", "version", "created_at", "created_by",
+        ).order_by("name", "-version")
+        rows = []
+        latest = {}
+        for record in records:
+            latest.setdefault(record["name"], record["version"])
+            rows.append({
+                "secret_id": str(record["secret_id"]),
+                "name": record["name"], "version": record["version"],
+                "created_at": record["created_at"].isoformat(),
+                "created_by": record["created_by"],
+                "is_latest": record["version"] == latest[record["name"]],
+            })
+        return ok({"challenge_id": str(challenge.pk), "secrets": rows, "total_count": len(rows)})
 
     def post(self, request, challenge_id):
         if not isinstance(request.data, dict) or set(request.data) != {"name", "value"}:

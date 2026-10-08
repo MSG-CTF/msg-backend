@@ -86,6 +86,53 @@ class ExecutionSettingsTests(ReleaseTestBase):
         self.assertEqual(self.resolve(old.containers.get()).data["data"]["env"]["INTERNAL_TOKEN"], "first-test-value")
         self.assertEqual(self.resolve(new.containers.get()).data["data"]["env"]["INTERNAL_TOKEN"], "second-test-value")
 
+    def test_admin_metadata_reports_saved_versions_and_immutable_bindings_without_decryption(self):
+        self.secret()
+        self.secret("internal_token", "first-test-value")
+        old = self.release(aliases={"FLAG": "flag", "INTERNAL_TOKEN": "internal_token"})
+        self.activate(old.pk)
+        self.secret("internal_token", "second-test-value")
+        with patch("apps.instances.runtime_secrets.decrypt_runtime_secret", side_effect=AssertionError("Metadata must not decrypt")):
+            secrets = self.client.get(self.secret_url)
+            releases = self.client.get(self.base_url)
+        self.assertEqual(secrets.status_code, 200)
+        self.assertEqual(releases.status_code, 200)
+        tokens = [row for row in secrets.data["data"]["secrets"] if row["name"] == "internal_token"]
+        self.assertEqual([(row["version"], row["is_latest"]) for row in tokens], [(2, True), (1, False)])
+        bindings = {row["env_name"]: row for row in releases.data["data"]["releases"][0]["containers"][0]["secret_bindings"]}
+        self.assertEqual(bindings["INTERNAL_TOKEN"], {"env_name": "INTERNAL_TOKEN", "name": "internal_token", "version": 1, "status": "registered", "is_latest": False})
+        self.assertTrue(bindings["FLAG"]["is_latest"])
+        for response in (secrets, releases):
+            serialized = json.dumps(response.data)
+            for forbidden in ("MSG{flag}", "first-test-value", "second-test-value", "encrypted_value", "flag_hash"):
+                self.assertNotIn(forbidden, serialized)
+            self.assertIn("no-store", response["Cache-Control"])
+
+    def test_runtime_secret_metadata_is_admin_only_and_challenge_scoped(self):
+        self.secret()
+        self.auth("player")
+        self.assertEqual(self.client.get(self.secret_url).status_code, 403)
+        anonymous = APIClient()
+        self.assertEqual(anonymous.get(self.secret_url).status_code, 401)
+        self.auth("root")
+        other = Challenge.objects.create(title="Other", category="WEB", difficulty="EASY", score=100, flag_hash="other")
+        url = f"/api/v1/admin/challenges/{other.pk}/runtime-secrets"
+        self.assertEqual(self.client.get(url).data["data"]["secrets"], [])
+        self.assertEqual(self.client.get(f"/api/v1/admin/challenges/{uuid.uuid4()}/runtime-secrets").status_code, 404)
+
+    def test_release_metadata_does_not_reveal_a_cross_challenge_secret_binding(self):
+        self.secret()
+        release = self.release()
+        other = Challenge.objects.create(title="Other", category="WEB", difficulty="EASY", score=100, flag_hash="other")
+        foreign = RuntimeSecret.objects.create(challenge=other, name="foreign_only", version=1, encrypted_value="not-read", created_by="root")
+        container = release.containers.get()
+        container.secret_env = {"FLAG": str(foreign.pk)}
+        container.save(update_fields=["secret_env"])
+        response = self.client.get(self.base_url)
+        binding = response.data["data"]["releases"][0]["containers"][0]["secret_bindings"][0]
+        self.assertEqual(binding, {"env_name": "FLAG", "name": None, "version": None, "status": "missing", "is_latest": False})
+        self.assertNotIn("foreign_only", json.dumps(response.data))
+
     def test_execution_settings_require_schema_21_and_scheduler_v2(self):
         for field in ("env", "secret_env"):
             body = artifact_payload()
