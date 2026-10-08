@@ -235,6 +235,35 @@ def is_board_completed(team, *, consumed_indexes=None):
     )
 
 
+def is_line_monopoly_completed(team, line_number):
+    """Check a line using solved challenges and visited special cells."""
+    line_cell_indexes = set(
+        Cell.objects.filter(line_number=line_number).values_list(
+            "cell_index", flat=True
+        )
+    )
+    if not line_cell_indexes:
+        return False
+
+    cleared_challenge_indexes = set(
+        TeamChallengeAccess.objects.filter(
+            team=team,
+            status=TeamChallengeAccess.Status.CLEARED,
+            source_cell__line_number=line_number,
+        ).values_list("source_cell_id", flat=True)
+    )
+    consumed_special_indexes = set(
+        TeamCellConsumption.objects.filter(
+            team=team,
+            cell__line_number=line_number,
+        )
+        .exclude(cell__type=Cell.CellType.CHALLENGE)
+        .values_list("cell_id", flat=True)
+    )
+    completed_cell_indexes = cleared_challenge_indexes | consumed_special_indexes
+    return line_cell_indexes == completed_cell_indexes
+
+
 def challenge_solve_deadline(access):
     return access.opened_at + timedelta(seconds=SOLVE_LIMIT_SECONDS)
 
@@ -297,6 +326,14 @@ def roulette_reason(cell):
 
 def consume_cell(team, cell):
     _, created = TeamCellConsumption.objects.get_or_create(team=team, cell=cell)
+    if (
+        created
+        and cell.line_number is not None
+        and cell.type != Cell.CellType.CHALLENGE
+    ):
+        from apps.ranking.services import check_and_record_line_monopoly
+
+        check_and_record_line_monopoly(team, line_number=cell.line_number)
     return created
 
 
