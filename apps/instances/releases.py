@@ -4,6 +4,8 @@ from django.db.models import Max
 
 from apps.instances.models import ChallengeRelease, IsolationProfile, ReleaseContainer
 from apps.instances.services import isoformat_z
+from apps.instances.execution_settings import validate_env, validate_secret_env
+from apps.instances.runtime_secrets import bind_secret_env
 
 # 공급망 발행 명명과 동일한 digest 고정 GHCR 참조만 허용한다
 IMAGE_REF_PATTERN = re.compile(
@@ -16,7 +18,7 @@ CONTAINER_NAME_PATTERN = re.compile(
     r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
 )
 
-SUPPORTED_SCHEMA_VERSION = "2.0"
+SUPPORTED_SCHEMA_VERSIONS = {"2.0", "2.1"}
 MAX_CONTAINERS = 8
 MAX_PORTS_PER_CONTAINER = 8
 MAX_EXPOSED_PORTS = 8
@@ -101,6 +103,8 @@ def _validate_containers(raw_containers):
     for raw in raw_containers:
         if not isinstance(raw, dict):
             raise ReleaseValidationError("workload.containers 항목 형식이 올바르지 않습니다")
+        if set(raw) - {"name", "image", "ports", "env", "secret_env"}:
+            raise ReleaseValidationError("지원하지 않는 컨테이너 실행 설정이 있습니다")
         name = _require_string(raw.get("name"), "container.name")
         if not CONTAINER_NAME_PATTERN.fullmatch(name):
             raise ReleaseValidationError(
@@ -116,11 +120,18 @@ def _validate_containers(raw_containers):
                 f"{name} 컨테이너의 image가 digest 고정 GHCR 형식이 아닙니다"
             )
 
+        try:
+            env = validate_env(raw.get("env", {}))
+            aliases = validate_secret_env(raw.get("secret_env", {}), env)
+        except ValueError as error:
+            raise ReleaseValidationError(str(error)) from None
         containers.append(
             {
                 "name": name,
                 "image_ref": image_ref,
                 "ports": _validate_ports(raw.get("ports"), name),
+                "env": env,
+                "secret_env": aliases,
             }
         )
     return containers
@@ -143,7 +154,8 @@ def validate_release_payload(body):
         if note and len(note) > MAX_NOTE_LENGTH:
             raise ReleaseValidationError(f"note 값은 {MAX_NOTE_LENGTH}자 이하여야 합니다")
 
-    if artifact.get("schema_version") != SUPPORTED_SCHEMA_VERSION:
+    schema_version = artifact.get("schema_version")
+    if not isinstance(schema_version, str) or schema_version not in SUPPORTED_SCHEMA_VERSIONS:
         raise ReleaseValidationError("지원하지 않는 schema_version입니다")
     if artifact.get("scan_result") != "PASS":
         raise ReleaseValidationError("scan_result가 PASS인 릴리스만 등록할 수 있습니다")
@@ -171,6 +183,12 @@ def validate_release_payload(body):
     workload = artifact.get("workload")
     if not isinstance(workload, dict):
         raise ReleaseValidationError("workload 값이 올바르지 않습니다")
+    raw_containers = workload.get("containers")
+    if artifact["schema_version"] == "2.0" and isinstance(raw_containers, list) and any(
+        isinstance(container, dict) and ({"env", "secret_env"} & set(container))
+        for container in raw_containers
+    ):
+        raise ReleaseValidationError("환경변수와 비밀값 참조에는 schema_version 2.1이 필요합니다")
 
     registry_revision = _require_positive_int(
         artifact.get("registry_revision"), "registry_revision"
@@ -238,6 +256,13 @@ def next_release_version(challenge):
 
 
 def create_release(challenge, validated, created_by):
+    # 참조 선택을 먼저 끝낸다. 등록되지 않은 비밀값이 있으면 릴리스 행도 만들지 않는다
+    bindings = []
+    for container in validated["containers"]:
+        try:
+            bindings.append(bind_secret_env(challenge, container.get("secret_env", {}), container.get("env", {})))
+        except ValueError as error:
+            raise ReleaseValidationError(str(error)) from None
     release = ChallengeRelease.objects.create(
         challenge=challenge,
         version=next_release_version(challenge),
@@ -261,8 +286,10 @@ def create_release(challenge, validated, created_by):
                 name=container["name"],
                 image_ref=container["image_ref"],
                 ports=container["ports"],
+                env=container.get("env", {}),
+                secret_env=bindings[index],
             )
-            for container in validated["containers"]
+            for index, container in enumerate(validated["containers"])
         ]
     )
     return release
@@ -325,6 +352,8 @@ def serialize_release(release, current_release_id=None):
                 "name": container.name,
                 "image_ref": container.image_ref,
                 "ports": container.ports,
+                **({"env": container.env} if container.env else {}),
+                **({"secret_ref": str(container.id)} if container.secret_env else {}),
             }
             for container in release.containers.all()
         ],

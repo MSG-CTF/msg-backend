@@ -1,0 +1,261 @@
+import copy
+import json
+import uuid
+from unittest.mock import patch
+
+from cryptography.fernet import Fernet
+from django.test import override_settings
+from rest_framework.test import APIClient
+
+from apps.challenge.models import Challenge
+from apps.instances.models import ChallengeRelease, RuntimeSecret
+from apps.instances.poller import poll_once, register_bundle
+from apps.instances.models import PollerArtifact
+from apps.instances.releases import ReleaseValidationError, create_release, validate_release_payload
+from apps.instances.services import build_scheduler_create_body, call_scheduler_create
+from apps.instances.tests_releases import ReleaseTestBase, artifact_payload
+
+TEST_KEY = Fernet.generate_key().decode()
+TEST_TOKEN = "execution-contract-runtime-worker-token"
+
+
+@override_settings(RUNTIME_SECRET_ENCRYPTION_KEYS=[TEST_KEY], RUNTIME_SECRET_API_TOKEN=TEST_TOKEN)
+class ExecutionSettingsTests(ReleaseTestBase):
+    def setUp(self):
+        super().setUp()
+        self.auth("root")
+        self.secret_url = f"/api/v1/admin/challenges/{self.challenge.pk}/runtime-secrets"
+
+    def secret(self, name="flag", value="MSG{flag}"):
+        return self.client.post(self.secret_url, {"name": name, "value": value}, format="json")
+
+    def release(self, revision=1, env=None, aliases=None):
+        body = artifact_payload(revision=revision)
+        body["artifact"]["schema_version"] = "2.1"
+        body["artifact"]["workload"]["containers"][0].update({
+            "env": env or {"APP_MODE": "ctf"}, "secret_env": aliases or {"FLAG": "flag"},
+        })
+        response = self.client.post(self.base_url, body, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        return ChallengeRelease.objects.get(pk=response.data["data"]["release_id"])
+
+    def resolve(self, release_container, token=TEST_TOKEN, **overrides):
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+        body = {"secret_ref": str(release_container.id), "container": release_container.name, "image": release_container.image_ref}
+        body.update(overrides)
+        return client.post("/internal/v1/runtime-secrets/resolve", body, format="json")
+
+    def test_encrypted_flag_is_bound_to_approved_release_and_not_exposed_in_metadata(self):
+        response = self.secret()
+        self.assertEqual(response.status_code, 200)
+        stored = RuntimeSecret.objects.get(pk=response.data["data"]["secret_id"])
+        self.assertNotIn("MSG{flag}", stored.encrypted_value)
+        self.assertNotIn("value", response.data["data"])
+        release = self.release()
+        container = release.containers.get()
+        self.assertEqual(container.secret_env, {"FLAG": str(stored.pk)})
+        self.assertEqual(self.resolve(container).status_code, 404)
+        self.assertEqual(self.activate(release.pk).status_code, 200)
+        resolved = self.resolve(container)
+        self.assertEqual(resolved.data["data"]["env"], {"FLAG": "MSG{flag}"})
+        self.assertIn("no-store", resolved["Cache-Control"])
+        self.assertNotIn("MSG{flag}", json.dumps(self.client.get(self.base_url).data))
+
+    def test_general_env_and_reference_survive_database_and_scheduler_serialization(self):
+        self.secret()
+        release = self.release(env={"APP_MODE": "ctf", "LANG": "ko_KR.UTF-8"})
+        self.activate(release.pk)
+        self.challenge.refresh_from_db()
+        config = self.challenge.runtime_config
+        body = build_scheduler_create_body(self.player, self.team, self.challenge, config, release)
+        self.assertEqual(body["containers"][0]["env"], {"APP_MODE": "ctf", "LANG": "ko_KR.UTF-8"})
+        self.assertEqual(body["containers"][0]["secret_ref"], str(release.containers.get().id))
+        self.assertNotIn("MSG{flag}", json.dumps(body))
+        self.assertNotIn("secret_env", body["containers"][0])
+        self.assertEqual(body["isolation_profile"], "WEB")
+
+    def test_secret_rotation_preserves_previous_release_binding(self):
+        self.secret("internal_token", "first-test-value")
+        self.secret()
+        old = self.release(aliases={"FLAG": "flag", "INTERNAL_TOKEN": "internal_token"})
+        self.activate(old.pk)
+        self.secret("internal_token", "second-test-value")
+        new = self.release(revision=2, aliases={"FLAG": "flag", "INTERNAL_TOKEN": "internal_token"})
+        self.activate(new.pk)
+        self.assertEqual(self.resolve(old.containers.get()).data["data"]["env"]["INTERNAL_TOKEN"], "first-test-value")
+        self.assertEqual(self.resolve(new.containers.get()).data["data"]["env"]["INTERNAL_TOKEN"], "second-test-value")
+
+    def test_execution_settings_require_schema_21_and_scheduler_v2(self):
+        for field in ("env", "secret_env"):
+            body = artifact_payload()
+            body["artifact"]["workload"]["containers"][0][field] = {}
+            self.assertEqual(self.client.post(self.base_url, body, format="json").status_code, 400)
+        self.secret()
+        release = self.release()
+        self.activate(release.pk)
+        self.challenge.refresh_from_db()
+        with patch("apps.instances.services.scheduler_request", return_value={}) as request:
+            call_scheduler_create(self.player, self.team, self.challenge, self.challenge.runtime_config, release)
+        self.assertEqual(request.call_args.args[:2], ("POST", "/api/v2/instances"))
+
+    def test_participant_create_accepts_only_challenge_id(self):
+        self.auth("player")
+        for extra in ("env", "secret_env", "secret_ref", "containers", "isolation_profile"):
+            body = {"challenge_id": str(self.challenge.pk), extra: "test-only"}
+            response = self.client.post("/api/v1/instances", body, format="json")
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(response.data["code"], "INVALID_REQUEST")
+        for challenge_id in (None, {}, [], 1, "invalid", str(uuid.UUID(int=0))):
+            response = self.client.post("/api/v1/instances", {"challenge_id": challenge_id}, format="json")
+            self.assertEqual(response.status_code, 400)
+
+    def test_invalid_schema_types_return_validation_error(self):
+        for schema in (None, {}, [], 1, True):
+            body = artifact_payload()
+            body["artifact"]["schema_version"] = schema
+            self.assertEqual(self.client.post(self.base_url, body, format="json").status_code, 400)
+
+    def test_poller_retries_unavailable_encryption_configuration(self):
+        self.secret()
+        self.challenge.challenge_slug = "web-basic"
+        self.challenge.save(update_fields=["challenge_slug"])
+        body = artifact_payload()["artifact"]
+        body["schema_version"] = "2.1"
+        body["workload"]["containers"][0]["secret_env"] = {"FLAG": "flag"}
+        artifact = {"id": 98123, "name": "fixture-publish-bundle"}
+        PollerArtifact.objects.create(artifact_id=98123, kind=PollerArtifact.Kind.RELEASE, payload=artifact)
+        with patch("apps.instances.poller.list_bundle_artifacts", return_value=[artifact]), \
+             patch("apps.instances.poller.get_workflow_run", return_value={"status": "completed"}), \
+             patch("apps.instances.poller.validate_workflow_run_source"), \
+             patch("apps.instances.poller.download_bundle", return_value=body), \
+             patch("apps.instances.poller.validate_bundle_source"):
+            with override_settings(RUNTIME_SECRET_ENCRYPTION_KEYS=[]):
+                self.assertEqual(poll_once()["error"], 1)
+                self.assertFalse(PollerArtifact.objects.filter(pk=98123, processed_at__isnull=False).exists())
+            self.assertEqual(poll_once()["registered"], 1)
+            self.assertIsNotNone(PollerArtifact.objects.get(pk=98123).processed_at)
+
+    def test_resolver_requires_worker_token_not_admin_or_participant_jwt(self):
+        self.secret()
+        release = self.release()
+        self.activate(release.pk)
+        container = release.containers.get()
+        self.assertEqual(self.resolve(container, token="wrong-test-token").status_code, 401)
+        body = {"secret_ref": str(container.pk), "container": container.name, "image": container.image_ref}
+        self.assertEqual(self.client.post("/internal/v1/runtime-secrets/resolve", body, format="json").status_code, 401)
+        self.auth("player")
+        self.assertEqual(self.secret().status_code, 403)
+
+    def test_reference_is_bound_to_container_name_and_exact_image(self):
+        self.secret()
+        release = self.release()
+        self.activate(release.pk)
+        container = release.containers.get()
+        for overrides in (
+            {"container": "other"}, {"image": container.image_ref[:-1] + "b"},
+            {"secret_ref": str(uuid.uuid4())},
+        ):
+            with self.subTest(overrides=overrides):
+                self.assertEqual(self.resolve(container, **overrides).status_code, 404)
+
+    def test_invalid_or_null_ref_is_rejected_without_echo(self):
+        self.secret()
+        container = self.release().containers.get()
+        for ref in (None, {}, [], "MSG{must-not-be-echoed}", str(uuid.UUID(int=0))):
+            with self.subTest(ref=type(ref).__name__):
+                response = self.resolve(container, secret_ref=ref)
+                self.assertEqual(response.status_code, 400)
+                self.assertNotIn("must-not-be-echoed", json.dumps(response.data))
+
+    def test_flag_must_match_existing_judge_hash(self):
+        response = self.secret(value="MSG{different-test-value}")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(RuntimeSecret.objects.count(), 0)
+        self.assertNotIn("different-test-value", json.dumps(response.data))
+
+    def test_missing_secret_aborts_manual_and_poller_registration(self):
+        self.challenge.challenge_slug = "web-basic"
+        self.challenge.save(update_fields=["challenge_slug"])
+        body = artifact_payload()
+        body["artifact"]["schema_version"] = "2.1"
+        body["artifact"]["workload"]["containers"][0]["secret_env"] = {"FLAG": "flag"}
+        self.assertEqual(self.client.post(self.base_url, body, format="json").status_code, 400)
+        status, _ = register_bundle(body["artifact"])
+        self.assertEqual(status, "invalid")
+        self.assertEqual(ChallengeRelease.objects.count(), 0)
+
+    def test_secret_of_other_challenge_cannot_satisfy_alias(self):
+        self.secret()
+        other = Challenge.objects.create(
+            title="Other", challenge_slug="other", category="WEB", difficulty="EASY",
+            score=500, description="fixture", flag_hash=self.challenge.flag_hash,
+        )
+        body = artifact_payload(slug="other")
+        body["artifact"]["schema_version"] = "2.1"
+        body["artifact"]["workload"]["containers"][0]["secret_env"] = {"FLAG": "flag"}
+        with self.assertRaisesRegex(ReleaseValidationError, "등록되지 않은"):
+            create_release(other, validate_release_payload(body), "root")
+
+    def test_wrong_key_and_ciphertext_substitution_fail_closed(self):
+        self.secret()
+        self.secret("internal_token", "local-test-token-value")
+        release = self.release(aliases={"FLAG": "flag", "INTERNAL_TOKEN": "internal_token"})
+        self.activate(release.pk)
+        container = release.containers.get()
+        with override_settings(RUNTIME_SECRET_ENCRYPTION_KEYS=[Fernet.generate_key().decode()]):
+            response = self.resolve(container)
+            self.assertEqual(response.status_code, 503)
+        flag = RuntimeSecret.objects.get(name="flag")
+        other = RuntimeSecret.objects.get(name="internal_token")
+        flag.encrypted_value = other.encrypted_value
+        flag.save(update_fields=["encrypted_value"])
+        self.assertEqual(self.resolve(container).status_code, 503)
+
+    def test_previous_encryption_key_can_remain_for_rotation(self):
+        self.secret()
+        release = self.release()
+        self.activate(release.pk)
+        with override_settings(RUNTIME_SECRET_ENCRYPTION_KEYS=[Fernet.generate_key().decode(), TEST_KEY]):
+            self.assertEqual(self.resolve(release.containers.get()).status_code, 200)
+
+    def test_missing_keys_and_worker_token_return_service_unavailable(self):
+        with override_settings(RUNTIME_SECRET_ENCRYPTION_KEYS=[]):
+            self.assertEqual(self.secret().status_code, 503)
+        self.secret()
+        container = self.release().containers.get()
+        with override_settings(RUNTIME_SECRET_API_TOKEN=""):
+            self.assertEqual(self.resolve(container).status_code, 503)
+
+    def test_changed_judge_flag_blocks_resolution(self):
+        self.secret()
+        release = self.release()
+        self.activate(release.pk)
+        self.challenge.flag_hash = "0" * 64
+        self.challenge.save(update_fields=["flag_hash"])
+        self.assertEqual(self.resolve(release.containers.get()).status_code, 503)
+
+    def test_invalid_env_or_secret_alias_is_rejected_at_release_registration(self):
+        examples = (
+            {"env": {"FLAG": "raw-test-value"}},
+            {"env": {"DB_PASSWORD": "raw-test-value"}},
+            {"env": {"APP_MODE": 1}},
+            {"env": {"lowercase": "value"}},
+            {"env": {"APP_MODE": "\x00"}},
+            {"env": {"APP_MODE": "x" * 4097}},
+            {"env": None},
+            {"secret_env": {"FLAG": "different_name"}},
+            {"secret_env": {"FLAG": str(uuid.uuid4())}},
+            {"secret_env": {"FLAG": "MSG{must-not-be-echoed}"}},
+            {"env": {"APP_MODE": "plain"}, "secret_env": {"APP_MODE": "mode"}},
+            {"environment": {"APP_MODE": "ctf"}},
+        )
+        for fields in examples:
+            with self.subTest(field_names=list(fields)):
+                body = copy.deepcopy(artifact_payload())
+                body["artifact"]["schema_version"] = "2.1"
+                body["artifact"]["workload"]["containers"][0].update(fields)
+                response = self.client.post(self.base_url, body, format="json")
+                self.assertEqual(response.status_code, 400)
+                self.assertNotIn("raw-test-value", json.dumps(response.data))
+                self.assertNotIn("must-not-be-echoed", json.dumps(response.data))

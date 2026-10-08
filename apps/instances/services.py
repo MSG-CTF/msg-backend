@@ -146,6 +146,8 @@ def serialize_release_container(container):
         "image": container.image_ref,
         "ports": release_container_ports(container),
         "exposed_ports": release_container_public_ports(container),
+        **({"env": container.env} if container.env else {}),
+        **({"secret_ref": str(container.id)} if container.secret_env else {}),
     }
 
 
@@ -385,10 +387,14 @@ def build_scheduler_create_body(user, team, challenge, runtime_config, release):
 
 def call_scheduler_create(user, team, challenge, runtime_config, release, auth_header=None):
     # Scheduler에 인스턴스 생성을 요청한다
+    body = build_scheduler_create_body(user, team, challenge, runtime_config, release)
+    path = "/api/v2/instances" if any(
+        container.get("env") or container.get("secret_ref") for container in body["containers"]
+    ) else "/api/instances"
     return scheduler_request(
         "POST",
-        "/api/instances",
-        body=build_scheduler_create_body(user, team, challenge, runtime_config, release),
+        path,
+        body=body,
         auth_header=auth_header,
     )
 

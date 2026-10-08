@@ -1,6 +1,7 @@
 from django.urls import path
 
 from apps.instances.admin_views import ReleaseActivateView, ReleaseListCreateView
+from apps.instances.secret_views import RuntimeSecretCreateView
 from apps.instances.views import (
     InstanceCreateView,
     InstanceDeleteView,
@@ -10,6 +11,11 @@ from apps.instances.views import (
 )
 
 urlpatterns = [
+    path(
+        "admin/challenges/<uuid:challenge_id>/runtime-secrets",
+        RuntimeSecretCreateView.as_view(),
+        name="admin-runtime-secrets",
+    ),
     path(
         "admin/challenges/<uuid:challenge_id>/releases",
         ReleaseListCreateView.as_view(),

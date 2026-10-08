@@ -15,6 +15,7 @@ from apps.instances.releases import (
     validate_release_payload,
 )
 from apps.instances.services import isoformat_z
+from apps.instances.runtime_secrets import RuntimeSecretUnavailable
 
 
 def _get_challenge(challenge_id, for_update=False):
@@ -86,7 +87,12 @@ class ReleaseListCreateView(APIView):
                     409,
                 )
 
-            release = create_release(challenge, validated, request.user.login_id)
+            try:
+                release = create_release(challenge, validated, request.user.login_id)
+            except ReleaseValidationError as error:
+                return fail("RELEASE_INVALID", error.message, 400)
+            except RuntimeSecretUnavailable:
+                return fail("RUNTIME_SECRET_UNAVAILABLE", "비밀값 저장 설정을 확인하세요", 503)
 
         return ok(
             serialize_release(release, _current_release_id(challenge)),
@@ -119,6 +125,10 @@ class ReleaseActivateView(APIView):
                     "현재 Scheduler 계약으로 배포할 수 없는 릴리스입니다.",
                     400,
                 )
+
+            if release.approved_at is None:
+                release.approved_at = timezone.now()
+                release.save(update_fields=["approved_at"])
 
             config, _ = ChallengeRuntimeConfig.objects.select_for_update().get_or_create(
                 challenge=challenge
