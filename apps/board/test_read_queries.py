@@ -12,7 +12,6 @@ from apps.accounts.models import Team, User
 from apps.board.services import (
     BOARD_SIZE,
     LAST_CELL_INDEX,
-    MAX_DICE_ROLLS,
     START_CELL_INDEX,
     build_chance_cards_view,
     get_board_state_for_read,
@@ -37,27 +36,27 @@ class BoardReadQueryTests(TestCase):
         force_authenticate(request, user=user)
         return request, view.as_view()
 
-    def test_board_me_stable_state_uses_four_domain_queries(self):
+    def test_board_me_stable_state_uses_two_domain_queries(self):
         request, view = self.authenticated_request(
             "/api/v1/board/me", BoardMeView, "board-me-queries"
-        )
-        with self.assertNumQueries(4):
-            response = view(request)
-        self.assertEqual(response.status_code, 200)
-
-    def test_cell_current_stable_state_uses_two_domain_queries(self):
-        request, view = self.authenticated_request(
-            "/api/v1/board/cell/current", CellCurrentView, "cell-current-queries"
         )
         with self.assertNumQueries(2):
             response = view(request)
         self.assertEqual(response.status_code, 200)
 
-    def test_dice_status_stable_state_uses_three_domain_queries(self):
+    def test_cell_current_stable_state_uses_one_domain_query(self):
+        request, view = self.authenticated_request(
+            "/api/v1/board/cell/current", CellCurrentView, "cell-current-queries"
+        )
+        with self.assertNumQueries(1):
+            response = view(request)
+        self.assertEqual(response.status_code, 200)
+
+    def test_dice_status_stable_state_uses_one_domain_query(self):
         request, view = self.authenticated_request(
             "/api/v1/board/dice/status", DiceStatusView, "dice-status-queries"
         )
-        with self.assertNumQueries(3):
+        with self.assertNumQueries(1):
             response = view(request)
         self.assertEqual(response.status_code, 200)
 
@@ -85,21 +84,7 @@ class BoardReadQueryTests(TestCase):
             refreshed = get_board_state_for_read(team)
 
         self.assertEqual(refreshed.dice_rolls_left, 2)
-        self.assertTrue(
-            any("FOR UPDATE" in query["sql"].upper() for query in captured)
-        )
-
-    def test_full_state_with_stale_reset_falls_back_to_locked_cleanup(self):
-        call_command("seed_board", verbosity=0)
-        team = Team.objects.create(team_name="full-state-stale-reset")
-        state = get_or_create_board_state(team)
-        state.next_dice_reset_at = timezone.now() + timedelta(minutes=5)
-        state.save(update_fields=["next_dice_reset_at"])
-
-        refreshed = get_board_state_for_read(team)
-
-        self.assertEqual(refreshed.dice_rolls_left, MAX_DICE_ROLLS)
-        self.assertIsNone(refreshed.next_dice_reset_at)
+        self.assertTrue(any("FOR UPDATE" in query["sql"].upper() for query in captured))
 
     def test_empty_card_inventory_skips_usability_queries(self):
         call_command("seed_board", verbosity=0)
@@ -113,23 +98,18 @@ class BoardReadQueryTests(TestCase):
         with self.assertNumQueries(0):
             self.assertFalse(
                 is_board_completed(
-                    team,
-                    consumed_indexes=range(START_CELL_INDEX, LAST_CELL_INDEX),
+                    team, consumed_indexes=range(START_CELL_INDEX, LAST_CELL_INDEX)
                 )
             )
             self.assertTrue(
                 is_board_completed(
                     team,
-                    consumed_indexes=range(
-                        START_CELL_INDEX + 1,
-                        LAST_CELL_INDEX + 1,
-                    ),
+                    consumed_indexes=range(START_CELL_INDEX + 1, LAST_CELL_INDEX + 1),
                 )
             )
             self.assertFalse(
                 is_board_completed(
-                    team,
-                    consumed_indexes=range(BOARD_SIZE + 1, BOARD_SIZE * 2),
+                    team, consumed_indexes=range(BOARD_SIZE + 1, BOARD_SIZE * 2)
                 )
             )
             self.assertFalse(

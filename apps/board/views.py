@@ -17,7 +17,11 @@ from .exceptions import BoardLoadFailed, ChallengeIdRequired, RequestBodyNotAllo
 from .idempotency import idempotent
 from .models import Cell, ChanceCard
 from .permissions import IsTeamLeader
-from .serializers import CellSerializer, ChallengeCandidateSerializer, ChanceCardSerializer
+from .serializers import (
+    CellSerializer,
+    ChallengeCandidateSerializer,
+    ChanceCardSerializer,
+)
 from .services import (
     build_cell_states,
     build_chance_cards_view,
@@ -30,7 +34,6 @@ from .services import (
     get_current_cell_candidates,
     get_board_state_for_read,
     get_opened_challenges_summary,
-    is_board_completed,
     is_challenge_timer_running,
     move_team_via_airport,
     solve_active_challenge,
@@ -112,9 +115,11 @@ class BoardMeView(APIView):
 
     def get(self, request, *args, **kwargs):
         team = _get_team(request)
-        state = get_board_state_for_read(team)
+        state = get_board_state_for_read(
+            team, include_completion=True, include_cards=True
+        )
         cell_states, consumed_cell_indexes = build_cell_states(team)
-        board_completed = is_board_completed(team, consumed_indexes=consumed_cell_indexes)
+        board_completed = state.board_completed
         active_access = state.active_challenge_access
 
         return ok(
@@ -128,7 +133,13 @@ class BoardMeView(APIView):
                 "board_completed": board_completed,
                 "consumed_cell_indexes": consumed_cell_indexes,
                 "cell_states": cell_states,
-                "chance_cards": build_chance_cards_view(team, state, board_completed=board_completed),
+                "chance_cards": (
+                    build_chance_cards_view(
+                        team, state, board_completed=board_completed
+                    )
+                    if state.has_chance_cards
+                    else []
+                ),
                 "active_challenge": _serialize_active_challenge(active_access),
             }
         )
@@ -148,7 +159,8 @@ class CellCurrentView(APIView):
                 "cell_index": cell.cell_index,
                 "type": cell.type,
                 "challenge_candidates": [
-                    ChallengeCandidateSerializer(candidate.challenge).data for candidate in candidates
+                    ChallengeCandidateSerializer(candidate.challenge).data
+                    for candidate in candidates
                 ],
             }
         )
@@ -202,8 +214,15 @@ class DiceStatusView(APIView):
 
     def get(self, request, *args, **kwargs):
         team = _get_team(request)
-        state = get_board_state_for_read(team)
-        blocked_reason = compute_blocked_reason(team, state)
+        state = get_board_state_for_read(
+            team, include_completion=True, include_pending=True
+        )
+        blocked_reason = compute_blocked_reason(
+            team,
+            state,
+            board_completed=state.board_completed,
+            has_pending=state.has_pending_roll,
+        )
         active_access = state.active_challenge_access
         timer_running = bool(
             active_access is not None
@@ -294,7 +313,11 @@ class ChanceDiscardView(APIView):
     def post(self, request, *args, **kwargs):
         team = _get_team(request)
         payload = _request_object(request)
-        return ok(discard_chance_card(team, payload.get("card_id"), team_card_id=_team_card_id(payload)))
+        return ok(
+            discard_chance_card(
+                team, payload.get("card_id"), team_card_id=_team_card_id(payload)
+            )
+        )
 
 
 class ChanceUseView(APIView):
@@ -307,7 +330,9 @@ class ChanceUseView(APIView):
         team = _get_team(request)
         payload = _request_object(request)
         card_id = payload.get("card_id")
-        return ok(use_chance_card(team, card_id, payload, team_card_id=_team_card_id(payload)))
+        return ok(
+            use_chance_card(team, card_id, payload, team_card_id=_team_card_id(payload))
+        )
 
 
 class ChanceConfirmView(APIView):
@@ -348,7 +373,9 @@ class DebugSolveActiveChallengeView(APIView):
         state, access, is_extra_dice_granted = solve_active_challenge(team)
         return ok(
             {
-                "solved_challenge_id": access.challenge_id if access is not None else None,
+                "solved_challenge_id": (
+                    access.challenge_id if access is not None else None
+                ),
                 "is_extra_dice_granted": is_extra_dice_granted,
                 "dice_rolls_left": state.dice_rolls_left,
             }
