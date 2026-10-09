@@ -145,6 +145,11 @@ class ChallengeRelease(models.Model):
     version = models.IntegerField()
     # bundle의 revision. 백필 릴리스는 0을 쓴다
     registry_revision = models.IntegerField()
+    # 같은 발행 이미지를 유지한 채 관리자 설정만 바꾼 릴리스의 원본
+    derived_from = models.ForeignKey(
+        "self", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="derived_releases",
+    )
     # bundle의 challenge_slug. 백필 릴리스는 빈 문자열이라 slug 대조에서 제외한다
     challenge_slug = models.CharField(max_length=100, blank=True, default="")
     runtime_type = models.CharField(
@@ -165,6 +170,7 @@ class ChallengeRelease(models.Model):
     memory_mib = models.IntegerField()
     ephemeral_storage_mib = models.IntegerField()
     healthcheck = models.JSONField(null=True, blank=True)
+    approved_at = models.DateTimeField(null=True, blank=True)
     source_ref = models.CharField(max_length=200, blank=True, default="")
     note = models.TextField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -175,10 +181,6 @@ class ChallengeRelease(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=["challenge", "version"], name="uq_release_challenge_version"
-            ),
-            models.UniqueConstraint(
-                fields=["challenge", "registry_revision"],
-                name="uq_release_challenge_revision",
             ),
         ]
         indexes = [models.Index(fields=["challenge", "-version"])]
@@ -199,6 +201,9 @@ class ReleaseContainer(models.Model):
     image_ref = models.TextField()
     # bundle workload.containers[].ports 형식 그대로: [{"port": int, "public": bool}]
     ports = models.JSONField(default=list)
+    env = models.JSONField(default=dict)
+    # 릴리스 등록 때 선택한 불변 RuntimeSecret UUID를 저장한다
+    secret_env = models.JSONField(default=dict)
 
     class Meta:
         db_table = "challenge_release_containers"
@@ -210,6 +215,25 @@ class ReleaseContainer(models.Model):
 
     def __str__(self):
         return f"{self.release_id} {self.name}"
+
+
+class RuntimeSecret(models.Model):
+    secret_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    challenge = models.ForeignKey("challenge.Challenge", on_delete=models.CASCADE, related_name="runtime_secrets")
+    name = models.CharField(max_length=64)
+    version = models.PositiveIntegerField()
+    encrypted_value = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.CharField(max_length=50)
+
+    class Meta:
+        db_table = "challenge_runtime_secrets"
+        constraints = [
+            models.UniqueConstraint(fields=["challenge", "name", "version"], name="uq_runtime_secret_version"),
+        ]
+
+    def __str__(self):
+        return f"{self.challenge_id} {self.name} v{self.version}"
 
 
 class PollerArtifact(models.Model):
