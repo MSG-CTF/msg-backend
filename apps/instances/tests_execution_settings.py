@@ -12,7 +12,7 @@ from apps.instances.models import ChallengeRelease, RuntimeSecret
 from apps.instances.poller import poll_once, register_bundle
 from apps.instances.models import PollerArtifact
 from apps.instances.releases import ReleaseValidationError, create_release, validate_release_payload
-from apps.instances.services import build_scheduler_create_body, call_scheduler_create
+from apps.instances.services import SchedulerError, build_scheduler_create_body, call_scheduler_create, create_instance_from_scheduler
 from apps.instances.tests_releases import ReleaseTestBase, artifact_payload
 
 TEST_KEY = Fernet.generate_key().decode()
@@ -145,6 +145,83 @@ class ExecutionSettingsTests(ReleaseTestBase):
         with patch("apps.instances.services.scheduler_request", return_value={}) as request:
             call_scheduler_create(self.player, self.team, self.challenge, self.challenge.runtime_config, release)
         self.assertEqual(request.call_args.args[:2], ("POST", "/api/v2/instances"))
+
+    def test_admin_can_derive_settings_from_existing_20_image_without_changing_source(self):
+        base = self.client.post(self.base_url, artifact_payload(), format="json")
+        self.assertEqual(base.status_code, 200, base.data)
+        source = ChallengeRelease.objects.get(pk=base.data["data"]["release_id"])
+        source_container = source.containers.get()
+        self.secret()
+        url = f"{self.base_url}/{source.pk}/derive"
+        body = {"containers": [{"name": source_container.name, "env": {"APP_MODE": "ctf"}, "secret_env": {"FLAG": "flag"}}]}
+        response = self.client.post(url, body, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        derived = ChallengeRelease.objects.get(pk=response.data["data"]["release_id"])
+        self.assertEqual(derived.derived_from_id, source.pk)
+        self.assertEqual(derived.registry_revision, source.registry_revision)
+        self.assertEqual(derived.version, source.version + 1)
+        self.assertEqual(derived.containers.get().image_ref, source_container.image_ref)
+        self.assertEqual(derived.containers.get().ports, source_container.ports)
+        source_container.refresh_from_db()
+        self.assertEqual(source_container.env, {})
+        self.assertEqual(source_container.secret_env, {})
+        self.assertEqual(self.activate(derived.pk).status_code, 200)
+        self.challenge.refresh_from_db()
+        scheduler_body = build_scheduler_create_body(self.player, self.team, self.challenge, self.challenge.runtime_config, derived)
+        self.assertEqual(scheduler_body["containers"][0]["env"], {"APP_MODE": "ctf"})
+        self.assertEqual(scheduler_body["release_id"], str(derived.pk))
+        self.assertEqual(scheduler_body["containers"][0]["secret_ref"], str(derived.containers.get().pk))
+        self.assertEqual(self.resolve(derived.containers.get()).data["data"]["env"], {"FLAG": "MSG{flag}"})
+        self.assertNotIn("MSG{flag}", json.dumps(response.data))
+
+    def test_derived_settings_validate_scope_container_and_secret_alias(self):
+        base = self.client.post(self.base_url, artifact_payload(), format="json")
+        self.assertEqual(base.status_code, 200, base.data)
+        source_id = base.data["data"]["release_id"]
+        url = f"{self.base_url}/{source_id}/derive"
+        valid = {"containers": [{"name": "web", "env": {}, "secret_env": {}}]}
+        source_name = ChallengeRelease.objects.get(pk=source_id).containers.get().name
+        valid["containers"][0]["name"] = source_name
+        invalid = (
+            {"containers": []},
+            {"containers": [{"name": "other", "env": {}, "secret_env": {}}]},
+            {"containers": [{"name": source_name, "env": {}, "secret_env": {}, "image": "other"}]},
+            {"containers": [{"name": source_name, "env": {"FLAG": "raw"}, "secret_env": {}}]},
+            {"containers": [{"name": source_name, "env": {}, "secret_env": {"FLAG": "flag"}}]},
+            {**valid, "artifact": artifact_payload()["artifact"]},
+        )
+        for body in invalid:
+            with self.subTest(body=body):
+                self.assertEqual(self.client.post(url, body, format="json").status_code, 400)
+        self.assertEqual(ChallengeRelease.objects.count(), 1)
+        self.auth("player")
+        self.assertEqual(self.client.post(url, valid, format="json").status_code, 403)
+        self.auth("root")
+        other = Challenge.objects.create(title="Other", category="WEB", difficulty="EASY", score=100, flag_hash="other")
+        self.assertEqual(self.client.post(f"/api/v1/admin/challenges/{other.pk}/releases/{source_id}/derive", valid, format="json").status_code, 404)
+
+    def test_scheduler_recovery_uses_release_id_when_versions_share_revision(self):
+        base = self.client.post(self.base_url, artifact_payload(), format="json")
+        self.assertEqual(base.status_code, 200, base.data)
+        source = ChallengeRelease.objects.get(pk=base.data["data"]["release_id"])
+        derived = self.client.post(f"{self.base_url}/{source.pk}/derive", {
+            "containers": [{"name": source.containers.get().name, "env": {"APP_MODE": "ctf"}, "secret_env": {}}],
+        }, format="json")
+        self.assertEqual(derived.status_code, 200, derived.data)
+        scheduler_data = {
+            "instance_id": str(uuid.uuid4()), "challenge_id": str(self.challenge.pk),
+            "registry_revision": source.registry_revision, "status": "RUNNING",
+            "service_url": "https://instance.example", "expires_at": "2026-11-08T10:00:00Z",
+            "hard_expires_at": "2026-11-08T11:00:00Z",
+        }
+        with self.assertRaises(SchedulerError):
+            create_instance_from_scheduler(scheduler_data, user=self.player, team=self.team, challenge=self.challenge)
+        scheduler_data["release_id"] = derived.data["data"]["release_id"]
+        restored = create_instance_from_scheduler(scheduler_data, user=self.player, team=self.team, challenge=self.challenge)
+        self.assertEqual(str(restored.release_id), scheduler_data["release_id"])
+        scheduler_data["release_id"] = str(uuid.uuid4())
+        with self.assertRaises(SchedulerError):
+            create_instance_from_scheduler(scheduler_data, user=self.player, team=self.team, challenge=self.challenge)
 
     def test_participant_create_accepts_only_challenge_id(self):
         self.auth("player")

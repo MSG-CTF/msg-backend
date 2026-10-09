@@ -1,4 +1,5 @@
 import json
+import uuid
 from datetime import timezone as dt_timezone
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -118,14 +119,26 @@ def get_release_from_scheduler_data(challenge, scheduler_data):
             503,
         )
 
-    release = ChallengeRelease.objects.filter(
+    releases = ChallengeRelease.objects.filter(
         challenge=challenge,
         registry_revision=registry_revision,
-    ).first()
+    )
+    release_id = scheduler_data.get("release_id")
+    if release_id is not None:
+        try:
+            parsed_id = uuid.UUID(release_id)
+            if str(parsed_id) != release_id:
+                raise ValueError()
+        except (ValueError, TypeError, AttributeError):
+            raise SchedulerError("SCHEDULER_UNAVAILABLE", "Scheduler 응답의 release_id가 올바르지 않습니다.", 503) from None
+        release = releases.filter(release_id=parsed_id).first()
+    else:
+        candidates = list(releases[:2])
+        release = candidates[0] if len(candidates) == 1 else None
     if release is None:
         raise SchedulerError(
             "SCHEDULER_UNAVAILABLE",
-            "Scheduler 응답의 registry_revision에 해당하는 릴리스를 찾을 수 없습니다.",
+            "Scheduler 응답으로 실행 설정 버전을 특정할 수 없습니다.",
             503,
         )
 
@@ -370,6 +383,7 @@ def build_scheduler_create_body(user, team, challenge, runtime_config, release):
             for container in containers
         ],
         "registry_revision": release.registry_revision,
+        "release_id": str(release.release_id),
         "isolation_profile": release.isolation_profile,
         "architecture": release.architecture,
         "resource_profile": {
@@ -510,6 +524,15 @@ def create_instance_from_scheduler(
         challenge = Challenge.objects.filter(challenge_id=scheduler_data.get("challenge_id")).first()
     if release is None and challenge is not None:
         release = get_release_from_scheduler_data(challenge, scheduler_data)
+    elif release is not None:
+        returned_id = scheduler_data.get("release_id")
+        if returned_id is not None and returned_id != str(release.release_id):
+            raise SchedulerError("SCHEDULER_UNAVAILABLE", "Scheduler 응답의 실행 설정 버전이 다릅니다.", 503)
+        if release.derived_from_id and returned_id is None:
+            raise SchedulerError("SCHEDULER_UNAVAILABLE", "Scheduler가 실행 설정 버전을 반환하지 않았습니다.", 503)
+        returned_revision = scheduler_data.get("registry_revision")
+        if returned_revision is not None and returned_revision != release.registry_revision:
+            raise SchedulerError("SCHEDULER_UNAVAILABLE", "Scheduler 응답의 발행 번호가 다릅니다.", 503)
     service_url, endpoints = scheduler_network_values(scheduler_data)
 
     with transaction.atomic():

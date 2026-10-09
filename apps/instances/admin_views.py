@@ -14,6 +14,7 @@ from apps.instances.releases import (
     create_release,
     is_deployable,
     serialize_release,
+    validate_derived_settings,
     validate_release_payload,
 )
 from apps.instances.services import isoformat_z
@@ -156,4 +157,35 @@ class ReleaseActivateView(APIView):
                 "activated_at": isoformat_z(timezone.now().replace(microsecond=0)),
             },
             message="현재 릴리스가 전환되었습니다.",
+        )
+
+
+@method_decorator(never_cache, name="dispatch")
+class ReleaseDeriveView(APIView):
+    permission_classes = [IsAdmin]
+
+    def post(self, request, challenge_id, release_id):
+        # 원본 이미지·포트·격리는 고정하고 주입 설정만 새 버전으로 복제한다
+        with transaction.atomic():
+            challenge = _get_challenge(challenge_id, for_update=True)
+            if challenge is None:
+                return fail("CHALLENGE_NOT_FOUND", "존재하지 않는 문제 ID입니다.", 404)
+            source = (
+                ChallengeRelease.objects.prefetch_related("containers")
+                .filter(challenge=challenge, release_id=release_id).first()
+            )
+            if source is None:
+                return fail("RELEASE_NOT_FOUND", "존재하지 않는 릴리스 ID입니다.", 404)
+            if not is_deployable(source):
+                return fail("RELEASE_NOT_DEPLOYABLE", "실행할 수 없는 릴리스에서는 설정을 만들 수 없습니다.", 400)
+            try:
+                validated = validate_derived_settings(request.data, source)
+                release = create_release(challenge, validated, request.user.login_id, derived_from=source)
+            except ReleaseValidationError as error:
+                return fail("RELEASE_INVALID", error.message, 400)
+            except RuntimeSecretUnavailable:
+                return fail("RUNTIME_SECRET_UNAVAILABLE", "비밀값 저장 설정을 확인하세요", 503)
+        return ok(
+            serialize_release(release, _current_release_id(challenge)),
+            message="실행 설정 버전이 등록되었습니다.",
         )

@@ -145,6 +145,11 @@ class ChallengeRelease(models.Model):
     version = models.IntegerField()
     # bundle의 revision. 백필 릴리스는 0을 쓴다
     registry_revision = models.IntegerField()
+    # 같은 발행 이미지를 유지한 채 관리자 설정만 바꾼 릴리스의 원본
+    derived_from = models.ForeignKey(
+        "self", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="derived_releases",
+    )
     # bundle의 challenge_slug. 백필 릴리스는 빈 문자열이라 slug 대조에서 제외한다
     challenge_slug = models.CharField(max_length=100, blank=True, default="")
     runtime_type = models.CharField(
@@ -176,10 +181,6 @@ class ChallengeRelease(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=["challenge", "version"], name="uq_release_challenge_version"
-            ),
-            models.UniqueConstraint(
-                fields=["challenge", "registry_revision"],
-                name="uq_release_challenge_revision",
             ),
         ]
         indexes = [models.Index(fields=["challenge", "-version"])]

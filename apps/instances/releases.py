@@ -255,7 +255,58 @@ def next_release_version(challenge):
     return (current_max or 0) + 1
 
 
-def create_release(challenge, validated, created_by):
+def validate_derived_settings(body, source):
+    if not isinstance(body, dict) or set(body) - {"containers", "note"}:
+        raise ReleaseValidationError("실행 설정 요청 형식이 올바르지 않습니다")
+    raw_containers = body.get("containers")
+    source_containers = list(source.containers.all())
+    if not isinstance(raw_containers, list) or len(raw_containers) != len(source_containers):
+        raise ReleaseValidationError("원본 릴리스의 모든 컨테이너 설정이 필요합니다")
+    requested = {}
+    for raw in raw_containers:
+        if not isinstance(raw, dict) or set(raw) - {"name", "env", "secret_env"}:
+            raise ReleaseValidationError("컨테이너 실행 설정 형식이 올바르지 않습니다")
+        name = raw.get("name")
+        if not isinstance(name, str) or name in requested:
+            raise ReleaseValidationError("컨테이너 이름이 중복되거나 올바르지 않습니다")
+        try:
+            env = validate_env(raw.get("env", {}))
+            aliases = validate_secret_env(raw.get("secret_env", {}), env)
+        except ValueError as error:
+            raise ReleaseValidationError(str(error)) from None
+        requested[name] = {"env": env, "secret_env": aliases}
+    if set(requested) != {container.name for container in source_containers}:
+        raise ReleaseValidationError("원본 릴리스와 컨테이너 이름이 일치하지 않습니다")
+    note = body.get("note")
+    if note is not None:
+        if not isinstance(note, str) or len(note.strip()) > MAX_NOTE_LENGTH:
+            raise ReleaseValidationError(f"note 값은 {MAX_NOTE_LENGTH}자 이하의 문자열이어야 합니다")
+        note = note.strip() or None
+    return {
+        "challenge_slug": source.challenge_slug,
+        "registry_revision": source.registry_revision,
+        "runtime_type": source.runtime_type,
+        "architecture": source.architecture,
+        "isolation_profile": source.isolation_profile,
+        "cpu_millicores": source.cpu_millicores,
+        "memory_mib": source.memory_mib,
+        "ephemeral_storage_mib": source.ephemeral_storage_mib,
+        "healthcheck": source.healthcheck,
+        "source_ref": source.source_ref,
+        "containers": [
+            {
+                "name": container.name,
+                "image_ref": container.image_ref,
+                "ports": container.ports,
+                **requested[container.name],
+            }
+            for container in source_containers
+        ],
+        "note": note,
+    }
+
+
+def create_release(challenge, validated, created_by, derived_from=None):
     # 참조 선택을 먼저 끝낸다. 등록되지 않은 비밀값이 있으면 릴리스 행도 만들지 않는다
     bindings = []
     for container in validated["containers"]:
@@ -267,6 +318,7 @@ def create_release(challenge, validated, created_by):
         challenge=challenge,
         version=next_release_version(challenge),
         registry_revision=validated["registry_revision"],
+        derived_from=derived_from,
         challenge_slug=validated["challenge_slug"],
         runtime_type=validated["runtime_type"],
         architecture=validated["architecture"],
@@ -363,6 +415,7 @@ def serialize_release(release, current_release_id=None):
         "challenge_id": str(release.challenge_id),
         "version": release.version,
         "registry_revision": release.registry_revision,
+        "derived_from_release_id": str(release.derived_from_id) if release.derived_from_id else None,
         "challenge_slug": release.challenge_slug,
         "runtime_type": release.runtime_type,
         "architecture": release.architecture,

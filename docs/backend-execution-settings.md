@@ -8,9 +8,10 @@
 | --- | --- |
 | 출제자 → CI | env는 일반 값, secret_env는 백엔드에 등록된 비밀값 이름 |
 | CI → 백엔드 | 새 필드가 있으면 artifact schema 2.1로 발행 |
+| 관리자 → 백엔드 | 기존 2.0 릴리스의 이미지·포트는 유지하고 env·secret_env만 새 설정 버전으로 복제 |
 | 릴리스 등록 | 이름을 해당 문제의 최신 비밀값 버전으로 고정, 누락되면 등록 실패 |
 | 릴리스 활성화 | approved_at 기록, 이전 승인 릴리스도 reset을 위해 조회 허용 |
-| 백엔드 → 스케줄러 | env와 컨테이너별 secret_ref UUID 전달, 새 설정은 POST /api/v2/instances 사용 |
+| 백엔드 → 스케줄러 | env·컨테이너별 secret_ref·release_id 전달, 새 설정은 POST /api/v2/instances 사용 |
 | 런타임 → 백엔드 | 전용 서비스 토큰으로 참조·컨테이너 이름·이미지 digest를 확인하고 값 조회 |
 
 ## 운영자가 준비할 것
@@ -19,13 +20,14 @@
    쉼표로 구분한 Fernet 키 목록이며 첫 키로 암호화하고 나머지 키로 이전 값을 복호화합니다
 2) RUNTIME_SECRET_API_TOKEN을 런타임 전용 토큰으로 설정합니다
    참가자 JWT, 관리자 JWT, 스케줄러 토큰과 각각 분리합니다
-3) 관리자 API에 문제별 비밀값을 등록한 뒤 새 릴리스를 등록·활성화합니다
+3) 관리자 API에 문제별 비밀값을 등록한 뒤 기존 릴리스를 복제하거나 새 릴리스를 등록해 활성화합니다
    flag 값은 해당 문제의 채점 hash와 일치해야 합니다
 
 | API | 권한 | 요청 | 응답 |
 | --- | --- | --- | --- |
 | POST /api/v1/admin/challenges/{challenge_id}/runtime-secrets | 관리자 JWT | name, value | secret_id UUID, name, version |
 | GET /api/v1/admin/challenges/{challenge_id}/runtime-secrets | 관리자 JWT | 없음 | 비밀값 이름, 버전, 저장 시각과 최신 여부 |
+| POST /api/v1/admin/challenges/{challenge_id}/releases/{release_id}/derive | 관리자 JWT | containers[].name/env/secret_env | 원본 이미지·포트·격리를 유지한 새 릴리스 |
 | POST /internal/v1/runtime-secrets/resolve | 런타임 전용 Bearer | secret_ref UUID, container, image | data.env에 값 반환, Cache-Control: no-store |
 
 관리자 릴리스 조회의 컨테이너별 secret_bindings는 주입 이름, 저장 이름, 연결 버전과 최신 여부를 반환합니다
@@ -48,10 +50,12 @@
 | 다른 문제의 비밀값 이름 사용 | 참조를 찾지 못해 릴리스 등록 실패 |
 | 미승인 릴리스, 다른 컨테이너·digest로 조회 | 값 반환 없이 404 |
 | 릴리스 전환 후 기존 인스턴스 reset | 원래 revision·env·비밀값 버전 유지 |
+| 같은 발행 번호로 설정 복제 후 재연결 | 스케줄러 release_id로 정확한 버전 선택, ID가 없어 모호하면 실패 |
 | 암호화 키 누락·잘못된 키·암호문 교체 | 값 반환 없이 503 |
 | 구형 schema 2.0에 새 필드 추가 | 빈 값도 거절, 조용한 누락 방지 |
 
 이 변경은 고정된 비밀값 버전을 지원합니다
+이미지에 플래그가 들어 있거나 프로그램이 환경변수 대신 파일을 읽는 경우에는 관리자 주입 설정만으로 해당 값이 사라지거나 동작이 바뀌지 않습니다
 인스턴스별 값 생성, 비밀값 폐기 API, 채점 hash의 릴리스별 버전 관리는 추가 구현이 필요합니다
 FLAG를 교체하면 기존 hash 검사도 바뀌므로 기존 인스턴스와 reset의 처리 기준을 함께 정해야 합니다
 
