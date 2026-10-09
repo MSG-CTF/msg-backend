@@ -467,6 +467,13 @@ def update_instance_from_scheduler(instance, scheduler_data):
     if not scheduler_data:
         return instance
 
+    if instance.release_id is not None:
+        returned_id = scheduler_data.get("release_id")
+        if returned_id is not None and returned_id != str(instance.release_id):
+            raise SchedulerError("SCHEDULER_UNAVAILABLE", "Scheduler 응답의 실행 설정 버전이 다릅니다.", 503)
+        if instance.release.derived_from_id and returned_id is None:
+            raise SchedulerError("SCHEDULER_UNAVAILABLE", "Scheduler가 실행 설정 버전을 반환하지 않았습니다.", 503)
+
     update_fields = ["updated_at"]
 
     instance.status = scheduler_data.get("status", instance.status)

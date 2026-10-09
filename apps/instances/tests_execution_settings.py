@@ -12,7 +12,7 @@ from apps.instances.models import ChallengeRelease, RuntimeSecret
 from apps.instances.poller import poll_once, register_bundle
 from apps.instances.models import PollerArtifact
 from apps.instances.releases import ReleaseValidationError, create_release, validate_release_payload
-from apps.instances.services import SchedulerError, build_scheduler_create_body, call_scheduler_create, create_instance_from_scheduler
+from apps.instances.services import SchedulerError, build_scheduler_create_body, call_scheduler_create, create_instance_from_scheduler, update_instance_from_scheduler
 from apps.instances.tests_releases import ReleaseTestBase, artifact_payload
 
 TEST_KEY = Fernet.generate_key().decode()
@@ -219,6 +219,8 @@ class ExecutionSettingsTests(ReleaseTestBase):
         scheduler_data["release_id"] = derived.data["data"]["release_id"]
         restored = create_instance_from_scheduler(scheduler_data, user=self.player, team=self.team, challenge=self.challenge)
         self.assertEqual(str(restored.release_id), scheduler_data["release_id"])
+        with self.assertRaises(SchedulerError):
+            update_instance_from_scheduler(restored, {"release_id": str(source.pk), "status": "RUNNING"})
         scheduler_data["release_id"] = str(uuid.uuid4())
         with self.assertRaises(SchedulerError):
             create_instance_from_scheduler(scheduler_data, user=self.player, team=self.team, challenge=self.challenge)
