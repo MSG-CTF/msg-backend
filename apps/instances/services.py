@@ -152,6 +152,7 @@ def validate_release_for_scheduler(release):
     from apps.instances.releases import (
         ReleaseValidationError,
         has_sufficient_container_resources,
+        validate_container_image,
         validate_healthcheck,
     )
 
@@ -212,6 +213,8 @@ def validate_release_for_scheduler(release):
         )
 
     try:
+        for container in containers:
+            validate_container_image(container.image_ref, release.challenge_slug, container.name)
         validate_healthcheck(
             release.healthcheck,
             {container.name: release_container_ports(container) for container in containers},
