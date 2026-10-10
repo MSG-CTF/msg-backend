@@ -29,8 +29,8 @@ def is_correct_flag(flag, flag_hash):
     return False
 
 
-def update_dynamic_score_and_team_scores(challenge):
-    """Recalculate a challenge and every affected team's stored Jeopardy score."""
+def update_dynamic_score_and_team_scores(challenge, *, newly_solved_team_id=None):
+    """Recalculate scores, limiting unchanged-score submissions to the new team."""
     solved_team_count = Solve.objects.filter(challenge=challenge).count()
     current_score = Decimal(
         calculate_dynamic_score(
@@ -40,8 +40,10 @@ def update_dynamic_score_and_team_scores(challenge):
             solved_team_count,
         )
     )
+    score_unchanged = challenge.current_score == current_score
     challenge.current_score = current_score
-    challenge.save(update_fields=["current_score"])
+    if not score_unchanged or newly_solved_team_id is None:
+        challenge.save(update_fields=["current_score"])
 
     affected_team_ids = Solve.objects.filter(challenge=challenge).values("team_id")
     team_totals = (
@@ -51,8 +53,12 @@ def update_dynamic_score_and_team_scores(challenge):
         .annotate(total=Sum("challenge__current_score"))
         .values("total")
     )
-    # Keep the exact score calculation without two round trips per solved team.
-    Team.objects.filter(pk__in=affected_team_ids).update(
+    # Admin edits/deletions still recalculate all affected teams by default.
+    if score_unchanged and newly_solved_team_id is not None:
+        affected_teams = Team.objects.filter(pk=newly_solved_team_id)
+    else:
+        affected_teams = Team.objects.filter(pk__in=affected_team_ids)
+    affected_teams.update(
         team_score=Coalesce(
             Subquery(team_totals),
             Value(Decimal("0")),
