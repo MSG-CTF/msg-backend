@@ -624,62 +624,80 @@ def get_current_cell_candidates(team):
     cell = state.position
     if cell.type != Cell.CellType.CHALLENGE or not cell.difficulty:
         return state, cell, []
-    if TeamChallengeAccess.objects.filter(team=team, source_cell=cell).exists():
-        TeamCellCandidate.objects.filter(team=team, cell=cell).delete()
-        return state, cell, []
 
-    opened_challenge_ids = TeamChallengeAccess.objects.filter(team=team).values_list(
-        "challenge_id", flat=True
-    )
-
-    TeamCellCandidate.objects.filter(team=team, cell=cell).filter(
-        Q(challenge_id__in=opened_challenge_ids)
-        | Q(status=TeamCellCandidate.Status.OFFERED, challenge__is_published=False)
-    ).delete()
-
-    existing_candidates = list(
-        TeamCellCandidate.objects.filter(team=team, cell=cell)
-        .select_related("challenge", "challenge__board_meta")
-        .order_by("display_order")
-    )
-
-    missing_count = CHALLENGE_CANDIDATE_COUNT - len(existing_candidates)
-    if missing_count > 0:
-        existing_challenge_ids = [
-            candidate.challenge_id for candidate in existing_candidates
-        ]
-        available_challenges = list(
-            Challenge.objects.filter(
-                difficulty=cell.difficulty, board_meta__isnull=False, is_published=True
-            )
-            .exclude(challenge_id__in=opened_challenge_ids)
-            .exclude(challenge_id__in=existing_challenge_ids)
-            .select_related("board_meta")
-            .order_by("board_meta__challenge_number")
+    with transaction.atomic():
+        # 최초 후보 생성은 쓰기이므로, 같은 팀의 동시 조회를 보드 상태 행 잠금으로
+        # 직렬화한다. 잠금 없이는 두 요청이 모두 "후보 0개"를 읽고 같은 display_order를
+        # INSERT해 유니크 제약 충돌(500)이 났다. 잠금 순서는 다른 보드 쓰기와 동일하다.
+        state = (
+            TeamBoardState.objects.select_for_update(of=("self",))
+            .select_related("position")
+            .get(team=team)
         )
-        selected_challenges = random.sample(
-            available_challenges, min(missing_count, len(available_challenges))
+        if PendingDiceRoll.objects.filter(team=team).exists():
+            raise PendingRollUnresolved()
+
+        cell = state.position
+        if cell.type != Cell.CellType.CHALLENGE or not cell.difficulty:
+            return state, cell, []
+        if TeamChallengeAccess.objects.filter(team=team, source_cell=cell).exists():
+            TeamCellCandidate.objects.filter(team=team, cell=cell).delete()
+            return state, cell, []
+
+        opened_challenge_ids = TeamChallengeAccess.objects.filter(
+            team=team
+        ).values_list("challenge_id", flat=True)
+
+        TeamCellCandidate.objects.filter(team=team, cell=cell).filter(
+            Q(challenge_id__in=opened_challenge_ids)
+            | Q(status=TeamCellCandidate.Status.OFFERED, challenge__is_published=False)
+        ).delete()
+
+        existing_candidates = list(
+            TeamCellCandidate.objects.filter(team=team, cell=cell)
+            .select_related("challenge", "challenge__board_meta")
+            .order_by("display_order")
         )
 
-        used_orders = {candidate.display_order for candidate in existing_candidates}
-        free_orders = [
-            order
-            for order in range(1, CHALLENGE_CANDIDATE_COUNT + 1)
-            if order not in used_orders
-        ]
-
-        for display_order, challenge in zip(free_orders, selected_challenges):
-            existing_candidates.append(
-                TeamCellCandidate.objects.create(
-                    team=team,
-                    cell=cell,
-                    challenge=challenge,
-                    display_order=display_order,
+        missing_count = CHALLENGE_CANDIDATE_COUNT - len(existing_candidates)
+        if missing_count > 0:
+            existing_challenge_ids = [
+                candidate.challenge_id for candidate in existing_candidates
+            ]
+            available_challenges = list(
+                Challenge.objects.filter(
+                    difficulty=cell.difficulty,
+                    board_meta__isnull=False,
+                    is_published=True,
                 )
+                .exclude(challenge_id__in=opened_challenge_ids)
+                .exclude(challenge_id__in=existing_challenge_ids)
+                .select_related("board_meta")
+                .order_by("board_meta__challenge_number")
+            )
+            selected_challenges = random.sample(
+                available_challenges, min(missing_count, len(available_challenges))
             )
 
-    existing_candidates.sort(key=lambda candidate: candidate.display_order)
-    return state, cell, existing_candidates
+            used_orders = {candidate.display_order for candidate in existing_candidates}
+            free_orders = [
+                order
+                for order in range(1, CHALLENGE_CANDIDATE_COUNT + 1)
+                if order not in used_orders
+            ]
+
+            for display_order, challenge in zip(free_orders, selected_challenges):
+                existing_candidates.append(
+                    TeamCellCandidate.objects.create(
+                        team=team,
+                        cell=cell,
+                        challenge=challenge,
+                        display_order=display_order,
+                    )
+                )
+
+        existing_candidates.sort(key=lambda candidate: candidate.display_order)
+        return state, cell, existing_candidates
 
 
 def open_current_cell_challenge(team, challenge_id):
