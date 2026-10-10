@@ -126,6 +126,32 @@ def _validate_containers(raw_containers):
     return containers
 
 
+def validate_healthcheck(healthcheck, container_ports):
+    if healthcheck is None:
+        return
+    if not isinstance(healthcheck, dict):
+        raise ReleaseValidationError("healthcheck 값이 올바르지 않습니다")
+    container = healthcheck.get("container")
+    port = healthcheck.get("port")
+    path = healthcheck.get("path")
+    if not isinstance(container, str) or container not in container_ports:
+        raise ReleaseValidationError("healthcheck.container가 선언된 컨테이너와 일치하지 않습니다")
+    if (
+        isinstance(port, bool)
+        or not isinstance(port, int)
+        or not 1 <= port <= 65535
+        or port not in container_ports[container]
+    ):
+        raise ReleaseValidationError("healthcheck.port가 컨테이너의 선언된 포트와 일치하지 않습니다")
+    if (
+        not isinstance(path, str)
+        or not path.startswith("/")
+        or len(path) > 1024
+        or any(char.isspace() or ord(char) < 32 or 127 <= ord(char) <= 159 for char in path)
+    ):
+        raise ReleaseValidationError("healthcheck.path 값이 올바르지 않습니다")
+
+
 def validate_release_payload(body):
     # 등록 요청 body에서 artifact 한 벌을 검증해 정제된 값으로 돌려준다
     if not isinstance(body, dict):
@@ -165,12 +191,14 @@ def validate_release_payload(body):
         workload = artifact.get("workload")
         if isinstance(workload, dict):
             healthcheck = workload.get("healthcheck")
-    if healthcheck is not None and not isinstance(healthcheck, dict):
-        raise ReleaseValidationError("healthcheck 값이 올바르지 않습니다")
-
     workload = artifact.get("workload")
     if not isinstance(workload, dict):
         raise ReleaseValidationError("workload 값이 올바르지 않습니다")
+    containers = _validate_containers(workload.get("containers"))
+    validate_healthcheck(
+        healthcheck,
+        {container["name"]: [entry["port"] for entry in container["ports"]] for container in containers},
+    )
 
     registry_revision = _require_positive_int(
         artifact.get("registry_revision"), "registry_revision"
@@ -203,7 +231,7 @@ def validate_release_payload(body):
         ),
         "healthcheck": healthcheck,
         "source_ref": _require_string(artifact.get("source_ref"), "source_ref"),
-        "containers": _validate_containers(workload.get("containers")),
+        "containers": containers,
         "note": note,
     }
 

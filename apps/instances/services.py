@@ -150,7 +150,11 @@ def serialize_release_container(container):
 
 
 def validate_release_for_scheduler(release):
-    from apps.instances.releases import has_sufficient_container_resources
+    from apps.instances.releases import (
+        ReleaseValidationError,
+        has_sufficient_container_resources,
+        validate_healthcheck,
+    )
 
     containers = list(release.containers.all())
 
@@ -207,6 +211,14 @@ def validate_release_for_scheduler(release):
             "PWN 릴리스는 포트가 하나인 공개 컨테이너를 정확히 하나 사용해야 합니다.",
             400,
         )
+
+    try:
+        validate_healthcheck(
+            release.healthcheck,
+            {container.name: release_container_ports(container) for container in containers},
+        )
+    except ReleaseValidationError as error:
+        raise SchedulerError("RELEASE_NOT_DEPLOYABLE", error.message, 400) from error
 
 
 def normalize_scheduler_endpoints(raw_endpoints):
