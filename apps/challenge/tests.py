@@ -15,7 +15,7 @@ from apps.accounts.models import Team, User
 from apps.board.models import Cell, TeamBoardState, TeamChallengeAccess
 from apps.board.services import get_or_create_board_state
 from apps.challenge.models import Challenge, FlagSubmissionLock, Solve
-from apps.challenge.services import hash_flag
+from apps.challenge.services import hash_flag, update_dynamic_score_and_team_scores
 from apps.ranking.models import LineMonopoly
 from apps.teams.models import MileageHistory, MileageType
 
@@ -411,6 +411,34 @@ class ChallengeSubmitTests(TestCase):
         self.assertEqual(self.challenge.current_score, Decimal("991"))
         self.assertEqual(self.team.team_score, Decimal("991"))
         self.assertEqual(other_team.team_score, Decimal("991"))
+
+    def test_score_recalculation_uses_constant_queries_and_preserves_other_scores(self):
+        other_challenge = Challenge.objects.create(
+            title="Other score", category="WEB", difficulty="EASY",
+            flag_hash="unused", score=125, current_score=Decimal("125.50"),
+        )
+        unaffected_team = Team.objects.create(team_name="unaffected", team_score=77)
+        teams = []
+        for count in (1, 10, 100):
+            with self.subTest(team_count=count):
+                new_teams = [Team(team_name=f"score-team-{index}") for index in range(len(teams), count)]
+                Team.objects.bulk_create(new_teams)
+                Solve.objects.bulk_create([
+                    Solve(team=team, challenge=challenge, earned_score=0, earned_mileage=0)
+                    for team in new_teams
+                    for challenge in (self.challenge, other_challenge)
+                ])
+                teams.extend(new_teams)
+                with self.assertNumQueries(3):
+                    current_score = update_dynamic_score_and_team_scores(self.challenge)
+                self.assertEqual(
+                    set(Team.objects.filter(pk__in=[team.pk for team in teams]).values_list("team_score", flat=True)),
+                    {current_score + Decimal("125.50")},
+                )
+                unaffected_team.refresh_from_db()
+                self.assertEqual(unaffected_team.team_score, Decimal("77"))
+                with self.assertNumQueries(3):
+                    self.assertEqual(update_dynamic_score_and_team_scores(self.challenge), current_score)
 
     def test_submission_failure_rolls_back_solve_score_and_mileage(self):
         with patch(
