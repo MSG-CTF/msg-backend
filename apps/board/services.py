@@ -218,13 +218,12 @@ def get_consumed_indexes(team):
 
 def is_board_completed(team, *, consumed_indexes=None):
     if consumed_indexes is not None:
-        return (
-            sum(
-                START_CELL_INDEX < index <= LAST_CELL_INDEX
-                for index in consumed_indexes
-            )
-            >= BOARD_SIZE - 1
-        )
+        completed_indexes = {
+            index
+            for index in consumed_indexes
+            if START_CELL_INDEX < index <= LAST_CELL_INDEX
+        }
+        return len(completed_indexes) >= BOARD_SIZE - 1
     return (
         TeamCellConsumption.objects.filter(
             team=team,
@@ -300,27 +299,27 @@ def consume_cell(team, cell):
     return created
 
 
-def compute_start_reward(passed_start, landed_on_start):
-    reached_start = passed_start or landed_on_start
+def compute_start_reward(start_pass_count, landed_on_start):
+    rewarded_passes = max(start_pass_count, int(landed_on_start))
     return {
-        "mileage_gained": START_PASS_MILEAGE_REWARD if reached_start else 0,
+        "mileage_gained": START_PASS_MILEAGE_REWARD * rewarded_passes,
         "roll_gained": START_ROLL_BONUS if landed_on_start else 0,
     }
 
 
-def finalize_landing(team, state, cell, passed_start, landed_on_start):
+def finalize_landing(team, state, cell, start_pass_count, landed_on_start):
     """칸 도착을 확정한다: 위치 갱신, 칸 소모, START 보상 지급."""
     state.position = cell
-    if passed_start:
+    if start_pass_count:
         state.has_passed_start = True
     consume_cell(team, cell)
 
-    reward = compute_start_reward(passed_start, landed_on_start)
+    reward = compute_start_reward(start_pass_count, landed_on_start)
     update_fields = ["position", "updated_at"]
     if is_board_completed(team):
         state.next_dice_reset_at = None
         update_fields.append("next_dice_reset_at")
-    if passed_start:
+    if start_pass_count:
         update_fields.append("has_passed_start")
     if reward["roll_gained"]:
         reward["roll_gained"] = grant_dice_roll(state, reward["roll_gained"])
@@ -343,30 +342,38 @@ def _step(cursor, direction):
 
 
 def compute_movement(consumed_indexes, from_index, steps, direction=1):
-    """물리 거리(steps)만큼 이동한 칸이 이미 소모됐으면, 소모되지 않은 칸이 나올 때까지 같은 방향으로 계속 진행한다."""
+    """소모되지 않은 칸을 기준으로 steps칸 이동하고, 지나간 실제 경로를 반환한다."""
+    consumed_indexes = set(consumed_indexes)
     movement_path = []
+    skipped_cells = []
     cursor = from_index
-    passed_start = False
+    start_pass_count = 0
+    remaining_completion_indexes = (
+        set(range(START_CELL_INDEX + 1, LAST_CELL_INDEX + 1)) - consumed_indexes
+    )
+    final_completion_index = (
+        next(iter(remaining_completion_indexes))
+        if len(remaining_completion_indexes) == 1
+        else None
+    )
 
     for _ in range(steps):
-        cursor = _step(cursor, direction)
-        if cursor == START_CELL_INDEX:
-            passed_start = True
-        movement_path.append(cursor)
+        guard = 0
+        while True:
+            cursor = _step(cursor, direction)
+            if cursor == START_CELL_INDEX:
+                start_pass_count += 1
+            movement_path.append(cursor)
+            if cursor not in consumed_indexes:
+                break
+            skipped_cells.append(cursor)
+            guard += 1
+            if guard >= BOARD_SIZE:
+                raise BoardNotReady()
+        if cursor == final_completion_index:
+            break
 
-    skipped_cells = []
-    guard = 0
-    while cursor in consumed_indexes:
-        skipped_cells.append(cursor)
-        cursor = _step(cursor, direction)
-        if cursor == START_CELL_INDEX:
-            passed_start = True
-        movement_path.append(cursor)
-        guard += 1
-        if guard > BOARD_SIZE:
-            raise BoardNotReady()
-
-    return cursor, movement_path, skipped_cells, passed_start
+    return cursor, movement_path, skipped_cells, start_pass_count
 
 
 def get_usable_post_roll_card(team):
@@ -417,9 +424,10 @@ def roll_dice(team):
         previous_position = state.position_id
 
         consumed = get_consumed_indexes(team)
-        destination, movement_path, skipped_cells, passed_start = compute_movement(
+        destination, movement_path, skipped_cells, start_pass_count = compute_movement(
             consumed, previous_position, rolled_number
         )
+        passed_start = start_pass_count > 0
         landed_on_start = destination == START_CELL_INDEX
         destination_cell = Cell.objects.get(cell_index=destination)
         board_event_code = get_event_for_cell(destination_cell)
@@ -448,10 +456,11 @@ def roll_dice(team):
                     "movement_path": movement_path,
                     "skipped_cells": skipped_cells,
                     "passed_start": passed_start,
+                    "start_pass_count": start_pass_count,
                     "board_event_code": board_event_code,
                 },
             )
-            start_reward = compute_start_reward(passed_start, landed_on_start)
+            start_reward = compute_start_reward(start_pass_count, landed_on_start)
             return {
                 "dice_a": dice_a,
                 "dice_b": dice_b,
@@ -472,7 +481,7 @@ def roll_dice(team):
             }
 
         start_reward = finalize_landing(
-            team, state, destination_cell, passed_start, landed_on_start
+            team, state, destination_cell, start_pass_count, landed_on_start
         )
 
     return {
@@ -508,8 +517,9 @@ def confirm_dice_roll(team):
 
         destination_cell = Cell.objects.get(cell_index=pending.candidate_position)
         landed_on_start = pending.candidate_position == START_CELL_INDEX
+        start_pass_count = pending.start_pass_count or int(pending.passed_start)
         start_reward = finalize_landing(
-            team, state, destination_cell, pending.passed_start, landed_on_start
+            team, state, destination_cell, start_pass_count, landed_on_start
         )
 
         result = {
@@ -1078,7 +1088,7 @@ def _effect_reroll(team, state, draw, payload):
     dice_b = random.randint(1, 6)
     rolled_number = dice_a + dice_b
     consumed = get_consumed_indexes(team)
-    destination, movement_path, skipped_cells, passed_start = compute_movement(
+    destination, movement_path, skipped_cells, start_pass_count = compute_movement(
         consumed, previous_position, rolled_number
     )
     landed_on_start = destination == START_CELL_INDEX
@@ -1097,7 +1107,7 @@ def _effect_reroll(team, state, draw, payload):
     draw.save(update_fields=["used_at"])
     pending.delete()
 
-    finalize_landing(team, state, destination_cell, passed_start, landed_on_start)
+    finalize_landing(team, state, destination_cell, start_pass_count, landed_on_start)
 
     return {
         "card_id": draw.card_id,
@@ -1125,7 +1135,7 @@ def _effect_roll_twice_choose(team, state, draw, payload):
     second_number = second_a + second_b
     previous_position = state.position_id
     consumed = get_consumed_indexes(team)
-    destination, movement_path, skipped_cells, passed_start = compute_movement(
+    destination, movement_path, skipped_cells, start_pass_count = compute_movement(
         consumed, previous_position, first_number
     )
     second_destination, _, _, _ = compute_movement(
@@ -1160,7 +1170,8 @@ def _effect_roll_twice_choose(team, state, draw, payload):
         candidate_position=destination,
         movement_path=movement_path,
         skipped_cells=skipped_cells,
-        passed_start=passed_start,
+        passed_start=start_pass_count > 0,
+        start_pass_count=start_pass_count,
         board_event_code=get_event_for_cell(destination_cell),
     )
 
@@ -1193,10 +1204,12 @@ def _effect_move_offset(team, state, draw, payload):
     base_position = pending.candidate_position
     consumed = get_consumed_indexes(team)
     direction = 1 if offset > 0 else -1
-    destination, movement_path, skipped_cells, extra_passed_start = compute_movement(
+    destination, movement_path, skipped_cells, extra_start_pass_count = compute_movement(
         consumed, base_position, abs(offset), direction=direction
     )
-    passed_start = pending.passed_start or extra_passed_start
+    start_pass_count = (
+        pending.start_pass_count or int(pending.passed_start)
+    ) + extra_start_pass_count
     landed_on_start = destination == START_CELL_INDEX
     destination_cell = Cell.objects.get(cell_index=destination)
 
@@ -1204,7 +1217,7 @@ def _effect_move_offset(team, state, draw, payload):
     draw.save(update_fields=["used_at"])
     pending.delete()
 
-    finalize_landing(team, state, destination_cell, passed_start, landed_on_start)
+    finalize_landing(team, state, destination_cell, start_pass_count, landed_on_start)
 
     return {
         "card_id": draw.card_id,
@@ -1361,7 +1374,7 @@ def confirm_chance_choice(team, choice):
         )
         previous_position = pending.previous_position
         consumed = get_consumed_indexes(team)
-        destination, movement_path, skipped_cells, passed_start = compute_movement(
+        destination, movement_path, skipped_cells, start_pass_count = compute_movement(
             consumed, previous_position, chosen_number
         )
         landed_on_start = destination == START_CELL_INDEX
@@ -1375,7 +1388,9 @@ def confirm_chance_choice(team, choice):
         )
         pending.delete()
 
-        finalize_landing(team, state, destination_cell, passed_start, landed_on_start)
+        finalize_landing(
+            team, state, destination_cell, start_pass_count, landed_on_start
+        )
 
     return {
         "card_id": draw.card_id,
