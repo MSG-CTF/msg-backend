@@ -87,8 +87,7 @@ def scheduler_auth_header(request=None):
 def get_active_instance(user):
     # 현재 사용자의 최신 활성 인스턴스 한 개를 조회한다
     return (
-        Instance.objects
-        .filter(user=user, status__in=ACTIVE_INSTANCE_STATUSES)
+        Instance.objects.filter(user=user, status__in=ACTIVE_INSTANCE_STATUSES)
         .select_related("challenge")
         .order_by("-created_at")
         .first()
@@ -485,7 +484,9 @@ def update_instance_from_scheduler(instance, scheduler_data):
         update_fields.append("expires_at")
 
     if "hard_expires_at" in scheduler_data:
-        instance.hard_expires_at = parse_scheduler_datetime(scheduler_data.get("hard_expires_at"))
+        instance.hard_expires_at = parse_scheduler_datetime(
+            scheduler_data.get("hard_expires_at")
+        )
         update_fields.append("hard_expires_at")
 
     instance.save(update_fields=update_fields)

@@ -1252,7 +1252,7 @@ class ReleaseInstanceCreateTests(ReleaseTestBase):
         }
 
         self.auth("player")
-        res = self.client.get("/api/v1/teams/me/instance")
+        res = self.client.get("/api/v1/teams/me/instances")
 
         self.assertEqual(res.status_code, 503)
         self.assertEqual(res.data["code"], "SCHEDULER_UNAVAILABLE")
