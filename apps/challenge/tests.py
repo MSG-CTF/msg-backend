@@ -239,6 +239,28 @@ class ChallengeSubmitTests(TestCase):
         self.assertEqual(self.team.mileage, 0)
         self.assertFalse(MileageHistory.objects.filter(team=self.team).exists())
 
+    def test_flag_change_between_precheck_and_lock_is_revalidated(self):
+        calls = []
+
+        def verify(flag, flag_hash):
+            calls.append((flag, flag_hash))
+            if len(calls) == 1:
+                Challenge.objects.filter(pk=self.challenge.pk).update(
+                    flag_hash=hash_flag("MSG{changed_flag}")
+                )
+                return True
+            return False
+
+        with patch("apps.challenge.views.is_correct_flag", side_effect=verify):
+            response = self.submit("MSG{correct_flag}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["code"], "INCORRECT_FLAG")
+        self.assertEqual(len(calls), 2)
+        self.assertFalse(
+            Solve.objects.filter(team=self.team, challenge=self.challenge).exists()
+        )
+
     def test_locked_submission_is_rejected_without_scoring(self):
         # 락 상태에서는 정답을 제출해도 채점하지 않고 429를 반환한다
         FlagSubmissionLock.objects.create(

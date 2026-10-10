@@ -117,7 +117,7 @@ class ChallengeSubmitView(APIView):
             return fail("USER_HAS_NO_TEAM", "소속된 팀이 없습니다", 404)
 
         flag = request.data.get("flag")
-        if not flag:
+        if not isinstance(flag, str) or not flag or len(flag) > 512:
             return fail("INVALID_REQUEST", "요청 값이 올바르지 않습니다", 400)
 
         challenge = Challenge.objects.filter(challenge_id=challenge_id).first()
@@ -131,12 +131,58 @@ class ChallengeSubmitView(APIView):
             return fail("CHALLENGE_LOCKED", "아직 개방되지 않은 문제입니다.", 403)
 
         now = timezone.now()
-        submitted_flag_hash = hash_flag(flag)
+        initial_flag_hash = challenge.flag_hash
+        existing_flag_lock = FlagSubmissionLock.objects.filter(
+            team=team,
+            challenge=challenge,
+        ).first()
+        submitted_flag_hash = None
+        is_flag_correct = None
+        if not (
+            existing_flag_lock
+            and existing_flag_lock.locked_until
+            and existing_flag_lock.locked_until > now
+        ):
+            submitted_flag_hash = hash_flag(flag)
+            is_flag_correct = is_correct_flag(flag, initial_flag_hash)
 
         with transaction.atomic():
             # Match board mutations: state precedes access and team locks.
             TeamBoardState.objects.select_for_update().filter(team=team).first()
             challenge = Challenge.objects.select_for_update().get(pk=challenge.pk)
+            flag_lock, _ = FlagSubmissionLock.objects.select_for_update().get_or_create(
+                team=team,
+                challenge=challenge,
+            )
+
+            if flag_lock.locked_until and flag_lock.locked_until > now:
+                FlagSubmission.objects.create(
+                    team=team,
+                    user=request.user,
+                    challenge=challenge,
+                    submitted_flag_hash="",
+                    result=FlagSubmission.SubmissionResult.TOO_MANY_ATTEMPTS,
+                )
+                retry_after_seconds = int(
+                    (flag_lock.locked_until - now).total_seconds()
+                )
+                return fail(
+                    "TOO_MANY_ATTEMPTS",
+                    "잘못된 플래그를 3회 연속 제출했습니다. 30초 후 다시 시도해주세요.",
+                    429,
+                    {"retry_after_seconds": retry_after_seconds},
+                )
+
+            if flag_lock.locked_until and flag_lock.locked_until <= now:
+                flag_lock.failed_count = 0
+                flag_lock.locked_until = None
+
+            if submitted_flag_hash is None:
+                submitted_flag_hash = hash_flag(flag)
+                is_flag_correct = is_correct_flag(flag, initial_flag_hash)
+            if challenge.flag_hash != initial_flag_hash:
+                is_flag_correct = is_correct_flag(flag, challenge.flag_hash)
+
             # The challenge lock stabilizes the next score before selecting team locks.
             next_score = calculate_dynamic_score(
                 challenge.initial_score,
@@ -157,37 +203,10 @@ class ChallengeSubmitView(APIView):
                 .filter(pk__in=affected_team_ids)
                 .order_by("pk")
             )
-            flag_lock, _ = FlagSubmissionLock.objects.select_for_update().get_or_create(
-                team=team,
-                challenge=challenge,
-            )
-
             if Solve.objects.filter(team=team, challenge=challenge).exists():
                 return fail("ALREADY_SOLVED", "이미 정답을 맞춘 문제입니다.", 409)
 
-            if flag_lock.locked_until and flag_lock.locked_until > now:
-                retry_after_seconds = int(
-                    (flag_lock.locked_until - now).total_seconds()
-                )
-                FlagSubmission.objects.create(
-                    team=team,
-                    user=request.user,
-                    challenge=challenge,
-                    submitted_flag_hash=submitted_flag_hash,
-                    result=FlagSubmission.SubmissionResult.TOO_MANY_ATTEMPTS,
-                )
-                return fail(
-                    "TOO_MANY_ATTEMPTS",
-                    "잘못된 플래그를 3회 연속 제출했습니다. 30초 후 다시 시도해주세요.",
-                    429,
-                    {"retry_after_seconds": retry_after_seconds},
-                )
-
-            if flag_lock.locked_until and flag_lock.locked_until <= now:
-                flag_lock.failed_count = 0
-                flag_lock.locked_until = None
-
-            if not is_correct_flag(flag, challenge.flag_hash):
+            if not is_flag_correct:
                 flag_lock.failed_count += 1
                 flag_lock.last_failed_at = now
 
