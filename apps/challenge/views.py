@@ -32,6 +32,7 @@ from apps.accounts.models import Team
 from apps.board.models import TeamBoardState, TeamChallengeAccess
 from apps.board.services import complete_challenge_from_submission
 from apps.ranking.services import check_and_record_line_monopoly
+from apps.ranking.scoring import calculate_dynamic_score
 from apps.teams.models import MileageHistory, MileageType
 
 
@@ -136,14 +137,21 @@ class ChallengeSubmitView(APIView):
             # Match board mutations: state precedes access and team locks.
             TeamBoardState.objects.select_for_update().filter(team=team).first()
             challenge = Challenge.objects.select_for_update().get(pk=challenge.pk)
-            # Lock all affected teams in UUID order before any mileage/score writes
-            # or FK inserts. NO KEY UPDATE allows unrelated FK references on PG.
-            affected_team_ids = set(
-                Solve.objects.filter(challenge=challenge).values_list(
-                    "team_id", flat=True
-                )
+            # The challenge lock stabilizes the next score before selecting team locks.
+            next_score = calculate_dynamic_score(
+                challenge.initial_score,
+                challenge.minimum_score,
+                challenge.decay,
+                Solve.objects.filter(challenge=challenge).count() + 1,
             )
-            affected_team_ids.add(team.pk)
+            affected_team_ids = {team.pk}
+            if next_score != challenge.current_score:
+                affected_team_ids.update(
+                    Solve.objects.filter(challenge=challenge).values_list(
+                        "team_id", flat=True
+                    )
+                )
+            # Preserve UUID lock order; NO KEY UPDATE permits unrelated FK inserts.
             list(
                 Team.objects.select_for_update(no_key=True)
                 .filter(pk__in=affected_team_ids)

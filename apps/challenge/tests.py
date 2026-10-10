@@ -488,6 +488,51 @@ class ChallengeSubmitTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(recalculate.call_args.kwargs, {"newly_solved_team_id": self.team.pk})
 
+    @skipUnless(connection.vendor == "postgresql", "Requires PostgreSQL row locks")
+    def test_submit_locks_only_new_team_when_score_unchanged(self):
+        self._assert_submit_team_lock_count(score_unchanged=True)
+
+    @skipUnless(connection.vendor == "postgresql", "Requires PostgreSQL row locks")
+    def test_submit_locks_only_new_team_when_rounding_keeps_score_unchanged(self):
+        self._assert_submit_team_lock_count(score_unchanged=True, at_floor=False)
+
+    @skipUnless(connection.vendor == "postgresql", "Requires PostgreSQL row locks")
+    def test_submit_locks_existing_teams_when_score_changes(self):
+        self._assert_submit_team_lock_count(score_unchanged=False)
+
+    def _assert_submit_team_lock_count(self, *, score_unchanged, at_floor=True):
+        current_score = 1000 if score_unchanged else 998
+        self.challenge.minimum_score = (
+            (1000 if at_floor else 600) if score_unchanged else 100
+        )
+        self.challenge.decay = 20 if at_floor else 70
+        self.challenge.current_score = current_score
+        self.challenge.save(update_fields=["minimum_score", "decay", "current_score"])
+        existing_team = Team.objects.create(
+            team_name="existing-solver", team_score=current_score
+        )
+        Solve.objects.create(
+            team=existing_team, challenge=self.challenge,
+            earned_score=current_score, earned_mileage=0,
+        )
+        locked_rows = []
+
+        def track_team_locks(execute, sql, params, many, context):
+            result = execute(sql, params, many, context)
+            if 'FROM "teams"' in sql and "FOR NO KEY UPDATE" in sql:
+                locked_rows.append(context["cursor"].rowcount)
+            return result
+
+        with connection.execute_wrapper(track_team_locks):
+            response = self.submit("MSG{correct_flag}")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(locked_rows, [1 if score_unchanged else 2])
+        existing_team.refresh_from_db()
+        self.team.refresh_from_db()
+        expected_score = Decimal("1000" if score_unchanged else "991")
+        self.assertEqual(existing_team.team_score, expected_score)
+        self.assertEqual(self.team.team_score, expected_score)
+
     def test_submission_failure_rolls_back_solve_score_and_mileage(self):
         with patch(
             "apps.challenge.views.update_dynamic_score_and_team_scores",
@@ -597,6 +642,58 @@ class ChallengeSubmitTests(TestCase):
 @skipUnless(connection.vendor == "postgresql", "Requires PostgreSQL row locking")
 @override_settings(CACHES=LOCMEM, SECURE_SSL_REDIRECT=False)
 class ConcurrentChallengeSubmitTests(TransactionTestCase):
+    def test_duplicate_submissions_at_score_floor_reward_once(self):
+        team = Team.objects.create(team_name="duplicate-floor")
+        user = User.objects.create_user(
+            login_id="duplicate-floor", nickname="duplicate-floor", team=team
+        )
+        challenge = Challenge.objects.create(
+            title="floor", category="WEB", difficulty="EASY", score=1000,
+            initial_score=1000, minimum_score=1000, decay=20, current_score=1000,
+            flag_hash=hash_flag("MSG{floor}"), is_published=True,
+        )
+        cell = Cell.objects.create(
+            cell_index=1, type=Cell.CellType.CHALLENGE, name="floor"
+        )
+        access = TeamChallengeAccess.objects.create(
+            team=team, challenge=challenge, source_cell=cell
+        )
+        TeamBoardState.objects.create(
+            team=team, position=cell, active_challenge_access=access, dice_rolls_left=0
+        )
+        barrier = Barrier(2)
+
+        def submit(_):
+            close_old_connections()
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute("SET lock_timeout = '5s'")
+                    cursor.execute("SET statement_timeout = '10s'")
+                client = APIClient()
+                client.force_authenticate(user=User.objects.get(pk=user.pk))
+                barrier.wait(timeout=10)
+                response = client.post(
+                    f"/api/v1/challenges/{challenge.pk}/submit",
+                    {"flag": "MSG{floor}"}, format="json",
+                )
+                return response.status_code, response.data
+            finally:
+                connections.close_all()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(submit, range(2)))
+        self.assertEqual(sorted(status for status, _ in results), [200, 409], results)
+        self.assertEqual(Solve.objects.filter(challenge=challenge).count(), 1)
+        self.assertEqual(
+            MileageHistory.objects.filter(
+                team=team, type=MileageType.CHALLENGE_SOLVE
+            ).count(), 1,
+        )
+        team.refresh_from_db()
+        self.assertEqual(team.team_score, Decimal("1000"))
+        self.assertEqual(team.mileage, 30)
+        self.assertEqual(team.board_state.dice_rolls_left, 1)
+
     def test_due_recharge_and_solve_reward_are_applied_once_when_requests_overlap(self):
         team = Team.objects.create(team_name="recharge-and-solve")
         user = User.objects.create_user(
@@ -823,6 +920,12 @@ class ConcurrentChallengeSubmitTests(TransactionTestCase):
     def test_cross_team_solves_on_different_challenges_finish_with_consistent_scores(
         self,
     ):
+        self._assert_cross_team_solves_finish(scores_constant=False)
+
+    def test_cross_team_solves_at_score_floor_finish_with_consistent_scores(self):
+        self._assert_cross_team_solves_finish(scores_constant=True)
+
+    def _assert_cross_team_solves_finish(self, *, scores_constant):
         teams = [Team.objects.create(team_name=f"concurrent-{i}") for i in range(3)]
         users = [
             User.objects.create_user(
@@ -837,15 +940,15 @@ class ConcurrentChallengeSubmitTests(TransactionTestCase):
                 difficulty=Challenge.DifficultyType.EASY,
                 score=1000,
                 initial_score=1000,
-                minimum_score=100,
+                minimum_score=1000 if scores_constant else 100,
                 decay=20,
-                current_score=991,
+                current_score=1000 if scores_constant else 991,
                 flag_hash=hash_flag("MSG{concurrent}"),
                 is_published=True,
             )
             for i in range(3)
         ]
-        # Every new solve affects all teams, with a different submitting team.
+        # Each team already solved the other two problems before concurrent requests.
         for i, challenge in enumerate(challenges):
             cell = Cell.objects.create(
                 cell_index=i + 1, type=Cell.CellType.CHALLENGE, name=str(i)
@@ -868,6 +971,9 @@ class ConcurrentChallengeSubmitTests(TransactionTestCase):
                         earned_score=1000,
                         earned_mileage=30,
                     )
+        Team.objects.filter(pk__in=[team.pk for team in teams]).update(
+            team_score=2000 if scores_constant else 1982
+        )
         barrier = Barrier(3)
 
         def submit(i):
@@ -907,9 +1013,13 @@ class ConcurrentChallengeSubmitTests(TransactionTestCase):
         self.assertEqual(MileageHistory.objects.count(), 3)
         for challenge in challenges:
             challenge.refresh_from_db()
-            self.assertEqual(challenge.current_score, Decimal("980"))
+            self.assertEqual(
+                challenge.current_score, Decimal("1000" if scores_constant else "980")
+            )
         for team in teams:
             team.refresh_from_db()
-            self.assertEqual(team.team_score, Decimal("2940"))
+            self.assertEqual(
+                team.team_score, Decimal("3000" if scores_constant else "2940")
+            )
             self.assertEqual(team.mileage, 30)
             self.assertEqual(team.board_state.dice_rolls_left, 1)
