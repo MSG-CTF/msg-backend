@@ -43,10 +43,10 @@ class LineMonopolyCompletionTests(TestCase):
                 status=TeamChallengeAccess.Status.CLEARED,
             )
 
-    def test_special_cell_visit_is_required_for_line_completion(self):
+    def test_special_cell_visit_is_not_required_for_line_completion(self):
         self.clear_challenges()
 
-        self.assertFalse(is_line_monopoly_completed(self.team, 3))
+        self.assertTrue(is_line_monopoly_completed(self.team, 3))
 
         TeamCellConsumption.objects.create(team=self.team, cell=self.special_cell)
 

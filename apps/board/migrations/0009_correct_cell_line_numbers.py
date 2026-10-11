@@ -33,7 +33,7 @@ def restore_challenge_only_line_numbers(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-    dependencies = [("board", "0007_cell_line_number_matches_type")]
+    dependencies = [("board", "0008_pendingdiceroll_start_pass_count")]
 
     operations = [
         migrations.RemoveConstraint(

@@ -83,7 +83,7 @@ class LineMonopolyTests(TestCase):
 
 
 class SpecialCellLineMonopolyTests(TestCase):
-    def test_special_cell_visit_can_complete_and_award_a_line(self):
+    def test_special_cell_visit_does_not_affect_line_award(self):
         team = Team.objects.create(team_name="특수칸 포함 팀")
         challenge_cells = [
             Cell.objects.create(
@@ -126,9 +126,12 @@ class SpecialCellLineMonopolyTests(TestCase):
             )
             last_challenge = challenge
 
-        self.assertIsNone(check_and_record_line_monopoly(team, last_challenge))
+        monopoly = check_and_record_line_monopoly(team, last_challenge)
+        self.assertIsNotNone(monopoly)
+        self.assertEqual(monopoly.earned_score, Decimal("225.00"))
 
         consume_cell(team, roulette)
 
-        monopoly = LineMonopoly.objects.get(team=team, line_number=3)
-        self.assertEqual(monopoly.earned_score, Decimal("225.00"))
+        self.assertEqual(
+            LineMonopoly.objects.filter(team=team, line_number=3).count(), 1
+        )

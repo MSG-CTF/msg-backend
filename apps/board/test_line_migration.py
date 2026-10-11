@@ -5,7 +5,7 @@ from django.test import TransactionTestCase
 
 class CellLineMigrationTestCase(TransactionTestCase):
     migrate_from = [("board", "0005_exclude_start_from_completion")]
-    migrate_to = [("board", "0008_correct_cell_line_numbers")]
+    migrate_to = [("board", "0009_correct_cell_line_numbers")]
 
     def setUp(self):
         executor = MigrationExecutor(connection)
