@@ -169,7 +169,7 @@ class PublishedChallengeTests(ReleaseTestBase):
         for item, kind in zip(self.artifacts, (PollerArtifact.Kind.RELEASE, PollerArtifact.Kind.USER_FILES)):
             PollerArtifact.objects.create(artifact_id=item["id"], kind=kind, payload=item, processed_at=timezone.now())
         other = artifact(13, "publish")
-        other["name"] = "web-other-88-1-abcdef-publish-bundle"
+        other["name"] = "web-imported-extra-88-1-abcdef-publish-bundle"
         PollerArtifact.objects.create(artifact_id=13, kind=PollerArtifact.Kind.RELEASE, payload=other, processed_at=timezone.now())
 
         response = self.import_body(self.body())
