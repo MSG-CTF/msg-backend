@@ -1,5 +1,8 @@
+import json
+import uuid
+
 from django.conf import settings
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 
 from apps.challenge.checker_dispatch import dispatch_submission
 from apps.challenge.exe_submissions import ExeSubmissionError, close_exe_submission
@@ -7,17 +10,45 @@ from apps.challenge.models import ExeSubmission
 
 
 class Command(BaseCommand):
-    help = "Process one bounded batch of persisted Windows jobs; execution is disabled by default."
+    help = "Dispatch one specified Windows job or process a bounded batch."
 
     def add_arguments(self, parser):
-        parser.add_argument("--limit", type=int, default=10)
+        scope = parser.add_mutually_exclusive_group()
+        scope.add_argument("--limit", type=int, default=10)
+        scope.add_argument(
+            "--submission-id",
+            type=uuid.UUID,
+            help="Dispatch/reconcile only this submission; do not run cleanup.",
+        )
 
     def handle(self, *args, **options):
         if not settings.EXE_DISPATCH_ENABLED or not settings.EXE_SUBMISSIONS_ENABLED:
             self.stdout.write("Windows execution is disabled")
             return
+        if options["submission_id"] is not None:
+            row = ExeSubmission.objects.filter(pk=options["submission_id"]).first()
+            if row is None:
+                raise CommandError("SUBMISSION_NOT_FOUND")
+            if row.config_snapshot.get("assignment_mode") != "broker_pool":
+                raise CommandError("LEGACY_EXECUTION_REQUIRES_REVIEW")
+            try:
+                row = dispatch_submission(row.pk)
+            except ExeSubmissionError as error:
+                raise CommandError(error.code) from None
+            self.stdout.write(
+                json.dumps({
+                    "submission_id": str(row.pk),
+                    "status": row.status,
+                    "dispatch_state": row.dispatch_state,
+                    "checker_job_id": row.checker_job_id,
+                    "last_error_code": row.last_error_code,
+                })
+            )
+            return
         limit = max(1, min(options["limit"], 100))
-        rows = ExeSubmission.objects.filter(config_snapshot__assignment_mode="broker_pool")
+        rows = ExeSubmission.objects.filter(
+            config_snapshot__assignment_mode="broker_pool"
+        ).exclude(config_snapshot__has_key="private_qa")
         ids = (
             rows.filter(status="ASSIGNED", finished_at__isnull=True)
             .order_by("created_at")

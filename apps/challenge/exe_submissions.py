@@ -11,7 +11,7 @@ from django.db import DatabaseError, transaction
 from django.db.models import Count, Q
 from django.utils import timezone
 
-from apps.accounts.models import Team, User
+from apps.accounts.models import Role, Team, User
 from apps.board.models import TeamChallengeAccess
 from apps.challenge.models import Challenge, ExeSubmission, Solve
 from apps.challenge.remote_run_config import (
@@ -145,9 +145,15 @@ def submission_team(user):
     return current.team
 
 
-def check_challenge_access(team, challenge):
+def check_challenge_access(team, challenge, *, private_qa=False):
+    if private_qa and challenge.is_published:
+        raise ExeSubmissionError(
+            "QA_REQUIRES_PRIVATE_CHALLENGE",
+            "Private QA requires an unpublished challenge.",
+            409,
+        )
     if (
-        not challenge.is_published
+        (not private_qa and not challenge.is_published)
         or not TeamChallengeAccess.objects.filter(
             team=team, challenge=challenge
         ).exists()
@@ -181,7 +187,47 @@ def attempt_counts(team_id, challenge_id):
     }
 
 
-def accept_exe(user, challenge_id, key, uploaded_file):
+def _check_qa_approval(user, team, approval, digest):
+    from apps.challenge.checker_auth import checker_configuration
+
+    fields = {
+        "user_id",
+        "team_id",
+        "approved_by",
+        "reference",
+        "payload_sha256",
+        "checker_commit_sha",
+        "config_version",
+    }
+    if (
+        not isinstance(approval, dict)
+        or set(approval) != fields
+        or not all(isinstance(value, str) for value in approval.values())
+        or approval["user_id"] != str(user.pk)
+        or approval["team_id"] != str(team.pk)
+        or user.role != Role.PARTICIPANT
+        or user.is_staff
+        or user.is_superuser
+        or approval["payload_sha256"] != digest
+        or not 1 <= len(approval["reference"].strip()) <= 500
+        or not approval["reference"].isprintable()
+        or not User.objects.filter(
+            login_id=approval["approved_by"], role=Role.ADMIN
+        ).exists()
+    ):
+        raise ExeSubmissionError("QA_APPROVAL_MISMATCH", "Check the approved QA scope.", 409)
+    _, _, pins = checker_configuration(
+        settings.EXE_WINDOWS_RUNTIME_POOL_ID, broker_pool=True
+    )
+    if any(
+        approval[name] != pins[name] for name in ("checker_commit_sha", "config_version")
+    ):
+        raise ExeSubmissionError(
+            "QA_EXECUTION_VERSION_CHANGED", "Check the approved execution version.", 409
+        )
+
+
+def accept_exe(user, challenge_id, key, uploaded_file, *, qa_approval=None):
     require_exe_enabled()
     try:
         key = uuid.UUID(key)
@@ -193,10 +239,13 @@ def accept_exe(user, challenge_id, key, uploaded_file):
     challenge = Challenge.objects.filter(pk=challenge_id).first()
     if challenge is None:
         raise ExeSubmissionError("CHALLENGE_NOT_FOUND", "Challenge not found.", 404)
-    check_challenge_access(team, challenge)
+    private_qa = qa_approval is not None
+    check_challenge_access(team, challenge, private_qa=private_qa)
     payload = uploaded_file.read(MAX_PAYLOAD_BYTES + 1)
     validate_executable(payload)
     digest = hashlib.sha256(payload).hexdigest()
+    if private_qa:
+        _check_qa_approval(user, team, qa_approval, digest)
     payload_key = None
     storage = None
     try:
@@ -232,7 +281,9 @@ def accept_exe(user, challenge_id, key, uploaded_file):
             if locked_team.is_banned:
                 raise ExeSubmissionError("TEAM_BANNED", "참가할 수 없는 팀입니다", 403)
             team = locked_team
-            check_challenge_access(team, challenge)
+            check_challenge_access(team, challenge, private_qa=private_qa)
+            if private_qa:
+                _check_qa_approval(member, team, qa_approval, digest)
             if (
                 ExeSubmission.objects.filter(
                     user_id=user.pk, challenge=challenge, idempotency_key=key
@@ -249,8 +300,10 @@ def accept_exe(user, challenge_id, key, uploaded_file):
                 team=team, challenge=challenge, idempotency_key=key
             ).first()
             if previous is not None:
-                if previous.payload_sha256 != digest or previous.payload_size != len(
-                    payload
+                if (
+                    previous.payload_sha256 != digest
+                    or previous.payload_size != len(payload)
+                    or previous.config_snapshot.get("private_qa") != qa_approval
                 ):
                     raise ExeSubmissionError(
                         "IDEMPOTENCY_KEY_CONFLICT",
@@ -258,6 +311,17 @@ def accept_exe(user, challenge_id, key, uploaded_file):
                         409,
                     )
                 return previous, False
+            if private_qa and ExeSubmission.objects.filter(
+                team=team,
+                challenge=challenge,
+                config_snapshot__private_qa__approved_by=qa_approval["approved_by"],
+                config_snapshot__private_qa__reference=qa_approval["reference"],
+            ).exists():
+                raise ExeSubmissionError(
+                    "QA_APPROVAL_ALREADY_USED",
+                    "Use the original submission for this QA approval.",
+                    409,
+                )
             if Solve.objects.filter(team=team, challenge=challenge).exists():
                 raise ExeSubmissionError(
                     "ALREADY_SOLVED", "The challenge is already solved.", 409
@@ -330,6 +394,7 @@ def accept_exe(user, challenge_id, key, uploaded_file):
                     "max_file_bytes": remote.max_file_bytes,
                     "rate_limit_seconds": remote.rate_limit_seconds,
                     "assignment_mode": "broker_pool",
+                    **({"private_qa": dict(qa_approval)} if private_qa else {}),
                 },
             )
         return submission, True
