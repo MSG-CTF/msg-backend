@@ -65,13 +65,46 @@ GET은 접수 확인용이며 RESULT를 대체하지 않는다. GET 404도 미�
 새 POST나 다른 VM에서 자동 재실행하지 않는다. Runtime DB와 Broker 이력의 운영자
 확인이 필요하고 그동안 파일과 추적 정보를 보존한다.
 
-현재 단계의 완료 범위는 무해한 EXE의 payload 전달과 RESULT 저장까지다.
 Broker의 RESET_REQUIRED나 RESULT의 cleanup_complete 힌트로 정리를 완료하지 않는다.
-실제 복구와 별도 CLEANUP(true) 확인 전에는 파일 삭제/추적 종료/같은 팀의 새 실행을
-허용하지 않는다. 따라서 RESULT 뒤 CLEANUP_PENDING은 이 단계의 예상 상태다.
-Runtime #97은 FLAG 주입, VM 이미지 복구와 CLEANUP(true)를 제공하지 않으므로 실제
-문제 운영이 미검증인 환경은 접수·전송 플래그를 False로 명시해 비활성으로 유지한다.
-복구와 정리 계약이 검증된 뒤 별도 활성화한다.
+완료된 broker_pool RESULT 뒤에는 제출 간격 제한을 지키면 같은 팀의 다음 EXE를
+접수할 수 있다. 이전 제출의 파일 삭제와 추적 종료에는 실제 복구 뒤 별도
+CLEANUP(true) 확인이 계속 필요하다. 따라서 RESULT 뒤 CLEANUP_PENDING은 예상 상태다.
+Runtime은 복구 담당자의 READY 통지를 받으면 Backend에 CLEANUP을 재시도한다.
+FLAG 주입과 VM 이미지 복구, 실제 문제 E2E 검증은 별도 운영 조건이다.
+
+Runtime은 CLEANUP 응답을 잃었을 때 아래 receipt API를 먼저 조회한다.
+요청 본문은 원래 CLEANUP 이벤트와 정확히 같아야 한다. 이 API는 상태를 변경하거나
+작업 토큰을 발급하지 않으며, 정리 완료 후에도 서비스 토큰으로 조회할 수 있다.
+
+```text
+POST /internal/v1/checker-submissions/{submission_id}/events/{event_id}/receipt
+Authorization: Bearer <this-backend-checker-service-token>
+Content-Type: application/json
+
+<original CLEANUP event JSON>
+```
+
+`data.accepted=true`는 같은 제출과 같은 본문이 저장됐다는 뜻이다. `false`면
+아직 기록이 없어 Runtime이 작업 토큰을 갱신해 같은 이벤트를 재전송한다.
+Backend의 receipt API와 DB 변경을 먼저 배포한 뒤 Runtime의 복구 이벤트 전달을
+활성화한다. 복구 담당자는 Broker가 해당 VM을 READY로 확정한 뒤 같은 execution ID와
+고정된 event ID로 Runtime 복구 API를 호출한다.
+
+## 무해한 EXE 한 건 연동 시험
+
+참가자용 액세스 토큰은 로컬 파일에 저장하고, 승인된 무해한 EXE와 실제 Windows 문제
+UUID를 지정해 다음 도구를 한 번 실행한다. 제출 전에 Backend와 Runtime 변경이 배포되고
+시험 VM이 READY인지 확인한다. 토큰 값은 명령줄과 로그에 넣지 않는다.
+
+```text
+py -3.10 tools/windows_one_submission_smoke.py --backend-origin https://msgctf.kr --challenge-id <Windows 문제 UUID> --exe-path <승인된 무해한 EXE 경로> --access-token-file <참가자 토큰 파일 경로>
+```
+
+도구는 idempotency key와 submission ID를 출력하고, 같은 제출의 RESULT와 별도
+CLEANUP 완료까지 조회한다. POST 응답이 불명확하면 새 요청을 만들지 말고 출력된
+idempotency key로 재시도한다. RESULT는 확인됐지만 CLEANUP을 기다리다 시간이
+초과되면 submission ID로 상태를 계속 조회한다. 상시 worker와 수동 전송 worker를
+동시에 실행하지 않는다.
 
 ## 이전 실행 기록
 

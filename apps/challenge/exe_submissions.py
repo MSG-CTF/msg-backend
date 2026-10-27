@@ -279,17 +279,27 @@ def accept_exe(user, challenge_id, key, uploaded_file):
                 error.wait = retry
                 error.data = {"retry_after_seconds": retry}
                 raise error
-            if (
-                ExeSubmission.objects.filter(team=team, challenge=challenge)
-                .filter(
-                    Q(status__in=["QUEUED", "ASSIGNED", "RUNNING", "START_UNKNOWN"])
-                    | Q(lease_id__isnull=False, lease_released_at__isnull=True)
-                )
+            prior = ExeSubmission.objects.filter(team=team, challenge=challenge)
+            active = prior.filter(
+                status__in=["QUEUED", "ASSIGNED", "RUNNING", "START_UNKNOWN"]
+            ).exists()
+            # A broker_pool RESULT ends this team's execution slot. Its VM still
+            # needs an independent CLEANUP report before the lease and payload
+            # can be released, while another READY VM may run the next job.
+            completed_pool_ids = prior.filter(
+                config_snapshot__assignment_mode="broker_pool",
+                status__in=["COMPLETED", "CRASH", "TIMEOUT", "INFRA_ERROR"],
+                finished_at__isnull=False,
+            ).values("pk")
+            unresolved_legacy_lease = (
+                prior.filter(lease_id__isnull=False, lease_released_at__isnull=True)
+                .exclude(pk__in=completed_pool_ids)
                 .exists()
-            ):
+            )
+            if active or unresolved_legacy_lease:
                 raise ExeSubmissionError(
                     "EXECUTION_IN_PROGRESS",
-                    "이전 실행의 종료와 정리를 기다려주세요",
+                    "이전 실행의 종료를 기다려주세요",
                     409,
                 )
             name = uploaded_file.name.replace("\\", "/").rsplit("/", 1)[-1]

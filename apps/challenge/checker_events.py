@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 import json
 import re
 import uuid
@@ -46,6 +48,27 @@ def utc_time(value):
         raise ExeSubmissionError(
             "INVALID_EVENT", "실행 결과 시각을 확인해주세요"
         ) from None
+
+
+def event_fingerprint(body):
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"))
+    # This identity must survive checker JWT signing-key rotation. Service and
+    # job authentication already protect the event APIs.
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def event_fingerprint_matches(stored, body):
+    if hmac.compare_digest(stored, event_fingerprint(body)):
+        return True
+    # Events saved before stable digests used a keyed fingerprint. Accept them
+    # while the old key is still configured, without changing existing rows.
+    legacy = salted_hmac(
+        "exe-event-v1",
+        json.dumps(body, sort_keys=True, separators=(",", ":")),
+        secret=signing_key(),
+        algorithm="sha256",
+    ).hexdigest()
+    return hmac.compare_digest(stored, legacy)
 
 
 def validate_event(body, *, broker_pool=False):
@@ -168,12 +191,7 @@ def apply_event(authenticated, body):
     broker_pool = authenticated.config_snapshot.get("assignment_mode") == "broker_pool"
     kind = validate_event(body, broker_pool=broker_pool)
     event_id = uuid.UUID(body["event_id"])
-    fingerprint = salted_hmac(
-        "exe-event-v1",
-        json.dumps(body, sort_keys=True, separators=(",", ":")),
-        secret=signing_key(),
-        algorithm="sha256",
-    ).hexdigest()
+    fingerprint = event_fingerprint(body)
     with transaction.atomic():
         Challenge.objects.select_for_update().get(pk=authenticated.challenge_id)
         row = ExeSubmission.objects.select_for_update().get(pk=authenticated.pk)
@@ -186,7 +204,7 @@ def apply_event(authenticated, body):
             )
         previous = ExeExecutionEvent.objects.filter(pk=event_id).first()
         if previous is not None:
-            if previous.submission_id != row.pk or previous.fingerprint != fingerprint:
+            if previous.submission_id != row.pk or not event_fingerprint_matches(previous.fingerprint, body):
                 raise ExeSubmissionError(
                     "EVENT_CONFLICT", "이미 다른 내용으로 처리된 결과입니다", 409
                 )
