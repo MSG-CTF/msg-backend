@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import secrets
 import uuid
 from datetime import timedelta
 from unittest.mock import patch
@@ -13,7 +14,7 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from apps.challenge.checker_auth import mint_job_token
+from apps.challenge.checker_auth import AUDIENCE, mint_job_token, signing_key
 from apps.challenge.checker_dispatch import dispatch_submission
 from apps.challenge.exe_submissions import ExeSubmissionError, close_exe_submission
 from apps.challenge.models import ExeSubmission, FlagSubmission, Solve
@@ -167,8 +168,10 @@ class WindowsDirectRuntimeTests(ExeFixtures, TestCase):
         row = self.accepted()
         self.dispatch(row)
         token = mint_job_token(row)
-        claims = jwt.decode(token, options={"verify_signature": False})
-        foreign = jwt.encode(claims, "other-backend-key-" * 4, algorithm="HS256")
+        claims = jwt.decode(
+            token, signing_key(), algorithms=["HS256"], audience=AUDIENCE
+        )
+        foreign = jwt.encode(claims, secrets.token_urlsafe(48), algorithm="HS256")
         client = APIClient()
         client.credentials(HTTP_AUTHORIZATION="Bearer " + foreign)
         self.assertEqual(client.get(f"/internal/v1/checker-submissions/{row.pk}/payload").status_code, 401)
@@ -231,7 +234,12 @@ class WindowsDirectRuntimeTests(ExeFixtures, TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["data"]["assignment_id"], str(row.lease_id))
         self.assertIn("no-store", response["Cache-Control"])
-        claims = jwt.decode(response.data["data"]["job_token"], options={"verify_signature": False})
+        claims = jwt.decode(
+            response.data["data"]["job_token"],
+            signing_key(),
+            algorithms=["HS256"],
+            audience=AUDIENCE,
+        )
         self.assertLessEqual(claims["exp"] - claims["iat"], 45 * 60)
 
     def test_token_refresh_rejects_other_service_and_mismatched_metadata(self):
