@@ -43,6 +43,15 @@ def parse_period(value):
     return parsed
 
 
+def _provider_period(challenge, period):
+    anchor = getattr(challenge, "score_period_anchor", "START")
+    if anchor == "END":
+        return period + timedelta(minutes=15)
+    if anchor == "START":
+        return period
+    raise ScoreFetchError("score period anchor must be START or END")
+
+
 def _request_scores(challenge, period):
     if not challenge.score_api_url or not challenge.score_api_token_env:
         raise ScoreFetchError(
@@ -74,7 +83,8 @@ def _request_scores(challenge, period):
         )
         if key not in {"period_id", "scored_at"}
     ]
-    query.extend((key, format_utc(period)) for key in ("period_id", "scored_at"))
+    provider_period = _provider_period(challenge, period)
+    query.extend((key, format_utc(provider_period)) for key in ("period_id", "scored_at"))
     path = f"{parsed_url.path or '/'}?{urllib.parse.urlencode(query)}"
     connection_class = (
         http.client.HTTPSConnection
@@ -123,7 +133,7 @@ def _validated_results(challenge, period, payload):
         return []
     if str(data.get("koth_challenge_id")) != str(challenge.koth_challenge_id):
         raise ScoreFetchError("score response challenge ID does not match")
-    if parse_period(data.get("period_id")) != period:
+    if parse_period(data.get("period_id")) != _provider_period(challenge, period):
         raise ScoreFetchError("score response period ID does not match")
     results = data.get("results")
     if not isinstance(results, list):

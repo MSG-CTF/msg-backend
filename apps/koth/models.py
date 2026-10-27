@@ -31,6 +31,10 @@ class KothClub(models.Model):
 
 
 class KothChallenge(models.Model):
+    class ScorePeriodAnchor(models.TextChoices):
+        START = "START", "구간 시작"
+        END = "END", "구간 종료"
+
     koth_challenge_id = models.UUIDField(
         primary_key=True, default=uuid.uuid4, editable=False
     )
@@ -76,6 +80,12 @@ class KothChallenge(models.Model):
     # 플랫폼 -> 문제 서버 점수 조회 주소와, 원문 토큰을 읽어올 환경 변수명
     score_api_url = models.URLField(max_length=500, blank=True)
     score_api_token_env = models.CharField(max_length=100, blank=True)
+    score_period_anchor = models.CharField(
+        max_length=5,
+        choices=ScorePeriodAnchor.choices,
+        default=ScorePeriodAnchor.START,
+        help_text="문제 서버가 period_id로 받는 시각. 플랫폼 이력은 구간 시작 시각을 유지합니다.",
+    )
     metadata_revision = models.CharField(max_length=40, blank=True, default="")
     active_publication = models.ForeignKey("KothPublication", on_delete=models.PROTECT, null=True, blank=True, related_name="active_challenges")
     files_mode = models.CharField(max_length=20, default="REPOSITORY", choices=[("REPOSITORY", "REPOSITORY"), ("NONE", "NONE")])
@@ -88,6 +98,10 @@ class KothChallenge(models.Model):
         db_table = "koth_challenges"
         ordering = ["open_group", "title"]
         constraints = [
+            models.CheckConstraint(
+                condition=models.Q(score_period_anchor__in=["START", "END"]),
+                name="ck_koth_score_period_anchor",
+            ),
             models.UniqueConstraint(fields=["club"], name="uq_koth_challenge_club"),
             models.UniqueConstraint(
                 fields=["repository_slug"],
