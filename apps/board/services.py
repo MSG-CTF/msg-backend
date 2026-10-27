@@ -11,6 +11,7 @@ from django.utils import timezone
 
 from apps.accounts.models import Team
 from apps.adminpanel.models import setting_subquery, setting_values
+from apps.common.bans import lock_active_team
 from apps.ranking.models import LineMonopoly
 from apps.teams.models import MileageHistory, MileageType
 
@@ -169,8 +170,11 @@ def _board_state_read_queryset(
 
 
 @contextmanager
-def board_state_for_update(team):
-    """Keep the team lock and one dice rule snapshot for the whole action."""
+def board_state_for_update(team, *, require_active=False):
+    """Keep the team lock and one dice rule snapshot for the whole action.
+
+    require_active: 참가자 쓰기에서 켠다. 상태 잠금 뒤 팀 정지·삭제를 다시 확인한다.
+    """
     with transaction.atomic():
         # Mutations and due recharges serialize on the team's state row.
         locked_states = _board_state_queryset().select_for_update(of=("self",))
@@ -190,6 +194,8 @@ def board_state_for_update(team):
                 dice = dice_settings()
         else:
             dice = dice_settings()
+        if require_active:
+            lock_active_team(team.pk)
         apply_pending_dice_recharge(state, dice=dice)
         yield state, dice
 
@@ -519,7 +525,7 @@ def _assert_can_roll(team, state):
 
 
 def prepare_dice_roll_request(team, user):
-    with board_state_for_update(team):
+    with board_state_for_update(team, require_active=True):
         pending, _ = DiceRollRequest.objects.get_or_create(team=team, user=user)
         return {"request_key": pending.request_key}
 
@@ -531,7 +537,7 @@ def acknowledge_dice_roll_request(team, user, request_key):
         request_id = uuid.UUID(request_key[len(DiceRollRequest.KEY_PREFIX) :])
     except ValueError:
         raise DiceRequestExpired()
-    with board_state_for_update(team):
+    with board_state_for_update(team, require_active=True):
         pending = DiceRollRequest.objects.filter(
             team=team, user=user, pk=request_id
         ).first()
@@ -550,7 +556,7 @@ def _save_dice_receipt(pending, result):
 
 
 def roll_dice(team, *, user=None, request_key=None):
-    with board_state_for_update(team) as (state, dice):
+    with board_state_for_update(team, require_active=True) as (state, dice):
         pending_request = (
             DiceRollRequest.objects.filter(team=team, user=user).first()
             if user
@@ -655,7 +661,7 @@ def roll_dice(team, *, user=None, request_key=None):
 
 
 def confirm_dice_roll(team, *, request_key):
-    with board_state_for_update(team) as (state, dice):
+    with board_state_for_update(team, require_active=True) as (state, dice):
         pending = PendingDiceRoll.objects.filter(team=team).first()
         if pending is None:
             raise NoPendingRoll()
@@ -701,7 +707,7 @@ def move_team_via_airport(team, destination_index):
     if not (FIRST_CELL_INDEX <= destination_index <= LAST_CELL_INDEX):
         raise InvalidDestinationIndex()
 
-    with board_state_for_update(team) as (state, dice):
+    with board_state_for_update(team, require_active=True) as (state, dice):
         if state.position.type != Cell.CellType.AIRPORT:
             raise NotAirportCell()
         if state.airport_move_used:
@@ -746,7 +752,7 @@ def spin_roulette(team):
             .select_related("position")
             .get(team=team)
         )
-        locked_team = Team.objects.select_for_update(no_key=True).get(pk=team.pk)
+        locked_team = lock_active_team(team.pk)
         cell = state.position
         if cell.type != Cell.CellType.ROULETTE:
             raise NotRouletteCell()
@@ -869,6 +875,7 @@ def open_current_cell_challenge(team, challenge_id):
 
     with transaction.atomic():
         state = TeamBoardState.objects.select_for_update().get(team=team)
+        lock_active_team(team.pk)
         if PendingDiceRoll.objects.filter(team=team).exists():
             raise PendingRollUnresolved()
         cell = state.position
@@ -1182,7 +1189,7 @@ def build_pending_chance_choice(team):
 
 
 def draw_chance_card(team):
-    with board_state_for_update(team) as (state, dice):
+    with board_state_for_update(team, require_active=True) as (state, dice):
         if PendingDiceRoll.objects.filter(team=team).exists():
             raise PendingRollUnresolved()
         cell = state.position
@@ -1504,7 +1511,7 @@ def use_chance_card(team, card_id, payload, *, team_card_id=None):
         raise ChanceCardAlreadyUsed()
     if existing_draw.discarded_at is not None:
         raise ChanceCardNotFound()
-    with board_state_for_update(team) as (state, dice):
+    with board_state_for_update(team, require_active=True) as (state, dice):
         draw = (
             TeamChanceCard.objects.select_for_update(of=("self",))
             .select_related("card")
@@ -1536,7 +1543,7 @@ def confirm_chance_choice(team, choice, *, team_card_id=None):
     if choice not in ("FIRST", "SECOND"):
         raise ChanceConfirmNotFound()
 
-    with board_state_for_update(team) as (state, dice):
+    with board_state_for_update(team, require_active=True) as (state, dice):
         pending_draws = (
             TeamChanceCard.objects.select_related("card")
             .filter(

@@ -1554,6 +1554,10 @@ class AdminChallengeTests(TestCase):
         self.assertFalse(Challenge.objects.filter(pk=challenge.pk).exists())
         event.refresh_from_db()
         self.assertIsNone(event.challenge_id)
+        # 삭제도 감사 기록으로 남는다 (QA TC-598 · 249)
+        deleted = AdminEvent.objects.get(type=AdminEvent.EventType.CHALLENGE_DELETED)
+        self.assertEqual(deleted.actor, self.admin.login_id)
+        self.assertIn(challenge.challenge_slug, deleted.message)
 
     def test_challenge_delete_rejects_published_challenge(self):
         challenge = self.create_challenge()

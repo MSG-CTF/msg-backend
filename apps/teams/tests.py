@@ -67,6 +67,25 @@ class MyPageTests(TestCase):
         self.assertEqual(data["mileage"], 121)
         self.assertEqual(sum(row["amount"] for row in data["history"]), 121)
 
+    def test_qr_token_rechecks_ban_after_locking_team(self):
+        """인증 뒤 정지가 커밋돼도 결제 토큰을 만들지 않는다 (QA TC-60)."""
+        from apps.teams import views
+        from apps.teams.models import PaymentToken
+
+        get_team = views._get_team
+
+        def ban_after_auth(request):
+            team = get_team(request)
+            Team.objects.filter(pk=team.pk).update(is_banned=True)
+            return team
+
+        with patch.object(views, "_get_team", ban_after_auth):
+            res = self.client.post("/api/v1/teams/me/qr_token", {}, format="json")
+
+        self.assertEqual(res.status_code, 403)
+        self.assertEqual(res.data["code"], "TEAM_BANNED")
+        self.assertFalse(PaymentToken.objects.filter(team=self.team).exists())
+
     def test_team_me_returns_own_team_only(self):
         res = self.client.get("/api/v1/teams/me")
         self.assertEqual(res.data["data"]["team_name"], "우리팀")

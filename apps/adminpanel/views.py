@@ -1574,6 +1574,14 @@ def challenge_detail(request, challenge_id):
                 "challenge_id": str(challenge.challenge_id),
                 "challenge_slug": challenge.challenge_slug,
             }
+            # 이벤트의 challenge 외래키는 삭제 뒤 비므로 id·slug·제목을 메시지에 남긴다.
+            _record_event(
+                AdminEvent.EventType.CHALLENGE_DELETED,
+                f"문제 삭제: {challenge.title} ({challenge.challenge_slug}, {challenge.challenge_id})",
+                request.user.login_id,
+                severity=AdminEvent.Severity.WARNING,
+                challenge=challenge,
+            )
             challenge.delete()
             return ok(deleted, message="문제가 삭제되었습니다.")
 
