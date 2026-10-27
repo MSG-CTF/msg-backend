@@ -33,7 +33,9 @@ class ClosedChallengeTokenTests(TestCase):
         )
         assert login.status_code == 200
         client.credentials(HTTP_AUTHORIZATION=f"Bearer {login.data['data']['access_token']}")
-        issued = client.get("/api/v1/koth/team_token")
+        issued = client.get(
+            f"/api/v1/koth/team_token?koth_challenge_id={challenge.pk}"
+        )
         assert issued.status_code == 200
         raw_token = issued.data["data"]["team_token"]
         client.credentials()
