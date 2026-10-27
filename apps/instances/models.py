@@ -27,6 +27,7 @@ class DeleteReason(models.TextChoices):
     IDLE_EXPIRED = "IDLE_EXPIRED"
     HARD_TIMEOUT = "HARD_TIMEOUT"
     ADMIN_FORCED = "ADMIN_FORCED"
+    CREATE_FAILED_CLEANUP = "CREATE_FAILED_CLEANUP"
 
 
 class ArchitectureType(models.TextChoices):
