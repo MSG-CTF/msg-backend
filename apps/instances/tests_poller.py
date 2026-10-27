@@ -1,6 +1,7 @@
 import io
 import json
 import zipfile
+from datetime import timedelta
 from unittest.mock import patch
 from urllib.request import HTTPRedirectHandler
 
@@ -74,8 +75,8 @@ def bundle(
     return data
 
 
-def publish_artifact(artifact_id, name, sha=SHA_A, branch="main", expired=False):
-    return {
+def publish_artifact(artifact_id, name, sha=SHA_A, branch="main", expired=False, created_at=None):
+    artifact = {
         "id": artifact_id,
         "name": name,
         "expired": expired,
@@ -85,6 +86,9 @@ def publish_artifact(artifact_id, name, sha=SHA_A, branch="main", expired=False)
             "head_sha": sha,
         },
     }
+    if created_at is not None:
+        artifact["created_at"] = created_at.isoformat().replace("+00:00", "Z")
+    return artifact
 
 
 def workflow_run(artifact_id, sha=SHA_A, branch="main", status="completed", conclusion="success"):
@@ -215,24 +219,35 @@ class ListBundleArtifactsTests(TestCase):
         self.assertEqual([artifact["id"] for artifact in artifacts], [2, 3])
 
     @override_settings(RELEASE_POLL_LIMIT=3)
-    def test_stops_listing_at_processed_artifact_boundary(self):
+    def test_stops_listing_after_overlap_boundary_page(self):
+        now = timezone.now()
         PollerArtifact.objects.create(
             artifact_id=10,
             kind=PollerArtifact.Kind.RELEASE,
-            payload=publish_artifact(10, "old-publish-bundle"),
-            processed_at=timezone.now(),
+            payload=publish_artifact(10, "old-publish-bundle", created_at=now - timedelta(hours=1)),
+            processed_at=now,
         )
         responses = [
             json.dumps(
                 {
                     "total_count": 100,
                     "artifacts": [
-                        publish_artifact(12, "new-publish-bundle"),
-                        publish_artifact(11, "test-output"),
-                        publish_artifact(10, "old-publish-bundle"),
+                        publish_artifact(12, "new-publish-bundle", created_at=now),
+                        publish_artifact(11, "test-output", created_at=now),
+                        publish_artifact(10, "old-publish-bundle", created_at=now - timedelta(hours=1)),
                     ],
                 }
-            ).encode("utf-8")
+            ).encode("utf-8"),
+            json.dumps(
+                {
+                    "total_count": 100,
+                    "artifacts": [
+                        publish_artifact(9, "test-output", created_at=now - timedelta(hours=50)),
+                        publish_artifact(8, "test-output", created_at=now - timedelta(hours=50)),
+                        publish_artifact(7, "test-output", created_at=now - timedelta(hours=50)),
+                    ],
+                }
+            ).encode("utf-8"),
         ]
 
         with patch("apps.instances.poller.urlopen", fake_urlopen(responses)):
@@ -240,6 +255,50 @@ class ListBundleArtifactsTests(TestCase):
 
         self.assertEqual([artifact["id"] for artifact in artifacts], [12])
         self.assertIsNone(PollerArtifact.objects.get(pk=12).processed_at)
+
+    def test_discovers_delayed_bundle_below_highest_seen_id(self):
+        now = timezone.now()
+        PollerArtifact.objects.create(
+            artifact_id=30,
+            kind=PollerArtifact.Kind.RELEASE,
+            payload=publish_artifact(30, "other-publish-bundle", created_at=now - timedelta(hours=1)),
+            processed_at=now,
+        )
+        responses = [json.dumps({
+            "total_count": 3,
+            "artifacts": [
+                publish_artifact(30, "other-publish-bundle", created_at=now - timedelta(hours=1)),
+                publish_artifact(29, "ghost-publish-bundle", created_at=now),
+                publish_artifact(28, "test-output", created_at=now - timedelta(hours=1)),
+            ],
+        }).encode("utf-8")]
+
+        with patch("apps.instances.poller.urlopen", fake_urlopen(responses)):
+            artifacts = list_bundle_artifacts(token="test-token")
+
+        self.assertEqual([artifact["id"] for artifact in artifacts], [29])
+        self.assertIsNone(PollerArtifact.objects.get(pk=29).processed_at)
+
+    def test_full_scan_recovers_bundle_older_than_overlap(self):
+        now = timezone.now()
+        PollerArtifact.objects.create(
+            artifact_id=30,
+            kind=PollerArtifact.Kind.RELEASE,
+            payload=publish_artifact(30, "other-publish-bundle", created_at=now),
+            processed_at=now,
+        )
+        responses = [json.dumps({
+            "total_count": 2,
+            "artifacts": [
+                publish_artifact(30, "other-publish-bundle", created_at=now),
+                publish_artifact(20, "ghost-publish-bundle", created_at=now - timedelta(days=3)),
+            ],
+        }).encode("utf-8")]
+
+        with patch("apps.instances.poller.urlopen", fake_urlopen(responses)):
+            artifacts = list_bundle_artifacts(token="test-token", full_scan=True)
+
+        self.assertEqual([artifact["id"] for artifact in artifacts], [20])
 
 
 @override_settings(CACHES=LOCMEM)

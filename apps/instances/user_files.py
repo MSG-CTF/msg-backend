@@ -292,13 +292,14 @@ def register_user_files_bundle(manifest, archive_bytes, artifact):
     return "registered", bundle
 
 
-def poll_user_files_once(token=None):
+def poll_user_files_once(token=None, full_scan=False):
     summary = {"registered": 0, "duplicate": 0, "unmatched": 0, "invalid": 0, "error": 0}
     try:
         artifacts = pending_artifacts(
             PollerArtifact.Kind.USER_FILES,
             USER_FILES_BUNDLE_SUFFIX,
             token=token,
+            full_scan=full_scan,
         )
     except ReleaseValidationError as error:
         logger.warning("user-files poller 설정 오류: %s", error.message)

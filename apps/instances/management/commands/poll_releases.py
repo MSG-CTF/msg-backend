@@ -21,6 +21,11 @@ class Command(BaseCommand):
             default=0,
             help="초 단위 반복 주기. 0이면 1회만 실행",
         )
+        parser.add_argument(
+            "--full-scan",
+            action="store_true",
+            help="기존 처리 경계를 무시하고 만료되지 않은 모든 artifact를 다시 확인",
+        )
 
     def handle(self, *args, **options):
         token = settings.RELEASE_POLL_GITHUB_TOKEN
@@ -31,13 +36,14 @@ class Command(BaseCommand):
             )
 
         interval = options["interval"]
+        full_scan = options["full_scan"]
         while True:
-            summary = poll_once(token=token)
+            summary = poll_once(token=token, full_scan=full_scan)
             self.stdout.write(
                 "poll 완료: 등록 {registered}, 중복 {duplicate}, "
                 "매핑 실패 {unmatched}, 형식 오류 {invalid}, 통신 오류 {error}".format(**summary)
             )
-            user_files_summary = poll_user_files_once(token=token)
+            user_files_summary = poll_user_files_once(token=token, full_scan=full_scan)
             self.stdout.write(
                 "참가자 파일 poll 완료: 등록 {registered}, 중복 {duplicate}, "
                 "매핑 실패 {unmatched}, 형식 오류 {invalid}, 통신 오류 {error}".format(
@@ -46,4 +52,5 @@ class Command(BaseCommand):
             )
             if interval <= 0:
                 break
+            full_scan = False
             time.sleep(interval)

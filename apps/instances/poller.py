@@ -3,13 +3,14 @@ import json
 import logging
 import uuid
 import zipfile
+from datetime import timedelta
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Max
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 
 from apps.challenge.models import Challenge
 from apps.instances.bundle_environment import fill_bundle_environment, read_bundle_environment
@@ -29,6 +30,7 @@ BUNDLE_NAME_SUFFIX = "-publish-bundle"
 BUNDLE_FILE_NAME = "artifact-v2.json"
 POLLER_CREATED_BY = "release-poller"
 RETRYABLE_WORKFLOW_STATUSES = {"queued", "in_progress"}
+ARTIFACT_DISCOVERY_LOOKBACK = timedelta(hours=48)
 
 
 def github_request(path, token=None, timeout=10, max_bytes=None):
@@ -53,7 +55,18 @@ def github_request(path, token=None, timeout=10, max_bytes=None):
     return body
 
 
-def list_artifacts_by_suffix(suffix, token=None, stop_at_id=None):
+def artifact_created_at(artifact):
+    if not isinstance(artifact, dict):
+        return None
+    value = artifact.get("created_at")
+    try:
+        parsed = parse_datetime(value) if isinstance(value, str) else None
+    except ValueError:
+        return None
+    return parsed if parsed is not None and timezone.is_aware(parsed) else None
+
+
+def list_artifacts_by_suffix(suffix, token=None, stop_before=None):
     # 문제 저장소의 Actions artifact 전체에서 지정한 bundle만 최신순으로 돌려준다
     page_size = min(max(settings.RELEASE_POLL_LIMIT, 1), 100)
     page = 1
@@ -73,21 +86,22 @@ def list_artifacts_by_suffix(suffix, token=None, stop_at_id=None):
                 "GitHub artifact 목록 형식이 올바르지 않습니다"
             )
 
-        reached_boundary = False
         for entry in artifacts:
-            artifact_id = entry.get("id")
-            if (
-                stop_at_id is not None
-                and isinstance(artifact_id, int)
-                and not isinstance(artifact_id, bool)
-                and artifact_id <= stop_at_id
-            ):
-                reached_boundary = True
-                break
             if entry.get("name", "").endswith(suffix) and not entry.get("expired"):
                 bundles.append(entry)
 
-        if reached_boundary:
+        # GitHub can expose a bundle after a higher-ID artifact has already
+        # been polled. Scan a time overlap, including its boundary page, so
+        # that delayed publications are still discovered.
+        if (
+            stop_before is not None
+            and artifacts
+            and all(
+                (created_at := artifact_created_at(entry)) is not None
+                and created_at < stop_before
+                for entry in artifacts
+            )
+        ):
             break
 
         total_count = payload.get("total_count")
@@ -104,14 +118,21 @@ def list_artifacts_by_suffix(suffix, token=None, stop_at_id=None):
     return bundles
 
 
-def pending_artifacts(kind, suffix, token=None):
-    last_seen_id = PollerArtifact.objects.filter(kind=kind).aggregate(
-        value=Max("artifact_id")
-    )["value"]
+def pending_artifacts(kind, suffix, token=None, full_scan=False):
+    latest_payload = (
+        PollerArtifact.objects.filter(kind=kind)
+        .order_by("-artifact_id")
+        .values_list("payload", flat=True)
+        .first()
+    )
+    latest_created_at = artifact_created_at(latest_payload)
     discovered = list_artifacts_by_suffix(
         suffix,
         token=token,
-        stop_at_id=last_seen_id,
+        stop_before=(
+            latest_created_at - ARTIFACT_DISCOVERY_LOOKBACK
+            if latest_created_at and not full_scan else None
+        ),
     )
     rows = []
     for artifact in discovered:
@@ -143,11 +164,12 @@ def mark_artifact_processed(artifact):
     )
 
 
-def list_bundle_artifacts(token=None):
+def list_bundle_artifacts(token=None, full_scan=False):
     return pending_artifacts(
         PollerArtifact.Kind.RELEASE,
         BUNDLE_NAME_SUFFIX,
         token=token,
+        full_scan=full_scan,
     )
 
 
@@ -314,11 +336,11 @@ def register_bundle(artifact_data, note=None):
     return "registered", release
 
 
-def poll_once(token=None):
+def poll_once(token=None, full_scan=False):
     # 공급망 bundle을 한 바퀴 수집해 새 릴리스만 등록한다. 전환은 하지 않는다
     summary = {"registered": 0, "duplicate": 0, "unmatched": 0, "invalid": 0, "error": 0}
     try:
-        artifacts = list_bundle_artifacts(token=token)
+        artifacts = list_bundle_artifacts(token=token, full_scan=full_scan)
     except ReleaseValidationError as error:
         logger.warning("release poller 설정 오류: %s", error.message)
         summary["error"] += 1
