@@ -14,7 +14,7 @@ from rest_framework.test import APIClient
 
 from apps.adminpanel import tests as existing
 from apps.adminpanel.models import AdminEvent
-from apps.instances.models import Instance, InstanceStatus
+from apps.instances.models import DeleteReason, Instance, InstanceStatus
 from apps.instances.services import SchedulerError, call_scheduler_force_cleanup, update_instance_from_scheduler
 
 
@@ -41,7 +41,7 @@ class AdminCleanupTests(TestCase):
         self.assertEqual(response.data["data"]["status"], "FAILED")
         instance.refresh_from_db()
         self.assertEqual(instance.status, "FAILED")
-        self.assertIsNone(instance.delete_reason)
+        self.assertEqual(instance.delete_reason, DeleteReason.CREATE_FAILED_CLEANUP)
         self.assertTrue(AdminEvent.objects.filter(instance_id=instance.pk).exists())
         self.assertEqual(request.call_args.args, ("POST", f"/api/instances/{instance.pk}/force-cleanup"))
 
@@ -51,6 +51,8 @@ class AdminCleanupTests(TestCase):
         request.return_value = self.snapshot(instance, "CLEANED")
         response = self.client.delete(f"/api/v1/admin/instances/{instance.pk}")
         self.assertEqual((response.status_code, response.data["data"]["status"]), (200, "CLEANED"))
+        instance.refresh_from_db()
+        self.assertEqual(instance.delete_reason, DeleteReason.CREATE_FAILED_CLEANUP)
 
     @patch("apps.instances.services.scheduler_request")
     def test_runtime_guards_keep_pending_state_and_do_not_record_success(self, request):
@@ -147,8 +149,9 @@ class AdminCleanupRetryTests(TestCase):
         self.assertEqual(request.call_args.kwargs["auth_header"], "Bearer test-scheduler-token")
         instance.refresh_from_db()
         self.assertEqual(instance.status, InstanceStatus.CLEANUP_PENDING)
-        for field in ("release_id", "host", "endpoints", "expires_at", "delete_reason"):
+        for field in ("release_id", "host", "endpoints", "expires_at"):
             self.assertEqual(getattr(instance, field), before[field])
+        self.assertEqual(instance.delete_reason, DeleteReason.CREATE_FAILED_CLEANUP)
         event = AdminEvent.objects.get(instance_id=instance.pk)
         self.assertEqual(event.actor, "root")
         self.assertIn("재시도", event.message)

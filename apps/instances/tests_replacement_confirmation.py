@@ -3,15 +3,15 @@ from unittest.mock import patch
 
 from django.test import TestCase, override_settings
 
+from apps.instances import tests as existing
 from apps.instances.models import DeleteReason, Instance, InstanceStatus
 from apps.instances.services import SchedulerError, scheduler_delete_reason
-from apps.instances.tests import InstanceLockTests, LOCMEM
 
 
-@override_settings(CACHES=LOCMEM, SECURE_SSL_REDIRECT=False, SCHEDULER_API_TOKEN="test-scheduler-token")
+@override_settings(CACHES=existing.LOCMEM, SECURE_SSL_REDIRECT=False, SCHEDULER_API_TOKEN="test-scheduler-token")
 class ReplacementConfirmationTests(TestCase):
-    setUp = InstanceLockTests.setUp
-    auth = InstanceLockTests.auth
+    setUp = existing.InstanceLockTests.setUp
+    auth = existing.InstanceLockTests.auth
 
     @patch("apps.instances.views.call_scheduler_create")
     def test_participant_create_always_requires_confirmation_in_scheduler(self, create):
