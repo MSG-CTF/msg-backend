@@ -1,7 +1,7 @@
 import json
 from datetime import timedelta
 from urllib.error import HTTPError, URLError
-from urllib.request import ProxyHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from django.conf import settings
 from django.db import transaction
@@ -10,9 +10,11 @@ from django.utils import timezone
 from apps.challenge.checker_auth import checker_configuration, mint_job_token
 from apps.challenge.exe_submissions import ExeSubmissionError
 from apps.challenge.models import ExeSubmission
-from apps.challenge.windows_assignments import _NoRedirect, refresh_windows_assignment
 
-LEASE_FINISH_MARGIN_SECONDS = 30
+
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
 
 
 def checker_request(row, method):
@@ -27,9 +29,8 @@ def checker_request(row, method):
             "team_id": str(row.team_id),
             "challenge_id": str(row.challenge_id),
             "release_id": str(row.release_id),
-            "vm_id": row.vm_id,
-            "readiness_check_id": row.readiness_check_id,
             "payload_sha256": row.payload_sha256,
+            "selection_mode": "broker_pool",
         }
         body.update(
             timeout_seconds=row.config_snapshot["timeout_seconds"],
@@ -72,23 +73,14 @@ def checker_request(row, method):
         ) from None
 
 
-def _readiness_is_fresh(row, now):
-    return (
-        row.vm_readiness == "READY"
-        and bool(row.readiness_check_id)
-        and bool(row.vm_id)
-        and row.readiness_checked_at is not None
-        and 0 <= (now - row.readiness_checked_at).total_seconds() <= 30
-    )
-
-
 def dispatch_submission(submission_id):
     if not settings.EXE_DISPATCH_ENABLED:
         return None
     with transaction.atomic():
         row = ExeSubmission.objects.select_for_update().get(pk=submission_id)
         if (
-            row.status != "ASSIGNED"
+            row.config_snapshot.get("assignment_mode") != "broker_pool"
+            or row.status != "ASSIGNED"
             or row.finished_at is not None
             or row.lease_released_at is not None
         ):
@@ -106,22 +98,6 @@ def dispatch_submission(submission_id):
             limit = row.config_snapshot.get("timeout_seconds")
             if type(limit) is not int or not 10 <= limit <= 180:
                 row.last_error_code = "WINDOWS_CONFIG_NOT_READY"
-                row.save(update_fields=["last_error_code", "updated_at"])
-                return row
-            if not _readiness_is_fresh(row, now):
-                # shortcut: the bounded Scheduler lookup holds this row lock; use a worker lease if contention grows.
-                if not refresh_windows_assignment(row):
-                    return row
-                now = timezone.now()
-            if not _readiness_is_fresh(row, now):
-                row.last_error_code = "WINDOWS_NOT_READY"
-                row.save(update_fields=["last_error_code", "updated_at"])
-                return row
-            # Include dispatch, result delivery and lease release before Broker expiry.
-            if not row.lease_expires_at or row.lease_expires_at <= now + timedelta(
-                seconds=limit + LEASE_FINISH_MARGIN_SECONDS
-            ):
-                row.last_error_code = "WINDOWS_LEASE_TOO_SHORT"
                 row.save(update_fields=["last_error_code", "updated_at"])
                 return row
             _, _, pins = checker_configuration(row.worker_id)

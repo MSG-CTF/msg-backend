@@ -20,15 +20,11 @@ from apps.accounts.models import Team, User
 from apps.board.models import Cell, TeamChallengeAccess
 from apps.challenge.checker_auth import checker_configuration, mint_job_token
 from apps.challenge.checker_dispatch import checker_request, dispatch_submission
-from apps.challenge.exe_submissions import ExeSubmissionError
+from apps.challenge.exe_submissions import (
+    ExeSubmissionError, close_exe_submission, purge_released_payload,
+)
 from apps.challenge.models import ExeExecutionEvent, ExeSubmission, Solve
 from apps.challenge.tests_exe_submissions import ExeFixtures, harmless_pe
-from apps.challenge.windows_assignments import (
-    purge_released_payload,
-    release_windows_assignment,
-    request_windows_assignment,
-)
-from apps.instances.services import SchedulerError
 from apps.teams.models import MileageHistory
 
 PINS = {
@@ -64,7 +60,7 @@ class RemoteRunTests(ExeFixtures, TestCase):
     def test_registered_worker_command_stays_disabled_by_default(self):
         output = io.StringIO()
         with patch(
-            "apps.challenge.management.commands.dispatch_exe_submissions.assign_oldest_exe_submission"
+            "apps.challenge.management.commands.dispatch_exe_submissions.dispatch_submission"
         ) as called:
             call_command("dispatch_exe_submissions", stdout=output)
         called.assert_not_called()
@@ -90,11 +86,6 @@ class RemoteRunTests(ExeFixtures, TestCase):
 
     def assigned(self):
         row = self.accepted()
-        row.lease_id, row.worker_id = uuid.uuid4(), uuid.uuid4()
-        row.status, row.vm_readiness = "ASSIGNED", "READY"
-        row.lease_expires_at = timezone.now() + timedelta(minutes=5)
-        row.readiness_checked_at = timezone.now()
-        row.readiness_check_id, row.vm_id = "guest-proof-1", "fixture-vm"
         row.config_snapshot = {**row.config_snapshot, "execution_provenance": PINS}
         row.save()
         return row
@@ -167,6 +158,7 @@ class RemoteRunTests(ExeFixtures, TestCase):
                 cleanup_confirmed_at=timezone.now(),
                 created_at=timezone.now() - timedelta(minutes=2),
             )
+            close_exe_submission(row.pk)
         response = self.client.get(self.url)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["data"]["total_count"], 7)
@@ -250,60 +242,7 @@ class RemoteRunTests(ExeFixtures, TestCase):
                 )
                 self.assertEqual(response.status_code, 400)
 
-    def test_unready_assignment_cannot_dispatch(self):
-        row = self.assigned()
-        row.vm_readiness = "UNKNOWN"
-        row.save(update_fields=["vm_readiness"])
-        response = {
-            **self.assignment(row),
-            "lease_id": str(row.lease_id),
-            "worker_id": str(row.worker_id),
-            "vm_readiness": "UNKNOWN",
-        }
-        with (
-            patch(
-                "apps.challenge.windows_assignments._post_scheduler",
-                return_value=response,
-            ),
-            patch("apps.challenge.checker_dispatch.checker_request") as called,
-        ):
-            result = dispatch_submission(row.pk)
-        called.assert_not_called()
-        self.assertEqual(result.last_error_code, "WINDOWS_NOT_READY")
 
-    def test_dispatch_requires_full_execution_limit_and_finish_margin(self):
-        row = self.assigned()
-        self.checker(row)
-        now = timezone.now()
-        for limit in (10, 180):
-            for extra in (-1, 0, 1):
-                row.dispatch_state = "PENDING"
-                row.readiness_checked_at = now
-                row.lease_expires_at = now + timedelta(seconds=limit + 30 + extra)
-                row.config_snapshot["timeout_seconds"] = limit
-                row.save()
-                with (
-                    self.subTest(limit=limit, extra=extra),
-                    patch(
-                        "apps.challenge.checker_dispatch.timezone.now", return_value=now
-                    ),
-                    patch(
-                        "apps.challenge.checker_dispatch.checker_request",
-                        return_value={"checker_job_id": "job"},
-                    ) as called,
-                ):
-                    result = dispatch_submission(row.pk)
-                if extra <= 0:
-                    called.assert_not_called()
-                    self.assertEqual(result.last_error_code, "WINDOWS_LEASE_TOO_SHORT")
-                    self.assertEqual(result.dispatch_state, "PENDING")
-                else:
-                    called.assert_called_once()
-                    self.assertEqual(called.call_args.args[1], "POST")
-                row.refresh_from_db()
-                self.assertIsNone(row.started_at)
-                self.assertIsNone(row.lease_released_at)
-                self.assertEqual(row.attempt_state, "RESERVED")
 
     def test_uncertain_job_is_queried_even_after_lease_expiry_never_reposted(self):
         row = self.assigned()
@@ -321,28 +260,6 @@ class RemoteRunTests(ExeFixtures, TestCase):
         self.assertIsNone(result.cleanup_complete)
         self.assertIsNone(result.lease_released_at)
 
-    def test_fake_or_stale_guest_readiness_is_rejected(self):
-        row = self.accepted()
-        for body in [
-            {**self.assignment(row), "vm_readiness": "READY"},
-            {
-                **self.assignment(row),
-                "vm_readiness": "READY",
-                "vm_id": "vm",
-                "readiness_check_id": "proof",
-                "readiness_checked_at": (
-                    timezone.now() - timedelta(minutes=1)
-                ).isoformat(),
-            },
-        ]:
-            with (
-                patch(
-                    "apps.challenge.windows_assignments._post_scheduler",
-                    return_value=body,
-                ),
-                self.assertRaises(SchedulerError),
-            ):
-                request_windows_assignment(row)
 
     def test_checker_origin_and_pins_come_only_from_operator_settings(self):
         row = self.assigned()
@@ -405,7 +322,7 @@ class RemoteRunTests(ExeFixtures, TestCase):
 
     def test_old_job_without_frozen_limits_cannot_be_dispatched(self):
         row = self.assigned()
-        row.config_snapshot = {}
+        row.config_snapshot = {"assignment_mode": "broker_pool"}
         row.save(update_fields=["config_snapshot"])
         with patch("apps.challenge.checker_dispatch.checker_request") as called:
             result = dispatch_submission(row.pk)
@@ -426,17 +343,17 @@ class RemoteRunTests(ExeFixtures, TestCase):
         )
         key = row.payload_key
         with patch(
-            "apps.challenge.windows_assignments._post_scheduler",
+            "apps.instances.services.scheduler_request",
             return_value={"lease_id": str(row.lease_id), "status": "COMPLETED"},
         ) as called:
             with patch(
                 "django.core.files.storage.FileSystemStorage.delete",
                 side_effect=OSError("fixture"),
             ):
-                release_windows_assignment(row.pk)
+                close_exe_submission(row.pk)
             self.assertTrue((self.root / key).exists())
-            release_windows_assignment(row.pk)
-        self.assertEqual(called.call_count, 1)
+            close_exe_submission(row.pk)
+        called.assert_not_called()
         self.assertFalse((self.root / key).exists())
 
     def test_checker_request_does_not_send_payload_secret_or_download_url(self):
@@ -479,7 +396,7 @@ class RemoteRunTests(ExeFixtures, TestCase):
             401,
         )
 
-    def test_scoped_token_fetches_exact_private_payload_and_pinned_secret(self):
+    def test_scoped_token_fetches_payload_but_cannot_fetch_flag(self):
         row = self.assigned()
         client = self.checker(row)
         response = client.get(f"/internal/v1/checker-submissions/{row.pk}/payload")
@@ -487,7 +404,8 @@ class RemoteRunTests(ExeFixtures, TestCase):
         self.assertEqual(b"".join(response.streaming_content), harmless_pe())
         self.assertIn("no-store", response["Cache-Control"])
         response = client.get(f"/internal/v1/checker-submissions/{row.pk}/secret")
-        self.assertEqual(response.data["data"]["env"], {"FLAG": "local-exe-test"})
+        self.assertEqual(response.status_code, 403)
+        self.assertNotIn(b"local-exe-test", response.content)
         self.assertIn("no-store", response["Cache-Control"])
 
     def test_modified_payload_and_expired_or_cleaned_lease_are_not_served(self):
@@ -503,7 +421,7 @@ class RemoteRunTests(ExeFixtures, TestCase):
         row.cleanup_complete = True
         row.save()
         self.assertEqual(
-            client.get(f"/internal/v1/checker-submissions/{row.pk}/secret").status_code,
+            client.get(f"/internal/v1/checker-submissions/{row.pk}/payload").status_code,
             404,
         )
 
@@ -578,21 +496,21 @@ class RemoteRunTests(ExeFixtures, TestCase):
         client = self.checker(row)
         self.assertEqual(self.callback(client, row, self.event(row)).status_code, 200)
         with (
-            patch("apps.challenge.windows_assignments._post_scheduler") as called,
+            patch("apps.instances.services.scheduler_request") as called,
             self.assertRaises(ExeSubmissionError),
         ):
-            release_windows_assignment(row.pk)
+            close_exe_submission(row.pk)
         called.assert_not_called()
         self.assertEqual(
             self.callback(client, row, self.event(row, "CLEANUP")).status_code, 200
         )
         with patch(
-            "apps.challenge.windows_assignments._post_scheduler",
+            "apps.instances.services.scheduler_request",
             return_value={"lease_id": str(row.lease_id), "status": "COMPLETED"},
         ) as called:
-            release_windows_assignment(row.pk)
-            release_windows_assignment(row.pk)
-        self.assertEqual(called.call_count, 1)
+            close_exe_submission(row.pk)
+            close_exe_submission(row.pk)
+        called.assert_not_called()
         row.refresh_from_db()
         self.assertTrue(row.cleanup_complete)
         self.assertIsNotNone(row.lease_released_at)
@@ -611,9 +529,9 @@ class RemoteRunTests(ExeFixtures, TestCase):
         detail = self.client.get(f"{self.url}/{row.pk}").data["data"]
         self.assertEqual(detail["status"], "CLEANUP_PENDING")
         self.assertIsNone(detail["cleanup_complete"])
-        with patch("apps.challenge.windows_assignments._post_scheduler") as scheduler:
+        with patch("apps.instances.services.scheduler_request") as scheduler:
             with self.assertRaises(ExeSubmissionError):
-                release_windows_assignment(row.pk)
+                close_exe_submission(row.pk)
             call_command("dispatch_exe_submissions", stdout=io.StringIO())
         scheduler.assert_not_called()
         self.assertTrue((self.root / row.payload_key).is_file())
@@ -626,9 +544,9 @@ class RemoteRunTests(ExeFixtures, TestCase):
         row.refresh_from_db()
         self.assertFalse(row.cleanup_complete)
         self.assertIsNone(row.cleanup_confirmed_at)
-        with patch("apps.challenge.windows_assignments._post_scheduler") as scheduler:
+        with patch("apps.instances.services.scheduler_request") as scheduler:
             with self.assertRaises(ExeSubmissionError):
-                release_windows_assignment(row.pk)
+                close_exe_submission(row.pk)
         scheduler.assert_not_called()
         cleanup = self.event(row, "CLEANUP")
         self.assertEqual(self.callback(client, row, cleanup).status_code, 200)
@@ -639,11 +557,11 @@ class RemoteRunTests(ExeFixtures, TestCase):
         row.refresh_from_db()
         self.assertEqual(row.cleanup_confirmed_at, confirmed_at)
         with patch(
-            "apps.challenge.windows_assignments._post_scheduler",
+            "apps.instances.services.scheduler_request",
             return_value={"lease_id": str(row.lease_id), "status": "COMPLETED"},
         ) as scheduler:
-            release_windows_assignment(row.pk)
-        scheduler.assert_called_once()
+            close_exe_submission(row.pk)
+        scheduler.assert_not_called()
         row.refresh_from_db()
         self.assertEqual(row.payload_key, "")
 
@@ -665,9 +583,9 @@ class RemoteRunTests(ExeFixtures, TestCase):
         row.refresh_from_db()
         self.assertFalse(row.cleanup_complete)
         self.assertIsNone(row.cleanup_confirmed_at)
-        with patch("apps.challenge.windows_assignments._post_scheduler") as scheduler:
+        with patch("apps.instances.services.scheduler_request") as scheduler:
             with self.assertRaises(ExeSubmissionError):
-                release_windows_assignment(row.pk)
+                close_exe_submission(row.pk)
         scheduler.assert_not_called()
 
     def test_legacy_cleanup_boolean_is_not_proof_for_release_or_payload_deletion(self):
@@ -677,9 +595,9 @@ class RemoteRunTests(ExeFixtures, TestCase):
         row.cleanup_complete = True
         row.save()
         path = self.root / row.payload_key
-        with patch("apps.challenge.windows_assignments._post_scheduler") as scheduler:
+        with patch("apps.instances.services.scheduler_request") as scheduler:
             with self.assertRaises(ExeSubmissionError):
-                release_windows_assignment(row.pk)
+                close_exe_submission(row.pk)
         scheduler.assert_not_called()
         detail = self.client.get(f"{self.url}/{row.pk}").data["data"]
         self.assertEqual(detail["status"], "CLEANUP_PENDING")
@@ -740,9 +658,9 @@ class RemoteRunTests(ExeFixtures, TestCase):
         row.refresh_from_db()
         confirmed_at = row.cleanup_confirmed_at
         self.assertIsNotNone(confirmed_at)
-        with patch("apps.challenge.windows_assignments._post_scheduler") as scheduler:
+        with patch("apps.instances.services.scheduler_request") as scheduler:
             with self.assertRaises(ExeSubmissionError):
-                release_windows_assignment(row.pk)
+                close_exe_submission(row.pk)
         scheduler.assert_not_called()
         self.assertEqual(
             self.callback(client, row, self.event(row, "STARTED")).status_code, 409
@@ -752,10 +670,10 @@ class RemoteRunTests(ExeFixtures, TestCase):
         self.assertTrue(row.cleanup_complete)
         self.assertEqual(row.cleanup_confirmed_at, confirmed_at)
         with patch(
-            "apps.challenge.windows_assignments._post_scheduler",
+            "apps.instances.services.scheduler_request",
             return_value={"lease_id": str(row.lease_id), "status": "COMPLETED"},
         ):
-            release_windows_assignment(row.pk)
+            close_exe_submission(row.pk)
 
     def test_started_is_only_recorded_once_and_result_cannot_contradict_it(self):
         row = self.assigned()
@@ -785,474 +703,6 @@ class RemoteRunTests(ExeFixtures, TestCase):
         self.assertEqual(response.data["data"]["total_count"], 1)
         self.assertEqual(response.data["data"]["runs"][0]["status"], "CLEANUP_PENDING")
 
-    def completed_for_release(self):
-        row = self.assigned()
-        client = self.checker(row)
-        for body in (self.event(row), self.event(row, "CLEANUP")):
-            self.assertEqual(self.callback(client, row, body).status_code, 200)
-        row.refresh_from_db()
-        return row, client
-
-    def test_admin_release_failure_details_are_private_and_do_not_change_execution_result(
-        self,
-    ):
-        row, client = self.completed_for_release()
-        path = self.root / row.payload_key
-        self.user.role = Role.ADMIN
-        self.user.save(update_fields=["role"])
-        for code, status, review in (
-            ("BROKER_CALL_FAILED", 502, False),
-            ("WINDOWS_ASSIGNMENT_NOT_FOUND", 404, True),
-        ):
-            with (
-                self.subTest(code=code),
-                patch(
-                    "apps.challenge.windows_assignments._post_scheduler",
-                    side_effect=SchedulerError(code, "private-provider-detail", status),
-                ),
-            ):
-                with self.assertRaises(SchedulerError):
-                    release_windows_assignment(row.pk)
-            row.refresh_from_db()
-            self.assertEqual(row.last_error_code, code)
-            response = self.client.get(
-                f"/api/v1/admin/challenges/{self.challenge.pk}/remote_runs",
-                {"status": "ACTIVE"},
-            )
-            self.assertEqual(response.status_code, 200, response.data)
-            (data,) = response.data["data"]["runs"]
-            self.assertEqual(data["last_error_code"], code)
-            self.assertEqual(data["requires_review"], review)
-            self.assertTrue(data["release_pending"])
-            self.assertEqual(data["status"], "COMPLETED")
-            self.assertTrue(data["cleanup_complete"])
-            self.assertEqual(data["stdout"], "participant output")
-            self.assertEqual(response.data["data"]["summary"]["failed"], 0)
-            self.assertNotIn(b"private-provider-detail", response.content)
-            public = self.client.get(f"{self.url}/{row.pk}")
-            self.assertNotIn("last_error_code", public.data["data"])
-            self.assertNotIn(code.encode(), public.content)
-            self.assertTrue(path.is_file())
-            self.assertIsNone(row.lease_released_at)
-        self.assertEqual(
-            self.callback(client, row, self.event(row, "CLEANUP")).status_code, 200
-        )
-        row.refresh_from_db()
-        self.assertEqual(row.last_error_code, "WINDOWS_ASSIGNMENT_NOT_FOUND")
-        with patch(
-            "apps.challenge.windows_assignments._post_scheduler",
-            return_value={"lease_id": str(row.lease_id), "status": "EXPIRED"},
-        ):
-            release_windows_assignment(row.pk)
-        response = self.client.get(
-            f"/api/v1/admin/challenges/{self.challenge.pk}/remote_runs"
-        )
-        (data,) = response.data["data"]["runs"]
-        self.assertEqual(data["last_error_code"], "")
-        self.assertFalse(data["requires_review"])
-        self.assertFalse(data["release_pending"])
-
-    def test_worker_pauses_unknown_lease_return_until_operator_review(self):
-        row, client = self.completed_for_release()
-        with patch(
-            "apps.challenge.windows_assignments._post_scheduler",
-            side_effect=SchedulerError("WINDOWS_ASSIGNMENT_NOT_FOUND", "fixture", 404),
-        ) as scheduler:
-            call_command(
-                "dispatch_exe_submissions", stdout=io.StringIO(), stderr=io.StringIO()
-            )
-            self.assertEqual(scheduler.call_count, 1)
-            call_command(
-                "dispatch_exe_submissions", stdout=io.StringIO(), stderr=io.StringIO()
-            )
-            self.assertEqual(scheduler.call_count, 1)
-            self.assertEqual(
-                self.callback(client, row, self.event(row, "CLEANUP")).status_code, 200
-            )
-            call_command(
-                "dispatch_exe_submissions", stdout=io.StringIO(), stderr=io.StringIO()
-            )
-            self.assertEqual(scheduler.call_count, 1)
-        row.refresh_from_db()
-        self.assertEqual(row.last_error_code, "WINDOWS_ASSIGNMENT_NOT_FOUND")
-        self.assertIsNone(row.lease_released_at)
-        self.assertTrue((self.root / row.payload_key).is_file())
-
-    def test_worker_retries_broker_failure_with_same_lease_and_clears_error_on_ack(
-        self,
-    ):
-        row, client = self.completed_for_release()
-        path = self.root / row.payload_key
-        acknowledgement = {"lease_id": str(row.lease_id), "status": "COMPLETED"}
-        with patch(
-            "apps.challenge.windows_assignments._post_scheduler",
-            side_effect=[
-                SchedulerError("BROKER_CALL_FAILED", "fixture", 502),
-                acknowledgement,
-            ],
-        ) as scheduler:
-            call_command(
-                "dispatch_exe_submissions", stdout=io.StringIO(), stderr=io.StringIO()
-            )
-            row.refresh_from_db()
-            self.assertEqual(row.last_error_code, "BROKER_CALL_FAILED")
-            self.assertIsNone(row.lease_released_at)
-            self.assertTrue(path.is_file())
-            self.assertEqual(
-                self.callback(client, row, self.event(row, "CLEANUP")).status_code, 200
-            )
-            row.refresh_from_db()
-            self.assertEqual(row.last_error_code, "BROKER_CALL_FAILED")
-            call_command(
-                "dispatch_exe_submissions", stdout=io.StringIO(), stderr=io.StringIO()
-            )
-            self.assertEqual(scheduler.call_count, 2)
-            self.assertEqual(scheduler.call_args_list[0], scheduler.call_args_list[1])
-        row.refresh_from_db()
-        self.assertEqual(row.last_error_code, "")
-        self.assertIsNotNone(row.lease_released_at)
-        self.assertFalse(path.exists())
-
-    def test_uncertain_release_ack_is_recorded_without_confirming_or_deleting(self):
-        row, _ = self.completed_for_release()
-        with patch(
-            "apps.challenge.windows_assignments._post_scheduler", return_value={}
-        ):
-            with self.assertRaises(SchedulerError):
-                release_windows_assignment(row.pk)
-        row.refresh_from_db()
-        self.assertEqual(row.last_error_code, "SCHEDULER_UNAVAILABLE")
-        self.assertIsNone(row.lease_released_at)
-        self.assertTrue((self.root / row.payload_key).is_file())
-
-
-class WindowsReadinessRefreshTests(ExeFixtures, TestCase):
-    assigned = RemoteRunTests.assigned
-    checker = RemoteRunTests.checker
-
-    def response(self, row, readiness="READY", **overrides):
-        result = {
-            **self.assignment(row),
-            "lease_id": str(row.lease_id),
-            "worker_id": str(row.worker_id),
-            "expires_at": row.lease_expires_at.isoformat(),
-            "vm_readiness": readiness,
-        }
-        if readiness == "READY":
-            result.update(
-                vm_id=row.vm_id or "fixture-vm",
-                readiness_check_id="refreshed-proof",
-                readiness_checked_at=(
-                    timezone.now() - timedelta(seconds=2)
-                ).isoformat(),
-            )
-        return {**result, **overrides}
-
-    def unready(self, row):
-        row.vm_readiness = "UNKNOWN"
-        row.readiness_check_id, row.readiness_checked_at = "", None
-        row.save()
-
-    def test_unknown_becomes_ready_then_dispatches_same_submission(self):
-        row = self.assigned()
-        self.checker(row)
-        self.unready(row)
-        response = self.response(row)
-        with (
-            patch(
-                "apps.challenge.windows_assignments._post_scheduler",
-                return_value=response,
-            ) as scheduler,
-            patch(
-                "apps.challenge.checker_dispatch.checker_request",
-                return_value={"checker_job_id": "one-job"},
-            ) as checker,
-        ):
-            result = dispatch_submission(row.pk)
-        scheduler.assert_called_once_with(
-            "/api/windows-assignments",
-            {
-                "submission_id": str(row.pk),
-                "team_id": str(row.team_id),
-                "challenge_id": str(row.challenge_id),
-                "release_id": str(row.release_id),
-                "payload_sha256": row.payload_sha256,
-            },
-        )
-        self.assertEqual(result.pk, row.pk)
-        self.assertEqual(result.lease_id, row.lease_id)
-        self.assertEqual(result.worker_id, row.worker_id)
-        self.assertEqual(result.readiness_check_id, "refreshed-proof")
-        self.assertEqual(
-            result.readiness_checked_at.isoformat(), response["readiness_checked_at"]
-        )
-        self.assertEqual(result.dispatch_state, "CONFIRMED")
-        self.assertEqual(checker.call_args.args[1], "POST")
-        self.assertEqual(ExeSubmission.objects.count(), 1)
-
-    def test_stale_proof_is_refreshed_without_fabricating_a_new_observation_time(self):
-        row = self.assigned()
-        self.checker(row)
-        row.readiness_checked_at = timezone.now() - timedelta(seconds=31)
-        row.save()
-        response = self.response(row)
-        with (
-            patch(
-                "apps.challenge.windows_assignments._post_scheduler",
-                return_value=response,
-            ) as scheduler,
-            patch(
-                "apps.challenge.checker_dispatch.checker_request",
-                return_value={"checker_job_id": "one-job"},
-            ) as checker,
-        ):
-            result = dispatch_submission(row.pk)
-        scheduler.assert_called_once()
-        checker.assert_called_once()
-        self.assertEqual(
-            result.readiness_checked_at.isoformat(), response["readiness_checked_at"]
-        )
-
-    def test_unknown_or_not_ready_clears_old_proof_without_forgetting_vm_identity(self):
-        row = self.assigned()
-        for readiness in ("UNKNOWN", "NOT_READY"):
-            with self.subTest(readiness=readiness):
-                row.vm_readiness = "READY"
-                row.readiness_checked_at = timezone.now() - timedelta(seconds=31)
-                row.readiness_check_id = "old-proof"
-                row.save()
-                with (
-                    patch(
-                        "apps.challenge.windows_assignments._post_scheduler",
-                        return_value=self.response(row, readiness),
-                    ),
-                    patch("apps.challenge.checker_dispatch.checker_request") as checker,
-                ):
-                    result = dispatch_submission(row.pk)
-                checker.assert_not_called()
-                self.assertEqual(result.status, "ASSIGNED")
-                self.assertEqual(result.dispatch_state, "PENDING")
-                self.assertEqual(result.last_error_code, "WINDOWS_NOT_READY")
-                self.assertEqual(result.vm_readiness, readiness)
-                self.assertEqual(result.vm_id, "fixture-vm")
-                self.assertEqual(result.readiness_check_id, "")
-                self.assertIsNone(result.readiness_checked_at)
-
-    def test_same_body_recovers_from_lookup_failure_without_reassignment(self):
-        row = self.assigned()
-        self.checker(row)
-        self.unready(row)
-        with (
-            patch(
-                "apps.challenge.windows_assignments._post_scheduler",
-                side_effect=[
-                    SchedulerError("BROKER_CALL_FAILED", "private detail", 502),
-                    self.response(row),
-                ],
-            ) as scheduler,
-            patch(
-                "apps.challenge.checker_dispatch.checker_request",
-                return_value={"checker_job_id": "one-job"},
-            ) as checker,
-        ):
-            first = dispatch_submission(row.pk)
-            self.assertEqual(first.last_error_code, "BROKER_CALL_FAILED")
-            self.assertEqual(first.status, "ASSIGNED")
-            checker.assert_not_called()
-            result = dispatch_submission(row.pk)
-        self.assertEqual(scheduler.call_args_list[0], scheduler.call_args_list[1])
-        checker.assert_called_once()
-        self.assertEqual(result.lease_id, row.lease_id)
-        self.assertEqual(result.last_error_code, "")
-
-    def test_changed_lease_worker_or_vm_quarantines_without_overwriting_identity(self):
-        row = self.assigned()
-        self.unready(row)
-        for field, value in (
-            ("lease_id", str(uuid.uuid4())),
-            ("worker_id", str(uuid.uuid4())),
-            ("vm_id", "replacement-vm"),
-        ):
-            with self.subTest(field=field):
-                row.status = "ASSIGNED"
-                row.save()
-                with (
-                    patch(
-                        "apps.challenge.windows_assignments._post_scheduler",
-                        return_value=self.response(row, **{field: value}),
-                    ),
-                    patch("apps.challenge.checker_dispatch.checker_request") as checker,
-                ):
-                    result = dispatch_submission(row.pk)
-                checker.assert_not_called()
-                self.assertEqual(result.status, "START_UNKNOWN")
-                self.assertEqual(result.last_error_code, "WINDOWS_ASSIGNMENT_CONFLICT")
-                self.assertEqual(result.lease_id, row.lease_id)
-                self.assertEqual(result.worker_id, row.worker_id)
-                self.assertEqual(result.vm_id, "fixture-vm")
-                self.assertEqual(result.attempt_state, "RESERVED")
-                self.assertIsNone(result.lease_released_at)
-                self.assertTrue((self.root / row.payload_key).is_file())
-
-    def test_ended_or_expired_assignment_preserves_file_for_review(self):
-        row = self.assigned()
-        self.unready(row)
-        replies = [
-            SchedulerError("WINDOWS_ASSIGNMENT_ENDED", "ended", 409),
-            self.response(row, status="COMPLETED"),
-            self.response(
-                row, expires_at=(timezone.now() - timedelta(seconds=1)).isoformat()
-            ),
-        ]
-        for reply in replies:
-            with self.subTest(reply=type(reply).__name__):
-                row.status = "ASSIGNED"
-                row.save()
-                with (
-                    patch(
-                        "apps.challenge.windows_assignments._post_scheduler",
-                        side_effect=reply if isinstance(reply, Exception) else None,
-                        return_value=reply,
-                    ),
-                    patch("apps.challenge.checker_dispatch.checker_request") as checker,
-                ):
-                    result = dispatch_submission(row.pk)
-                checker.assert_not_called()
-                self.assertEqual(result.status, "START_UNKNOWN")
-                self.assertEqual(result.last_error_code, "WINDOWS_ASSIGNMENT_ENDED")
-                self.assertEqual(result.lease_id, row.lease_id)
-                self.assertIsNone(result.lease_released_at)
-                self.assertTrue((self.root / row.payload_key).is_file())
-        self.assertEqual(ExeSubmission.objects.count(), 1)
-
-    def test_invalid_or_stale_provider_proof_cannot_reuse_cached_ready(self):
-        row = self.assigned()
-        overrides = [
-            {
-                "readiness_checked_at": (
-                    timezone.now() - timedelta(seconds=31)
-                ).isoformat()
-            },
-            {
-                "readiness_checked_at": (
-                    timezone.now() + timedelta(seconds=5)
-                ).isoformat()
-            },
-            {"readiness_check_id": ""},
-            {"vm_id": ""},
-        ]
-        for values in overrides:
-            with self.subTest(values=list(values)):
-                row.vm_readiness = "READY"
-                row.readiness_checked_at = timezone.now() - timedelta(minutes=1)
-                row.save()
-                with (
-                    patch(
-                        "apps.challenge.windows_assignments._post_scheduler",
-                        return_value=self.response(row, **values),
-                    ),
-                    patch("apps.challenge.checker_dispatch.checker_request") as checker,
-                ):
-                    result = dispatch_submission(row.pk)
-                checker.assert_not_called()
-                self.assertEqual(result.last_error_code, "SCHEDULER_UNAVAILABLE")
-                self.assertEqual(result.vm_readiness, "UNKNOWN")
-                self.assertIsNone(result.readiness_checked_at)
-
-    def test_readiness_refresh_does_not_extend_lease(self):
-        row = self.assigned()
-        self.checker(row)
-        self.unready(row)
-        original_expiry = row.lease_expires_at
-        with (
-            patch(
-                "apps.challenge.windows_assignments._post_scheduler",
-                return_value=self.response(
-                    row, expires_at=(original_expiry + timedelta(hours=1)).isoformat()
-                ),
-            ),
-            patch(
-                "apps.challenge.checker_dispatch.checker_request",
-                return_value={"checker_job_id": "one-job"},
-            ),
-        ):
-            result = dispatch_submission(row.pk)
-        self.assertEqual(result.lease_expires_at, original_expiry)
-
-    def test_missing_saved_binding_is_not_reallocated(self):
-        row = self.assigned()
-        self.unready(row)
-        row.worker_id = None
-        row.save()
-        with (
-            patch("apps.challenge.windows_assignments._post_scheduler") as scheduler,
-            patch("apps.challenge.checker_dispatch.checker_request") as checker,
-        ):
-            result = dispatch_submission(row.pk)
-        scheduler.assert_not_called()
-        checker.assert_not_called()
-        self.assertEqual(result.status, "START_UNKNOWN")
-        self.assertEqual(result.last_error_code, "WINDOWS_ASSIGNMENT_CONFLICT")
-
-    def test_already_sent_jobs_never_refresh_or_repost_even_if_readiness_is_stale(self):
-        row = self.assigned()
-        for state in ("UNKNOWN", "SENDING", "CONFIRMED"):
-            with self.subTest(state=state):
-                row.dispatch_state = state
-                row.dispatch_started_at = timezone.now() - timedelta(minutes=1)
-                row.vm_readiness = "UNKNOWN"
-                row.readiness_checked_at = None
-                row.save()
-                with (
-                    patch(
-                        "apps.challenge.windows_assignments._post_scheduler"
-                    ) as scheduler,
-                    patch(
-                        "apps.challenge.checker_dispatch.checker_request",
-                        return_value={"checker_job_id": "same-job"},
-                    ) as checker,
-                ):
-                    dispatch_submission(row.pk)
-                scheduler.assert_not_called()
-                self.assertEqual(checker.call_args.args[1], "GET")
-
-    def test_fresh_ready_uses_existing_proof_without_an_extra_scheduler_lookup(self):
-        row = self.assigned()
-        self.checker(row)
-        with (
-            patch("apps.challenge.windows_assignments._post_scheduler") as scheduler,
-            patch(
-                "apps.challenge.checker_dispatch.checker_request",
-                return_value={"checker_job_id": "one-job"},
-            ) as checker,
-        ):
-            dispatch_submission(row.pk)
-        scheduler.assert_not_called()
-        self.assertEqual(checker.call_args.args[1], "POST")
-
-    def test_periodic_worker_refreshes_preparing_assignment(self):
-        row = self.assigned()
-        self.checker(row)
-        self.unready(row)
-        with (
-            patch(
-                "apps.challenge.windows_assignments._post_scheduler",
-                return_value=self.response(row),
-            ) as scheduler,
-            patch(
-                "apps.challenge.checker_dispatch.checker_request",
-                return_value={"checker_job_id": "one-job"},
-            ) as checker,
-        ):
-            call_command(
-                "dispatch_exe_submissions", stdout=io.StringIO(), stderr=io.StringIO()
-            )
-        scheduler.assert_called_once()
-        checker.assert_called_once()
-        row.refresh_from_db()
-        self.assertEqual(row.dispatch_state, "CONFIRMED")
-
-
 @skipUnless(connection.vendor == "postgresql", "Requires PostgreSQL row locking")
 class ConcurrentRemoteDispatchTests(ExeFixtures, TransactionTestCase):
     assigned = RemoteRunTests.assigned
@@ -1261,16 +711,6 @@ class ConcurrentRemoteDispatchTests(ExeFixtures, TransactionTestCase):
     def test_two_workers_send_one_create_request(self):
         row = self.assigned()
         self.checker(row)
-        response = {
-            **self.assignment(row),
-            "lease_id": str(row.lease_id),
-            "worker_id": str(row.worker_id),
-            "expires_at": row.lease_expires_at.isoformat(),
-            "vm_readiness": "READY",
-            "vm_id": row.vm_id,
-            "readiness_check_id": "refreshed-proof",
-            "readiness_checked_at": timezone.now().isoformat(),
-        }
         row.vm_readiness, row.readiness_checked_at = "UNKNOWN", None
         row.save()
         started, finish = Event(), Event()
@@ -1292,8 +732,7 @@ class ConcurrentRemoteDispatchTests(ExeFixtures, TransactionTestCase):
 
         with (
             patch(
-                "apps.challenge.windows_assignments._post_scheduler",
-                return_value=response,
+                "apps.instances.services.scheduler_request",
             ) as scheduler,
             patch(
                 "apps.challenge.checker_dispatch.checker_request",
@@ -1309,4 +748,4 @@ class ConcurrentRemoteDispatchTests(ExeFixtures, TransactionTestCase):
                     finish.set()
                 self.assertEqual(first.result(timeout=10), row.pk)
         self.assertEqual(calls, ["POST"])
-        scheduler.assert_called_once()
+        scheduler.assert_not_called()

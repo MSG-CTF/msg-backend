@@ -174,13 +174,12 @@ def authenticated_submission(request, submission_id, *, file_access=False):
         raise ExeSubmissionError(
             "TOKEN_INVALID", "배정된 실행 요청과 일치하지 않습니다", 401
         )
+    direct = row.config_snapshot.get("assignment_mode") == "broker_pool"
     if file_access and (
         row.lease_released_at is not None
-        or row.vm_readiness != "READY"
+        or not direct
         or row.cleanup_complete is True
         or row.status not in ["ASSIGNED", "RUNNING"]
-        or not row.lease_expires_at
-        or row.lease_expires_at <= timezone.now()
     ):
         raise ExeSubmissionError(
             "SUBMISSION_NOT_FOUND", "파일을 제공할 수 없는 실행 요청입니다", 404

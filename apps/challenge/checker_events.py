@@ -15,9 +15,10 @@ from apps.challenge.exe_submissions import (
     normalize_exe_output,
 )
 from apps.challenge.models import Challenge, ExeExecutionEvent, ExeSubmission
-from apps.challenge.windows_assignments import RELEASE_ERROR_CODES
 
 PROVENANCE = {"checker_commit_sha": 40, "vm_template_sha256": 64, "driver_sha256": 64}
+# Preserve historical return failures until an operator resolves old records.
+RELEASE_ERROR_CODES = {"WINDOWS_ASSIGNMENT_NOT_FOUND", "BROKER_CALL_FAILED", "SCHEDULER_UNAVAILABLE"}
 COMMON = {
     "request_version",
     "event_id",

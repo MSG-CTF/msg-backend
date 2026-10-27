@@ -117,10 +117,10 @@ class RemoteRunPreflightTests(ExeFixtures, TestCase):
         self.challenge.save(update_fields=["flag_hash"])
         self.assert_not_ready()
 
-    def test_missing_or_malformed_scheduler_token_blocks_enabling(self):
-        for token in ("", " ", "token\r\nheader", "non-ascii-한글", None):
-            with self.subTest(token_type=type(token).__name__), override_settings(
-                SCHEDULER_API_TOKEN=token
+    def test_missing_or_malformed_runtime_pool_blocks_enabling(self):
+        for pool in ("", "invalid", None):
+            with self.subTest(pool_type=type(pool).__name__), override_settings(
+                EXE_WINDOWS_RUNTIME_POOL_ID=pool
             ):
                 self.assert_not_ready()
 
