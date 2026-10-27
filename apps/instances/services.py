@@ -58,6 +58,10 @@ class SchedulerError(Exception):
         self.status_code = status_code
 
 
+class SchedulerResponseError(SchedulerError):
+    """통신은 끝났지만 Scheduler 응답을 해석할 수 없는 경우"""
+
+
 SCHEDULER_DELETE_REASONS = {
     "USER_REQUESTED": DeleteReason.USER_REQUESTED,
     "TTL_EXPIRED": DeleteReason.TTL_EXPIRED,
@@ -408,7 +412,7 @@ def scheduler_request(method, path, body=None, auth_header=None, query=None):
             with urlopen(  # nosec B310
                 request, timeout=settings.SCHEDULER_TIMEOUT_SECONDS
             ) as response:
-                response_body = response.read().decode("utf-8")
+                response_body = response.read()
         except HTTPError as error:
             raise scheduler_error_from_response(error) from error
     except (OSError, HTTPException) as error:
@@ -421,17 +425,21 @@ def scheduler_request(method, path, body=None, auth_header=None, query=None):
     if not response_body:
         return None
 
-    result = json.loads(response_body)
-    return result.get("data")
+    try:
+        result = json.loads(response_body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise SchedulerResponseError(
+            "SCHEDULER_UNAVAILABLE", "인스턴스 서버 응답이 올바르지 않습니다.", 503,
+        ) from error
+    if not isinstance(result, dict) or "data" not in result:
+        raise SchedulerResponseError(
+            "SCHEDULER_UNAVAILABLE", "인스턴스 서버 응답이 올바르지 않습니다.", 503,
+        )
+    return result["data"]
 
 
 def scheduler_error_from_response(error):
     # Scheduler 에러 응답을 백엔드 공통 에러 형식으로 변환한다
-    try:
-        payload = json.loads(error.read().decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        payload = {}
-
     if error.code >= 500:
         return SchedulerError(
             "SCHEDULER_UNAVAILABLE",
@@ -439,9 +447,18 @@ def scheduler_error_from_response(error):
             503,
         )
 
+    try:
+        payload = json.loads(error.read().decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    code = payload.get("code")
+    message = payload.get("message")
+
     return SchedulerError(
-        payload.get("code", "INTERNAL_ERROR"),
-        payload.get("message", "요청 처리 중 오류가 발생했습니다."),
+        code if isinstance(code, str) and code else "INTERNAL_ERROR",
+        message if isinstance(message, str) and message else "요청 처리 중 오류가 발생했습니다.",
         error.code,
     )
 
