@@ -68,7 +68,7 @@ SCHEDULER_DELETE_REASONS = {
     "IDLE_EXPIRED": DeleteReason.IDLE_EXPIRED,
     "HARD_TIMEOUT_EXPIRED": DeleteReason.HARD_TIMEOUT,
     "ADMIN_FORCED": DeleteReason.ADMIN_FORCED,
-    "CREATE_FAILED_CLEANUP": None,
+    "CREATE_FAILED_CLEANUP": DeleteReason.CREATE_FAILED_CLEANUP,
 }
 
 
@@ -492,9 +492,14 @@ def build_scheduler_create_body(user, team, challenge, runtime_config, release):
     return body
 
 
-def call_scheduler_create(user, team, challenge, runtime_config, release, auth_header=None):
+def call_scheduler_create(user, team, challenge, runtime_config, release, auth_header=None,
+                          *, require_replacement_confirmation=False, replace_instance_id=None):
     # Scheduler에 인스턴스 생성을 요청한다
     body = build_scheduler_create_body(user, team, challenge, runtime_config, release)
+    if require_replacement_confirmation:
+        body["require_replacement_confirmation"] = True
+    if replace_instance_id is not None:
+        body["replace_instance_id"] = str(replace_instance_id)
     path = "/api/v2/instances" if any(
         container.get("env") or container.get("secret_ref") for container in body["containers"]
     ) else "/api/instances"
