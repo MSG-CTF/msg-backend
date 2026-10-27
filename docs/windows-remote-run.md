@@ -19,7 +19,9 @@ Backend가 Scheduler에 VM을 배정받거나 Broker와 Windows 실행기를 직
   준비 완료 증거가 아니다. `assignment_mode=broker_pool`은 제출 snapshot에
   고정되므로 이후 전역 설정을 바꿔도 과거 Scheduler 제출을 직접 모드로 바꾸지 않는다.
 - Runtime POST에는 `selection_mode: "broker_pool"`과 제출/배정/팀/문제/release ID,
-  파일 SHA-256, 시간/출력 제한과 승인한 실행 버전만 보낸다. `vm_id`와
+  파일 SHA-256, 시간/출력 제한, `checker_commit_sha`, `config_version`만 보낸다.
+  선택된 VM에서 측정하지 않은 `vm_template_sha256`와 `driver_sha256`는
+  설정에 남아 있더라도 전송하거나 RESULT에 기록하지 않는다. `vm_id`와
   `readiness_check_id`, EXE 바이트, FLAG와 파일 URL은 보내지 않는다.
   `Idempotency-Key`는 `submission_id`다. Runtime이 VM 선택과 Broker 점유를 수행한다.
 - Runtime은 작업 토큰으로 같은 Backend의 `/payload`에서 EXE를 받고 `/events`에

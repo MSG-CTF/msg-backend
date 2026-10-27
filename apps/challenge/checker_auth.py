@@ -15,7 +15,7 @@ from apps.challenge.models import ExeSubmission
 AUDIENCE = "msg-exe-checker-v1"
 
 
-def checker_configuration(worker_id):
+def checker_configuration(worker_id, *, broker_pool=False):
     try:
         if str(uuid.UUID(str(worker_id))) != str(worker_id):
             raise ValueError
@@ -39,20 +39,11 @@ def checker_configuration(worker_id):
         token = os.environ.get(name, "")
         if len(token) < 32:
             raise ValueError
-        pins = {
-            key: item[key]
-            for key in [
-                "checker_commit_sha",
-                "vm_template_sha256",
-                "driver_sha256",
-                "config_version",
-            ]
-        }
-        for key, size in [
-            ("checker_commit_sha", 40),
-            ("vm_template_sha256", 64),
-            ("driver_sha256", 64),
-        ]:
+        pins = {key: item[key] for key in ("checker_commit_sha", "config_version")}
+        if not broker_pool:
+            pins.update({key: item[key] for key in ("vm_template_sha256", "driver_sha256")})
+        digests = [] if broker_pool else [("vm_template_sha256", 64), ("driver_sha256", 64)]
+        for key, size in [("checker_commit_sha", 40), *digests]:
             if not isinstance(pins[key], str) or not re.fullmatch(
                 r"[a-f0-9]{" + str(size) + "}", pins[key]
             ):
@@ -87,7 +78,13 @@ def checker_pool_ready():
         return False
     for worker_id in settings.EXE_CHECKERS:
         try:
-            checker_configuration(worker_id)
+            checker_configuration(
+                worker_id,
+                broker_pool=(
+                    settings.EXE_WINDOWS_DIRECT_RUNTIME_ENABLED
+                    and str(worker_id) == settings.EXE_WINDOWS_RUNTIME_POOL_ID
+                ),
+            )
             return True
         except ExeSubmissionError:
             continue

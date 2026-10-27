@@ -33,6 +33,7 @@ PINS = {
     "driver_sha256": "c" * 64,
     "config_version": "fixture-v1",
 }
+POOL_PINS = {key: PINS[key] for key in ("checker_commit_sha", "config_version")}
 
 
 class RemoteRunTests(ExeFixtures, TestCase):
@@ -86,7 +87,8 @@ class RemoteRunTests(ExeFixtures, TestCase):
 
     def assigned(self):
         row = self.accepted()
-        row.config_snapshot = {**row.config_snapshot, "execution_provenance": PINS}
+        pins = POOL_PINS if row.config_snapshot.get("assignment_mode") == "broker_pool" else PINS
+        row.config_snapshot = {**row.config_snapshot, "execution_provenance": pins}
         row.save()
         return row
 
@@ -111,6 +113,7 @@ class RemoteRunTests(ExeFixtures, TestCase):
         return client
 
     def event(self, row, kind="RESULT", **values):
+        pins = POOL_PINS if row.config_snapshot.get("assignment_mode") == "broker_pool" else PINS
         body = {
             "request_version": 1,
             "event_id": str(uuid.uuid4()),
@@ -118,7 +121,7 @@ class RemoteRunTests(ExeFixtures, TestCase):
             "payload_sha256": row.payload_sha256,
             "event_type": kind,
             "observed_at": timezone.now().isoformat(),
-            **PINS,
+            **pins,
         }
         if kind == "STARTED":
             body.update(started=True, started_at=timezone.now().isoformat())
@@ -451,7 +454,7 @@ class RemoteRunTests(ExeFixtures, TestCase):
             del body[field]
             self.assertEqual(self.callback(client, row, body).status_code, 400)
         for values, status in [
-            ({"driver_sha256": "d" * 64}, 409),
+            ({"driver_sha256": "d" * 64}, 400),
             ({"verdict": "CORRECT"}, 400),
             ({"driverSha256": "d" * 64}, 400),
             ({"event_type": []}, 400),
@@ -633,17 +636,17 @@ class RemoteRunTests(ExeFixtures, TestCase):
     def test_invalid_cleanup_provenance_cannot_confirm_cleanup(self):
         row = self.assigned()
         client = self.checker(row)
-        for values in (
-            {"assignment_id": str(uuid.uuid4())},
-            {"payload_sha256": "d" * 64},
-            {"driver_sha256": "e" * 64},
+        for values, status in (
+            ({"assignment_id": str(uuid.uuid4())}, 409),
+            ({"payload_sha256": "d" * 64}, 409),
+            ({"driver_sha256": "e" * 64}, 400),
         ):
             with self.subTest(values=values):
                 self.assertEqual(
                     self.callback(
                         client, row, self.event(row, "CLEANUP", **values)
                     ).status_code,
-                    409,
+                    status,
                 )
         row.refresh_from_db()
         self.assertIsNone(row.cleanup_confirmed_at)

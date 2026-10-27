@@ -118,7 +118,7 @@ class CheckerTokenRefreshView(CheckerView):
                 "SUBMISSION_NOT_FOUND", "실행 요청을 찾지 못했습니다", 404
             )
         header = request.headers.get("Authorization", "")
-        _, service_token, _ = checker_configuration(row.worker_id)
+        _, service_token, _ = checker_configuration(row.worker_id, broker_pool=True)
         if (
             not header.startswith("Bearer ")
             or len(header) > 4096

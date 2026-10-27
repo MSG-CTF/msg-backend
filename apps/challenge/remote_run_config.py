@@ -46,7 +46,7 @@ def _backend_ready(challenge):
         pool = uuid.UUID(settings.EXE_WINDOWS_RUNTIME_POOL_ID)
         if pool.int == 0 or str(pool) != settings.EXE_WINDOWS_RUNTIME_POOL_ID:
             return False
-        checker_configuration(str(pool))
+        checker_configuration(str(pool), broker_pool=True)
     except (ValueError, TypeError, AttributeError, ExeSubmissionError):
         return False
     try:

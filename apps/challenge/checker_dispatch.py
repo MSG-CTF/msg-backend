@@ -18,7 +18,10 @@ class _NoRedirect(HTTPRedirectHandler):
 
 
 def checker_request(row, method):
-    origin, token, _ = checker_configuration(row.worker_id)
+    origin, token, _ = checker_configuration(
+        row.worker_id,
+        broker_pool=row.config_snapshot.get("assignment_mode") == "broker_pool",
+    )
     path = "/v1/checker-submissions" + (f"/{row.pk}" if method == "GET" else "")
     body = None
     if method == "POST":
@@ -100,7 +103,7 @@ def dispatch_submission(submission_id):
                 row.last_error_code = "WINDOWS_CONFIG_NOT_READY"
                 row.save(update_fields=["last_error_code", "updated_at"])
                 return row
-            _, _, pins = checker_configuration(row.worker_id)
+            _, _, pins = checker_configuration(row.worker_id, broker_pool=True)
             mint_job_token(row)
             row.config_snapshot = {**row.config_snapshot, "execution_provenance": pins}
         row.dispatch_state, row.dispatch_started_at = "SENDING", now
