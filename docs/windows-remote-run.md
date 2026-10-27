@@ -5,7 +5,9 @@
 `EXE_WINDOWS_DIRECT_RUNTIME_ENABLED=True`인 새 `pwn-msgdriver` 제출은
 Backend -> Runtime -> Broker -> Windows HTTPS 실행기 경로를 사용한다.
 Backend가 Scheduler에 VM을 배정받거나 Broker와 Windows 실행기를 직접 호출하지 않는다.
-기본값은 False이며 꺼져 있으면 Windows 접수를 차단한다. Scheduler로 fallback하지 않는다.
+접수·전송·직접 Runtime 모드의 세 플래그 기본값은 True다. 환경변수로 False를 명시하면
+해당 기능을 끌 수 있으며, 직접 Runtime 모드를 끄면 접수를 차단한다. Scheduler로 fallback하지 않는다.
+플래그가 True여도 Runtime 인증·비공개 저장소·승인 release 등 필수 설정 검사는 유지한다.
 
 - `EXE_WINDOWS_RUNTIME_POOL_ID`는 `EXE_CHECKERS_JSON`에 등록된 논리적 Runtime
   UUID다. 실제 VM UUID나 노드 ID를 넣지 않는다. 선택한 풀의 HTTPS 주소, 서비스
@@ -50,7 +52,8 @@ Broker의 RESET_REQUIRED나 RESULT의 cleanup_complete 힌트로 정리를 완�
 실제 복구와 별도 CLEANUP(true) 확인 전에는 파일 삭제/추적 종료/같은 팀의 새 실행을
 허용하지 않는다. 따라서 RESULT 뒤 CLEANUP_PENDING은 이 단계의 예상 상태다.
 Runtime #97은 FLAG 주입, VM 이미지 복구와 CLEANUP(true)를 제공하지 않으므로 실제
-문제 접수는 계속 비활성으로 유지한다. 복구와 정리 계약이 검증된 뒤 별도 활성화한다.
+문제 운영이 미검증인 환경은 접수·전송 플래그를 False로 명시해 비활성으로 유지한다.
+복구와 정리 계약이 검증된 뒤 별도 활성화한다.
 
 ## 이전 실행 기록
 

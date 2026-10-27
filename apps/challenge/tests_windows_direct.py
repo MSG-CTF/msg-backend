@@ -1,16 +1,18 @@
 import io
 import json
 import os
+import runpy
 import secrets
 import uuid
 from datetime import timedelta
+from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
 
 import jwt
 from django.conf import settings
 from django.core.management import call_command
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -25,6 +27,36 @@ from apps.teams.models import MileageHistory
 
 
 POOL_ID = "00000000-0000-0000-0000-000000000001"
+
+
+class WindowsRuntimeFlagSettingsTests(SimpleTestCase):
+    flags = (
+        "EXE_SUBMISSIONS_ENABLED",
+        "EXE_DISPATCH_ENABLED",
+        "EXE_WINDOWS_DIRECT_RUNTIME_ENABLED",
+    )
+
+    def load_settings(self, **flags):
+        environment = {
+            "DJANGO_SECRET_KEY": secrets.token_urlsafe(48),
+            "JWT_SECRET": secrets.token_urlsafe(48),
+            **flags,
+        }
+        with patch.dict(os.environ, environment, clear=True), patch("dotenv.load_dotenv"):
+            return runpy.run_path(
+                str(Path(__file__).resolve().parents[2] / "config" / "settings.py")
+            )
+
+    def test_windows_flags_default_to_enabled(self):
+        configuration = self.load_settings()
+        for flag in self.flags:
+            with self.subTest(flag=flag):
+                self.assertIs(configuration[flag], True)
+
+    def test_windows_flags_can_be_explicitly_disabled(self):
+        for flag in self.flags:
+            with self.subTest(flag=flag):
+                self.assertIs(self.load_settings(**{flag: "False"})[flag], False)
 
 
 class WindowsDirectRuntimeTests(ExeFixtures, TestCase):

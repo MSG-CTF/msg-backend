@@ -353,8 +353,8 @@ if (
 
 SCHEDULER_TIMEOUT_SECONDS = int(os.getenv("SCHEDULER_TIMEOUT_SECONDS", "5"))
 
-# Leave disabled until execution, callbacks and VM restoration are verified.
-EXE_SUBMISSIONS_ENABLED = os.getenv("EXE_SUBMISSIONS_ENABLED", "False").lower() == "true"
+# Set False explicitly to disable acceptance or dispatch in an environment.
+EXE_SUBMISSIONS_ENABLED = os.getenv("EXE_SUBMISSIONS_ENABLED", "True").lower() == "true"
 EXE_SUBMISSION_STORAGE_ROOT = os.getenv("EXE_SUBMISSION_STORAGE_ROOT", "")
 EXE_CHECKER_SIGNING_KEY = os.getenv("EXE_CHECKER_SIGNING_KEY", "")
 # Operator-owned mapping of worker/logical Runtime pool UUIDs to HTTPS origins.
@@ -365,9 +365,9 @@ except ValueError as error:
     raise ImproperlyConfigured("EXE_CHECKERS_JSON 형식을 확인해주세요") from error
 if not isinstance(EXE_CHECKERS, dict):
     raise ImproperlyConfigured("EXE_CHECKERS_JSON은 worker UUID별 객체여야 합니다")
-EXE_DISPATCH_ENABLED = os.getenv("EXE_DISPATCH_ENABLED", "False").lower() == "true"
+EXE_DISPATCH_ENABLED = os.getenv("EXE_DISPATCH_ENABLED", "True").lower() == "true"
 # Windows only: select a logical Runtime pool instead of a Scheduler VM.
-EXE_WINDOWS_DIRECT_RUNTIME_ENABLED = os.getenv("EXE_WINDOWS_DIRECT_RUNTIME_ENABLED", "False").lower() == "true"
+EXE_WINDOWS_DIRECT_RUNTIME_ENABLED = os.getenv("EXE_WINDOWS_DIRECT_RUNTIME_ENABLED", "True").lower() == "true"
 EXE_WINDOWS_RUNTIME_POOL_ID = os.getenv("EXE_WINDOWS_RUNTIME_POOL_ID", "")
 
 # Proposed Runtime #70 APIs; never enable before provider deployment and approval.
