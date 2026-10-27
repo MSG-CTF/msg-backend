@@ -86,7 +86,7 @@ class KothSecurityFixTests(TestCase):
     # F08
     def test_team_token_has_no_store(self):
         self.auth()
-        r = self.client.get("/api/v1/koth/team_token")
+        r = self.client.get(f"/api/v1/koth/team_token?koth_challenge_id={self.active.pk}")
         self.assertIn("no-store", r.headers.get("Cache-Control", "").lower())
 
     # BK-08
@@ -134,7 +134,7 @@ class KothSecurityFixTests(TestCase):
 
     def test_valid_verify_does_not_need_failure_counter(self):
         self.auth()
-        token = self.client.get("/api/v1/koth/team_token").data["data"]["team_token"]
+        token = self.client.get(f"/api/v1/koth/team_token?koth_challenge_id={self.active.pk}").data["data"]["team_token"]
         self.client.credentials()
         with patch("apps.koth.views.cache.add", side_effect=ConnectionError) as add:
             response = self.client.post(
@@ -180,7 +180,7 @@ class KothSecurityFixTests(TestCase):
     def test_valid_verify_not_throttled(self):
         # 유효 토큰은 실패 집계와 무관해야 한다
         self.auth()
-        token = self.client.get("/api/v1/koth/team_token").data["data"]["team_token"]
+        token = self.client.get(f"/api/v1/koth/team_token?koth_challenge_id={self.active.pk}").data["data"]["team_token"]
         self.client.credentials()
         cid = str(self.active.koth_challenge_id)
         for _ in range(25):

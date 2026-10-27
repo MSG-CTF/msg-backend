@@ -335,10 +335,23 @@ def leaderboard(request):
 @permission_classes([IsAuthenticated])
 def team_token(request):
     team = _request_team(request)
-    raw_token = build_team_token(team.team_id)
+    challenge_id = request.query_params.get("koth_challenge_id")
+    if challenge_id is None:
+        raise KothChallengeIdRequired()
+    try:
+        parsed_id = uuid.UUID(str(challenge_id))
+    except (ValueError, TypeError, AttributeError):
+        raise InvalidKothChallengeId()
+    try:
+        challenge = KothChallenge.objects.get(pk=parsed_id)
+    except KothChallenge.DoesNotExist:
+        raise KothChallengeNotFound()
+    raw_token = build_team_token(team.team_id, challenge.koth_challenge_id)
     with transaction.atomic():
         stored, created = KothTeamToken.objects.get_or_create(
-            team=team, defaults={"token_hash": hash_token(raw_token)}
+            team=team,
+            challenge=challenge,
+            defaults={"token_hash": hash_token(raw_token)},
         )
         if not created and not matches_token(raw_token, stored.token_hash):
             # 비밀값이 교체됐을 때는 운영자가 토큰을 의도적으로 재발급할 수 있게 갱신한다.
@@ -349,6 +362,7 @@ def team_token(request):
         {
             "team_id": str(team.team_id),
             "team_name": team.team_name,
+            "koth_challenge_id": str(challenge.koth_challenge_id),
             "team_token": raw_token,
             "issued_at": stored.issued_at,
         }
@@ -425,7 +439,7 @@ def verify_team_token(request):
     candidate_hash = hash_token(request.data["team_token"])
     token = (
         KothTeamToken.objects.select_related("team")
-        .filter(token_hash=candidate_hash)
+        .filter(token_hash=candidate_hash, challenge=challenge)
         .first()
     )
     valid = token is not None and not token.team.is_banned

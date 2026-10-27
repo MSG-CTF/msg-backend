@@ -231,17 +231,30 @@ class KothPublication(models.Model):
 
 
 class KothTeamToken(models.Model):
-    team = models.OneToOneField(
+    team = models.ForeignKey(
         "accounts.Team",
         on_delete=models.CASCADE,
         db_column="team_id",
-        related_name="koth_team_token",
+        related_name="koth_team_tokens",
+    )
+    challenge = models.ForeignKey(
+        KothChallenge,
+        on_delete=models.CASCADE,
+        db_column="koth_challenge_id",
+        null=True,
+        blank=True,
+        related_name="team_tokens",
     )
     token_hash = models.CharField(max_length=64, unique=True)
     issued_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         db_table = "koth_team_tokens"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["team", "challenge"], name="uq_koth_team_challenge_token"
+            ),
+        ]
 
 
 class KothSolve(models.Model):
