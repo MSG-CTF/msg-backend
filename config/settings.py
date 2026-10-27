@@ -1,3 +1,4 @@
+import json
 import math
 import os
 from pathlib import Path
@@ -352,9 +353,19 @@ if (
 
 SCHEDULER_TIMEOUT_SECONDS = int(os.getenv("SCHEDULER_TIMEOUT_SECONDS", "5"))
 
-# Contract scaffolding only; leave disabled until the checker integration is verified.
+# Leave disabled until Azure assignment, guest readiness and checker callbacks are verified.
 EXE_SUBMISSIONS_ENABLED = os.getenv("EXE_SUBMISSIONS_ENABLED", "False").lower() == "true"
 EXE_SUBMISSION_STORAGE_ROOT = os.getenv("EXE_SUBMISSION_STORAGE_ROOT", "")
+EXE_CHECKER_SIGNING_KEY = os.getenv("EXE_CHECKER_SIGNING_KEY", "")
+# Operator-owned mapping of Broker worker UUIDs to verified HTTPS checker origins.
+# The mapping contains no participant-controlled URL and is never exposed in API responses.
+try:
+    EXE_CHECKERS = json.loads(os.getenv("EXE_CHECKERS_JSON", "{}"))
+except ValueError as error:
+    raise ImproperlyConfigured("EXE_CHECKERS_JSON 형식을 확인해주세요") from error
+if not isinstance(EXE_CHECKERS, dict):
+    raise ImproperlyConfigured("EXE_CHECKERS_JSON은 worker UUID별 객체여야 합니다")
+EXE_DISPATCH_ENABLED = os.getenv("EXE_DISPATCH_ENABLED", "False").lower() == "true"
 
 # Proposed Runtime #70 APIs; never enable before provider deployment and approval.
 IMAGE_PREPARATION_ENABLED = os.getenv("IMAGE_PREPARATION_ENABLED", "False").lower() == "true"
@@ -364,6 +375,8 @@ IMAGE_PREPARATION_TARGET_IDS = os.getenv("IMAGE_PREPARATION_TARGET_IDS", "")
 IMAGE_PREPARATION_TIMEOUT_SECONDS = os.getenv("IMAGE_PREPARATION_TIMEOUT_SECONDS", "5")
 IMAGE_PREPARATION_POLL_SECONDS = os.getenv("IMAGE_PREPARATION_POLL_SECONDS", "15")
 IMAGE_PREPARATION_MAX_ATTEMPTS = os.getenv("IMAGE_PREPARATION_MAX_ATTEMPTS", "3")
+IMAGE_PREPARATION_ACTIVATE_WHEN_READY = os.getenv("IMAGE_PREPARATION_ACTIVATE_WHEN_READY", "False").lower() == "true"
+IMAGE_PREPARATION_READINESS_MAX_AGE_SECONDS = os.getenv("IMAGE_PREPARATION_READINESS_MAX_AGE_SECONDS", "60")
 
 # 새 비밀값은 첫 키로 암호화하고, 이전 키는 복호화에만 사용한다
 RUNTIME_SECRET_ENCRYPTION_KEYS = [

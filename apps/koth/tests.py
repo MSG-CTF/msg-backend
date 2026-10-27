@@ -258,6 +258,7 @@ class KothApiTests(TestCase):
         )
         self.team.is_banned = True
         self.team.save(update_fields=["is_banned"])
+        self.auth("other")
         self.assertEqual(
             self.client.get(url).data["data"]["challenges"][0]["current_owner_team_id"],
             str(self.other.pk),
