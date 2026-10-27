@@ -479,7 +479,20 @@ class UserFilesPollerTests(UserFilesTestBase):
         ):
             call_command("poll_releases", stdout=io.StringIO(), stderr=io.StringIO())
 
-        user_files_poll.assert_called_once_with(token="token")
+        user_files_poll.assert_called_once_with(token="token", full_scan=False)
+
+    @override_settings(RELEASE_POLL_GITHUB_TOKEN="token")
+    def test_release_command_full_scan_rechecks_both_bundle_kinds(self):
+        empty = {"registered": 0, "duplicate": 0, "unmatched": 0, "invalid": 0, "error": 0}
+        with (
+            patch("apps.instances.management.commands.poll_releases.poll_once", return_value=empty) as releases,
+            patch("apps.instances.management.commands.poll_releases.poll_user_files_once",
+                  return_value=empty) as user_files_poll,
+        ):
+            call_command("poll_releases", "--full-scan", stdout=io.StringIO(), stderr=io.StringIO())
+
+        releases.assert_called_once_with(token="token", full_scan=True)
+        user_files_poll.assert_called_once_with(token="token", full_scan=True)
 
 
 class ChallengeUserFilesApiTests(UserFilesTestBase):
