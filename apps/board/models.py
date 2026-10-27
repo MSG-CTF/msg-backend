@@ -375,6 +375,8 @@ class TeamBoardState(models.Model):
         related_name="active_board_states",
     )
     next_dice_reset_at = models.DateTimeField(null=True, blank=True)
+    # 보드 완료로 충전을 멈췄을 때 남아 있던 시간(초). 관리자가 재개하면 이 시간부터 다시 센다.
+    recharge_paused_seconds = models.PositiveIntegerField(null=True, blank=True)
     airport_move_used = models.BooleanField(default=False)
     has_passed_start = models.BooleanField(default=False)
     updated_at = models.DateTimeField(auto_now=True)
