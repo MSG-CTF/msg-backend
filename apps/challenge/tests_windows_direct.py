@@ -64,9 +64,13 @@ class WindowsDirectRuntimeTests(ExeFixtures, TestCase):
 
     def setUp(self):
         super().setUp()
+        checker = dict(settings.EXE_CHECKERS[POOL_ID])
+        checker.pop("vm_template_sha256")
+        checker.pop("driver_sha256")
         direct = override_settings(
             EXE_WINDOWS_DIRECT_RUNTIME_ENABLED=True,
             EXE_WINDOWS_RUNTIME_POOL_ID=POOL_ID,
+            EXE_CHECKERS={POOL_ID: checker},
             SCHEDULER_API_TOKEN="",
         )
         direct.enable()
@@ -139,7 +143,7 @@ class WindowsDirectRuntimeTests(ExeFixtures, TestCase):
         self.assertEqual(body["payload_sha256"], row.payload_sha256)
         self.assertEqual(body["release_id"], str(row.release_id))
         self.assertEqual(body["timeout_seconds"], self.remote.timeout_seconds)
-        for key in ("vm_id", "readiness_check_id", "file", "payload", "flag", "url"):
+        for key in ("vm_id", "readiness_check_id", "vm_template_sha256", "driver_sha256", "file", "payload", "flag", "url"):
             self.assertNotIn(key, body)
         self.assertNotIn(b"local-exe-test", request.data)
         self.assertEqual(request.get_header("Idempotency-key"), str(row.pk))
@@ -223,6 +227,8 @@ class WindowsDirectRuntimeTests(ExeFixtures, TestCase):
         self.assertTrue(replay.data["data"]["duplicate"])
         row.refresh_from_db()
         self.assertEqual((row.status, row.stdout, row.exit_code), ("COMPLETED", "participant output", 0))
+        self.assertIsNone(row.vm_template_sha256)
+        self.assertIsNone(row.driver_sha256)
         self.assertIsNone(row.cleanup_complete)
         self.assertIsNone(row.cleanup_confirmed_at)
         self.assertIsNone(row.lease_released_at)
@@ -242,6 +248,23 @@ class WindowsDirectRuntimeTests(ExeFixtures, TestCase):
         self.assertEqual(self.result(row, assignment_id=str(uuid.uuid4())).status_code, 409)
         row.refresh_from_db()
         self.assertIsNone(row.finished_at)
+
+    def test_result_cannot_claim_unmeasured_vm_or_driver_digests(self):
+        row = self.accepted()
+        self.dispatch(row)
+        response = self.result(row, vm_template_sha256="b" * 64, driver_sha256="c" * 64)
+        self.assertEqual(response.status_code, 400)
+        row.refresh_from_db()
+        self.assertIsNone(row.finished_at)
+
+    def test_direct_pool_ignores_static_vm_digest_settings(self):
+        checker = {**settings.EXE_CHECKERS[POOL_ID], "vm_template_sha256": "b" * 64, "driver_sha256": "c" * 64}
+        with override_settings(EXE_CHECKERS={POOL_ID: checker}):
+            self.assertTrue(remote_run_data(self.challenge)["can_enable"])
+            row = self.accepted()
+            body = json.loads(self.dispatch(row).data)
+            self.assertNotIn("vm_template_sha256", body)
+            self.assertNotIn("driver_sha256", body)
 
     def test_result_can_arrive_before_post_acknowledgement(self):
         row = self.accepted()

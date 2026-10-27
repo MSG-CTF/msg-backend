@@ -17,6 +17,7 @@ from apps.challenge.exe_submissions import (
 from apps.challenge.models import Challenge, ExeExecutionEvent, ExeSubmission
 
 PROVENANCE = {"checker_commit_sha": 40, "vm_template_sha256": 64, "driver_sha256": 64}
+POOL_PROVENANCE = {"checker_commit_sha": 40}
 # Preserve historical return failures until an operator resolves old records.
 RELEASE_ERROR_CODES = {"WINDOWS_ASSIGNMENT_NOT_FOUND", "BROKER_CALL_FAILED", "SCHEDULER_UNAVAILABLE"}
 COMMON = {
@@ -27,7 +28,7 @@ COMMON = {
     "event_type",
     "observed_at",
     "config_version",
-    *PROVENANCE,
+    *POOL_PROVENANCE,
 }
 
 
@@ -47,10 +48,12 @@ def utc_time(value):
         ) from None
 
 
-def validate_event(body):
+def validate_event(body, *, broker_pool=False):
+    provenance = POOL_PROVENANCE if broker_pool else PROVENANCE
+    expected_common = COMMON | set(provenance)
     if (
         not isinstance(body, dict)
-        or not COMMON <= set(body)
+        or not expected_common <= set(body)
         or type(body.get("request_version")) is not int
         or body["request_version"] != 1
     ):
@@ -71,14 +74,14 @@ def validate_event(body):
         },
         "CLEANUP": {"cleanup_complete"},
     }.get(kind)
-    if fields is None or set(body) != COMMON | fields:
+    if fields is None or set(body) != expected_common | fields:
         raise ExeSubmissionError("INVALID_EVENT", "허용되지 않은 실행 결과 항목입니다")
     try:
         uuid.UUID(body["event_id"])
         uuid.UUID(body["assignment_id"])
         if not re.fullmatch(r"[a-f0-9]{64}", body["payload_sha256"]):
             raise ValueError
-        for name, length in PROVENANCE.items():
+        for name, length in provenance.items():
             if not re.fullmatch(r"[a-f0-9]{" + str(length) + "}", body[name]):
                 raise ValueError
         if (
@@ -162,7 +165,8 @@ def validate_event(body):
 
 
 def apply_event(authenticated, body):
-    kind = validate_event(body)
+    broker_pool = authenticated.config_snapshot.get("assignment_mode") == "broker_pool"
+    kind = validate_event(body, broker_pool=broker_pool)
     event_id = uuid.UUID(body["event_id"])
     fingerprint = salted_hmac(
         "exe-event-v1",
@@ -196,7 +200,8 @@ def apply_event(authenticated, body):
             raise ExeSubmissionError(
                 "INVALID_STATE_TRANSITION", "이미 정리된 실행입니다", 409
             )
-        for name in [*PROVENANCE, "config_version"]:
+        provenance = POOL_PROVENANCE if broker_pool else PROVENANCE
+        for name in [*provenance, "config_version"]:
             expected = row.config_snapshot.get("execution_provenance", {}).get(name)
             if expected is None or expected != body[name]:
                 raise ExeSubmissionError(
