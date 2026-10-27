@@ -41,7 +41,7 @@ class RemoteRunPreflightTests(ExeFixtures, TestCase):
             format="json",
         )
         self.assertEqual(
-            (response.status_code, response.data["code"]), (409, "RELEASE_NOT_READY")
+            (response.status_code, response.data["code"]), (409, "EXECUTION_NOT_READY")
         )
         self.remote.refresh_from_db()
         self.assertFalse(self.remote.enabled)

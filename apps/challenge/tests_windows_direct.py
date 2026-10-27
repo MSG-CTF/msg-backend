@@ -23,6 +23,7 @@ from apps.challenge.models import ExeSubmission, FlagSubmission, Solve
 from apps.challenge.remote_run_config import remote_run_data
 from apps.challenge.tests_exe_submissions import ExeFixtures, harmless_pe
 from apps.challenge import tests_remote_run as remote_tests
+from apps.instances.models import ChallengeRuntimeConfig
 from apps.teams.models import MileageHistory
 
 
@@ -95,6 +96,39 @@ class WindowsDirectRuntimeTests(ExeFixtures, TestCase):
         client.credentials(HTTP_AUTHORIZATION="Bearer " + mint_job_token(row))
         return client
 
+    def remove_unrelated_release(self):
+        ChallengeRuntimeConfig.objects.filter(challenge=self.challenge).delete()
+        self.release.delete()
+
+    def test_broker_pool_accepts_exe_without_backend_release(self):
+        self.remove_unrelated_release()
+        self.assertTrue(remote_run_data(self.challenge)["can_enable"])
+        row = self.accepted()
+        self.assertIsNone(row.release_id)
+        self.assertEqual(row.config_snapshot["assignment_mode"], "broker_pool")
+
+    def test_release_free_pool_request_and_token_deliver_result(self):
+        self.remove_unrelated_release()
+        row = self.accepted()
+        outbound = self.dispatch(row)
+        self.assertNotIn("release_id", json.loads(outbound.data))
+        token = mint_job_token(row)
+        claims = jwt.decode(token, signing_key(), algorithms=["HS256"], audience=AUDIENCE)
+        self.assertNotIn("release_id", claims)
+        self.assertEqual(self.result(row).status_code, 200)
+        row.refresh_from_db()
+        self.assertEqual((row.status, row.stdout, row.exit_code), ("COMPLETED", "participant output", 0))
+
+    def test_existing_pool_job_keeps_its_release_binding(self):
+        row = self.accepted()
+        ExeSubmission.objects.filter(pk=row.pk).update(release=self.release)
+        row.refresh_from_db()
+        outbound = self.dispatch(row)
+        self.assertEqual(json.loads(outbound.data)["release_id"], str(self.release.pk))
+        claims = jwt.decode(mint_job_token(row), signing_key(), algorithms=["HS256"], audience=AUDIENCE)
+        self.assertEqual(claims["release_id"], str(self.release.pk))
+        self.assertEqual(self.result(row).status_code, 200)
+
     def refresh_token(self, row, *, token=None, body=None):
         client = APIClient()
         if token is not None:
@@ -141,7 +175,7 @@ class WindowsDirectRuntimeTests(ExeFixtures, TestCase):
         self.assertEqual(body["submission_id"], str(row.pk))
         self.assertEqual(body["assignment_id"], str(row.lease_id))
         self.assertEqual(body["payload_sha256"], row.payload_sha256)
-        self.assertEqual(body["release_id"], str(row.release_id))
+        self.assertNotIn("release_id", body)
         self.assertEqual(body["timeout_seconds"], self.remote.timeout_seconds)
         for key in ("vm_id", "readiness_check_id", "vm_template_sha256", "driver_sha256", "file", "payload", "flag", "url"):
             self.assertNotIn(key, body)
@@ -199,6 +233,17 @@ class WindowsDirectRuntimeTests(ExeFixtures, TestCase):
         response = self.runtime(row).get(f"/internal/v1/checker-submissions/{row.pk}/secret")
         self.assertEqual(response.status_code, 403)
         self.assertNotIn(b"local-exe-test", response.content)
+
+    def test_release_free_job_token_rejects_invented_release_claim(self):
+        self.remove_unrelated_release()
+        row = self.accepted()
+        claims = jwt.decode(mint_job_token(row), signing_key(), algorithms=["HS256"], audience=AUDIENCE)
+        claims["release_id"] = str(uuid.uuid4())
+        forged = jwt.encode(claims, signing_key(), algorithm="HS256")
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION="Bearer " + forged)
+        response = client.get(f"/internal/v1/checker-submissions/{row.pk}/payload")
+        self.assertEqual(response.status_code, 401)
 
     def test_other_backend_signing_key_cannot_read_or_post_result(self):
         row = self.accepted()

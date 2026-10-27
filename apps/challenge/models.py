@@ -208,6 +208,8 @@ class ExeSubmission(models.Model):
         "instances.ChallengeRelease",
         on_delete=models.PROTECT,
         related_name="exe_submissions",
+        null=True,
+        blank=True,
     )
     idempotency_key = models.UUIDField()
     payload_key = models.CharField(max_length=200, blank=True)

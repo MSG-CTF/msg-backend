@@ -20,7 +20,6 @@ from apps.challenge.remote_run_config import (
     retry_after_seconds,
 )
 from apps.common.exceptions import APIError
-from apps.instances.models import ArchitectureType, ChallengeRuntimeConfig, RuntimeType
 from apps.instances.models import RuntimeSecret
 from apps.instances.runtime_secrets import (
     decrypt_runtime_secret,
@@ -50,8 +49,13 @@ def require_exe_enabled():
 
 
 def private_payload_storage():
-    root = Path(settings.EXE_SUBMISSION_STORAGE_ROOT)
-    if not settings.EXE_SUBMISSION_STORAGE_ROOT or not root.is_absolute():
+    configured = settings.EXE_SUBMISSION_STORAGE_ROOT
+    if not isinstance(configured, str) or not configured or "\x00" in configured:
+        raise ExeSubmissionError(
+            "SUBMISSION_UNAVAILABLE", "Private storage is not configured.", 503
+        )
+    root = Path(configured)
+    if not root.is_absolute():
         raise ExeSubmissionError(
             "SUBMISSION_UNAVAILABLE", "Private storage is not configured.", 503
         )
@@ -261,7 +265,7 @@ def accept_exe(user, challenge_id, key, uploaded_file):
             remote = get_remote_config(challenge)
             if remote is None or not remote_run_data(challenge)["available"]:
                 raise ExeSubmissionError(
-                    "RELEASE_NOT_READY",
+                    "EXECUTION_NOT_READY",
                     "실행 환경 연결을 준비하고 있습니다",
                     409,
                 )
@@ -297,22 +301,6 @@ def accept_exe(user, challenge_id, key, uploaded_file):
                 raise ExeSubmissionError(
                     "INVALID_EXECUTABLE", "설정한 크기의 .exe 파일을 선택해주세요", 422
                 )
-            config = (
-                ChallengeRuntimeConfig.objects.filter(challenge=challenge)
-                .select_related("current_release")
-                .first()
-            )
-            release = config.current_release if config else None
-            if (
-                release is None
-                or release.challenge_id != challenge.pk
-                or release.runtime_type != RuntimeType.VM
-                or release.architecture != ArchitectureType.AMD64
-                or release.approved_at is None
-            ):
-                raise ExeSubmissionError(
-                    "RELEASE_NOT_READY", "An AMD64 VM release is required.", 409
-                )
             secret = exe_flag_secret(challenge)
             submission_id = uuid.uuid4()
             pool_id = uuid.UUID(settings.EXE_WINDOWS_RUNTIME_POOL_ID)
@@ -325,7 +313,7 @@ def accept_exe(user, challenge_id, key, uploaded_file):
                 team=team,
                 challenge=challenge,
                 user_id=user.pk,
-                release=release,
+                release=None,
                 idempotency_key=key,
                 payload_key=payload_key,
                 payload_sha256=digest,

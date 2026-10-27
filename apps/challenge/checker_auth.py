@@ -97,20 +97,18 @@ def mint_job_token(submission):
             "CHECKER_NOT_READY", "실행 대상 배정을 확인해주세요", 409
         )
     now = timezone.now()
-    return jwt.encode(
-        {
-            "aud": AUDIENCE,
-            "sub": str(submission.pk),
-            "worker_id": str(submission.worker_id),
-            "assignment_id": str(submission.lease_id),
-            "release_id": str(submission.release_id),
-            "payload_sha256": submission.payload_sha256,
-            "iat": now,
-            "exp": now + timedelta(minutes=45),
-        },
-        signing_key(),
-        algorithm="HS256",
-    )
+    claims = {
+        "aud": AUDIENCE,
+        "sub": str(submission.pk),
+        "worker_id": str(submission.worker_id),
+        "assignment_id": str(submission.lease_id),
+        "payload_sha256": submission.payload_sha256,
+        "iat": now,
+        "exp": now + timedelta(minutes=45),
+    }
+    if submission.release_id is not None:
+        claims["release_id"] = str(submission.release_id)
+    return jwt.encode(claims, signing_key(), algorithm="HS256")
 
 
 def authenticated_submission(request, submission_id, *, file_access=False):
@@ -128,7 +126,6 @@ def authenticated_submission(request, submission_id, *, file_access=False):
                     "sub",
                     "worker_id",
                     "assignment_id",
-                    "release_id",
                     "payload_sha256",
                     "iat",
                     "exp",
@@ -141,7 +138,6 @@ def authenticated_submission(request, submission_id, *, file_access=False):
                 "sub",
                 "worker_id",
                 "assignment_id",
-                "release_id",
                 "payload_sha256",
             ]
         ):
@@ -165,7 +161,8 @@ def authenticated_submission(request, submission_id, *, file_access=False):
         not row.lease_id
         or value["worker_id"] != str(row.worker_id)
         or value["assignment_id"] != str(row.lease_id)
-        or value["release_id"] != str(row.release_id)
+        or ("release_id" in value) != (row.release_id is not None)
+        or (row.release_id is not None and value["release_id"] != str(row.release_id))
         or not hmac.compare_digest(value["payload_sha256"], row.payload_sha256)
     ):
         raise ExeSubmissionError(

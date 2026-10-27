@@ -214,7 +214,7 @@ class RemoteRunTests(ExeFixtures, TestCase):
         )
         self.assertEqual(ExeSubmission.objects.count(), 1)
 
-    def test_admin_cannot_enable_unapproved_or_missing_runtime(self):
+    def test_admin_can_enable_pool_without_approved_release(self):
         self.user.role = Role.ADMIN
         self.user.save(update_fields=["role"])
         self.release.approved_at = None
@@ -224,7 +224,7 @@ class RemoteRunTests(ExeFixtures, TestCase):
             {"enabled": True},
             format="json",
         )
-        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.status_code, 200)
 
     def test_admin_rejects_old_total_cap_and_out_of_range_limits(self):
         self.user.role = Role.ADMIN

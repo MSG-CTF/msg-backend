@@ -90,7 +90,7 @@ class RemoteRunSettingsView(APIView):
                 )
             if body.get("enabled") and not remote_run_data(challenge)["can_enable"]:
                 raise ExeSubmissionError(
-                    "RELEASE_NOT_READY",
+                    "EXECUTION_NOT_READY",
                     "검증한 Azure 실행 환경과 체커를 먼저 연결해주세요",
                     409,
                 )
