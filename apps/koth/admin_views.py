@@ -82,6 +82,7 @@ def challenge_data(challenge, detail=False):
               "open_group": challenge.open_group, "opened_at": utc(challenge.opened_at), "closed_at": utc(challenge.closed_at),
               "challenge_url": challenge.challenge_url or None, "score_api_url": challenge.score_api_url or None,
               "score_api_token_env": challenge.score_api_token_env or None,
+              "score_period_anchor": challenge.score_period_anchor,
               "score_api_configured": bool(challenge.score_api_url and challenge.score_api_token_env),
               "files": {"mode": challenge.files_mode, "bundle": bundle_data(challenge, selected_bundle(challenge))},
               "current_owner_team_id": str(leaders[0].team_id) if leaders else None,
@@ -119,7 +120,7 @@ def checked_url(value):
 
 
 def validated_fields(body, challenge=None, create=False):
-    allowed = {"title", "description", "challenge_url", "open_group", "opened_at", "closed_at", "score_api_url", "score_api_token_env", "reason"}
+    allowed = {"title", "description", "challenge_url", "open_group", "opened_at", "closed_at", "score_api_url", "score_api_token_env", "score_period_anchor", "reason"}
     allowed |= {"club_id", "club_name", "repository_slug"} if create else {"status"}
     if not isinstance(body, dict) or set(body) - allowed:
         raise EnvironmentError("문제 수정 항목을 확인해주세요", "INVALID_REQUEST")
@@ -145,6 +146,11 @@ def validated_fields(body, challenge=None, create=False):
         if not isinstance(value, str) or value and not re.fullmatch(r"KOTH_[A-Z0-9_]{1,87}_TOKEN", value):
             raise EnvironmentError("KOTH 전용 점수 조회 토큰의 환경변수 이름을 입력해주세요", "INVALID_REQUEST")
         values["score_api_token_env"] = value
+    if "score_period_anchor" in body:
+        value = body["score_period_anchor"]
+        if value not in KothChallenge.ScorePeriodAnchor.values:
+            raise EnvironmentError("점수 조회 시각은 START 또는 END로 입력해주세요", "INVALID_REQUEST")
+        values["score_period_anchor"] = value
     # A token's destination is an operator trust boundary, not an arbitrary admin form URL.
     if (challenge and challenge.score_api_token_env) or values.get("score_api_token_env"):
         old = (challenge.score_api_url, challenge.score_api_token_env) if challenge else ("", "")
@@ -506,7 +512,7 @@ class ConnectionTestView(APIView):
     def post(self, request, challenge_id):
         challenge = get_challenge(challenge_id)
         body = request.data
-        if not isinstance(body, dict) or set(body) - {"challenge_url", "score_api_url", "score_api_token_env"}:
+        if not isinstance(body, dict) or set(body) - {"challenge_url", "score_api_url", "score_api_token_env", "score_period_anchor"}:
             raise EnvironmentError("접속 확인 항목을 확인해주세요", "INVALID_REQUEST")
         # Test only the registered destinations. Editing a form must not turn this into an SSRF/token oracle.
         for key in body:
