@@ -3508,6 +3508,84 @@ class AdminEventRecordingTests(TestCase):
         self.assertEqual(replacement.release_id, release.release_id)
         self.assertEqual(event.instance_id, new_id)
         self.assertIn(str(old.instance_id), event.message)
+        # 이전 상태와 새 ID 를 함께 남긴다 (QA TC-175)
+        self.assertIn("(RUNNING)", event.message)
+        self.assertIn(str(new_id), event.message)
+
+    @patch("apps.adminpanel.views.mark_instance_replaced")
+    @patch("apps.adminpanel.views.call_scheduler_reset")
+    def test_force_reset_db_failure_after_scheduler_keeps_new_id(
+        self, mock_reset, mock_replaced
+    ):
+        """스케줄러가 새 인스턴스를 만든 뒤 DB 저장이 실패해도 새 ID 를 기록으로 남긴다 (QA TC-180)."""
+        from django.db import DatabaseError
+        from apps.adminpanel.models import AdminEvent
+
+        release = ChallengeRelease.objects.create(
+            challenge=self.challenge,
+            version=1,
+            registry_revision=1,
+            challenge_slug="web-basic",
+            cpu_millicores=500,
+            memory_mib=512,
+            ephemeral_storage_mib=1024,
+            isolation_profile="WEB",
+            source_ref="refs/heads/main",
+        )
+        old = Instance.objects.create(
+            user=self.player,
+            team=self.team,
+            challenge=self.challenge,
+            status=InstanceStatus.RUNNING,
+            release=release,
+        )
+        new_id = uuid.uuid4()
+        mock_reset.return_value = {"instance_id": str(new_id), "status": "RESETTING"}
+        mock_replaced.side_effect = DatabaseError("db down")
+
+        res = self.client.post(f"/api/v1/admin/instances/{old.instance_id}/reset")
+
+        self.assertEqual(res.status_code, 500)
+        self.assertFalse(Instance.objects.filter(instance_id=new_id).exists())
+        event = self.only_event(AdminEvent.EventType.INSTANCE_FORCED)
+        self.assertEqual(event.severity, AdminEvent.Severity.CRITICAL)
+        self.assertEqual(event.instance_id, old.instance_id)
+        self.assertIn("DB 반영 실패", event.message)
+        self.assertIn(str(new_id), event.message)
+
+    @patch("apps.adminpanel.views.call_scheduler_reset")
+    def test_force_reset_rejected_creation_keeps_remote_new_id(self, mock_reset):
+        """스케줄러는 새 인스턴스를 만들었지만 우리 쪽 생성이 거절되면 그 새 ID 를 실패 기록에 남긴다 (QA TC-180)."""
+        from apps.adminpanel.models import AdminEvent
+
+        old = self.instance()  # 릴리스가 없어 새 인스턴스 생성이 스케줄러 오류로 거절된다
+        new_id = uuid.uuid4()
+        mock_reset.return_value = {"instance_id": str(new_id), "status": "RESETTING"}
+
+        res = self.client.post(f"/api/v1/admin/instances/{old.instance_id}/reset")
+
+        self.assertEqual(res.status_code, 503)
+        event = self.only_event(AdminEvent.EventType.INSTANCE_FORCED)
+        self.assertEqual(event.severity, AdminEvent.Severity.CRITICAL)
+        self.assertIn(f"원격 새 인스턴스 {new_id}", event.message)
+
+    @patch("apps.adminpanel.views.call_scheduler_delete")
+    def test_force_delete_db_failure_after_scheduler_is_recorded(self, mock_delete):
+        """스케줄러가 종료를 받은 뒤 DB 저장이 실패해도 기록을 남긴다 (QA TC-173)."""
+        from django.db import DatabaseError
+        from apps.adminpanel.models import AdminEvent
+
+        inst = self.instance()
+        with patch.object(Instance, "save", side_effect=DatabaseError("db down")):
+            res = self.client.delete(f"/api/v1/admin/instances/{inst.instance_id}")
+
+        self.assertEqual(res.status_code, 500)
+        mock_delete.assert_called_once()
+        inst.refresh_from_db()
+        self.assertEqual(inst.status, InstanceStatus.RUNNING)
+        event = self.only_event(AdminEvent.EventType.INSTANCE_FORCED)
+        self.assertEqual(event.severity, AdminEvent.Severity.CRITICAL)
+        self.assertIn("종료 요청 접수", event.message)
 
     # ---- 설정 ----
 

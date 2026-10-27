@@ -79,6 +79,18 @@ class ChallengeSubmitTests(TestCase):
             format="json",
         )
 
+    def test_submit_rejects_non_object_body(self):
+        """배열·문자열 본문은 500 이 아니라 400 으로 거절한다 (QA TC-131 · 134)."""
+        for body in ("[]", '"MSG{correct_flag}"', "123"):
+            with self.subTest(body=body):
+                res = self.client.post(
+                    f"/api/v1/challenges/{self.challenge.challenge_id}/submit",
+                    body,
+                    content_type="application/json",
+                )
+                self.assertEqual(res.status_code, 400)
+                self.assertEqual(res.data["code"], "INVALID_REQUEST")
+
     def test_detail_and_submit_require_team_challenge_access(self):
         TeamChallengeAccess.objects.filter(
             team=self.team,

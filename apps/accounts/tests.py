@@ -91,6 +91,8 @@ class AuthTests(TestCase):
         payload = {
             "typ": "access",
             "sub": str(self.user.user_id),
+            "iat": datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(hours=2),
             "exp": datetime.datetime.now(datetime.timezone.utc)
             - datetime.timedelta(hours=1),
         }
@@ -130,6 +132,29 @@ class AuthTests(TestCase):
         res = self.client.get("/api/v1/auth/me", HTTP_AUTHORIZATION=f"Bearer {token}")
         self.assertEqual(res.status_code, 401)
         self.assertEqual(res.data["code"], "TOKEN_INVALID")
+
+    def test_token_without_iat_is_rejected(self):
+        """발급 시각이 없는 토큰은 우리가 만든 것이 아니므로 받지 않는다 (QA TC-610)."""
+        payload = {
+            "typ": "access",
+            "sub": str(self.user.user_id),
+            "exp": datetime.datetime.now(datetime.timezone.utc)
+            + datetime.timedelta(hours=1),
+        }
+        token = pyjwt.encode(payload, settings.JWT_SECRET, algorithm="HS256")
+        res = self.client.get("/api/v1/auth/me", HTTP_AUTHORIZATION=f"Bearer {token}")
+        self.assertEqual(res.status_code, 401)
+        self.assertEqual(res.data["code"], "TOKEN_INVALID")
+
+    def test_failed_login_is_logged_without_password(self):
+        """로그인 실패는 아이디와 접속 IP 를 경고로 남기고 비밀번호는 남기지 않는다 (QA TC-617)."""
+        for login_id in ("tester", "nobody"):
+            with self.subTest(login_id=login_id):
+                with self.assertLogs("apps.accounts.views", level="WARNING") as logs:
+                    res = self.login(login_id=login_id, password="wrong-secret-pw")
+                self.assertEqual(res.status_code, 401)
+                self.assertIn(repr(login_id), logs.output[0])
+                self.assertNotIn("wrong-secret-pw", "\n".join(logs.output))
 
     def test_refresh_token_cannot_call_api(self):
         """refresh 토큰으로 일반 API 를 호출할 수 없다 (typ 검증)."""
