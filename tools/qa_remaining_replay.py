@@ -6,12 +6,12 @@ saved without JWTs or raw KOTH tokens; fixtures belong to qa_fix_* accounts.
 import json
 import os
 import sys
+import tempfile
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from pathlib import Path
-from urllib.error import HTTPError
-from urllib.request import Request, urlopen
+from http.client import HTTPConnection
 
 sys.path.insert(0, "/app")
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
@@ -30,7 +30,6 @@ from apps.koth.models import KothClub, KothChallenge, KothScorePeriod, KothSolve
 from apps.teams.models import MileageHistory
 
 assert settings.DATABASES["default"]["NAME"] == "qa_remaining_20261027"
-BASE = "http://127.0.0.1:8080"
 records, assertions = [], []
 
 
@@ -46,13 +45,14 @@ def http(method, path, token=None, body=None, key=None, internal=None):
         headers["X-Internal-Token"] = internal
     if method in ("POST", "PATCH"):
         headers["Idempotency-Key"] = key or str(uuid.uuid4())
-    request = Request(BASE + path, method=method, headers=headers,
-                      data=json.dumps(body or {}).encode() if method in ("POST", "PATCH") else None)
+    connection = HTTPConnection("127.0.0.1", 8080, timeout=15)
     try:
-        with urlopen(request, timeout=15) as response:
-            status, payload, retry = response.status, json.load(response), response.headers.get("Retry-After")
-    except HTTPError as error:
-        status, payload, retry = error.code, json.loads(error.read()), error.headers.get("Retry-After")
+        connection.request(method, path, headers=headers,
+                           body=json.dumps(body or {}).encode() if method in ("POST", "PATCH") else None)
+        response = connection.getresponse()
+        status, payload, retry = response.status, json.load(response), response.headers.get("Retry-After")
+    finally:
+        connection.close()
     if path != "/api/v1/auth/login":
         safe = json.loads(json.dumps(payload))
         if isinstance(safe.get("data"), dict):
@@ -222,7 +222,8 @@ reset()
 result = {"executed_at": timezone.now().isoformat(), "database": settings.DATABASES["default"]["NAME"],
           "database_engine": settings.DATABASES["default"]["ENGINE"], "http_server": "Gunicorn 26.1.0 / host 8016",
           "assertions": assertions, "http_records": records}
-Path("/tmp/qa_remaining_result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2, default=str))
-print(json.dumps({"checks": len(assertions), "passed": sum(a["passed"] for a in assertions), "failed": [a for a in assertions if not a["passed"]], "http_requests": len(records)}, ensure_ascii=False))
+result_path = Path(tempfile.mkdtemp(prefix="msg-qa-remaining-")) / "result.json"
+result_path.write_text(json.dumps(result, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+print(json.dumps({"checks": len(assertions), "passed": sum(a["passed"] for a in assertions), "failed": [a for a in assertions if not a["passed"]], "http_requests": len(records), "result_path": str(result_path)}, ensure_ascii=False))
 if not all(a["passed"] for a in assertions):
     raise SystemExit(1)

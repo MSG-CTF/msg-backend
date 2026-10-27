@@ -37,6 +37,7 @@ from .models import (
     KothSolve,
     KothTeamToken,
     KothTokenVerificationAttempt,
+    KothScorePeriod,
     KothScorePeriodStatus,
 )
 from .tokens import build_team_token, matches_token
@@ -163,6 +164,33 @@ def _request_team(request):
     return team
 
 
+def _with_collection_state(queryset):
+    periods = KothScorePeriod.objects.filter(challenge_id=OuterRef("pk"))
+    latest = periods.order_by("-period_id")
+    successful = periods.filter(
+        status=KothScorePeriodStatus.APPLIED, applied_at__isnull=False
+    ).order_by("-applied_at")
+    return queryset.annotate(
+        latest_collection_status=Subquery(latest.values("status")[:1]),
+        latest_collection_period_id=Subquery(latest.values("period_id")[:1]),
+        last_successful_collection_at=Subquery(successful.values("applied_at")[:1]),
+    )
+
+
+def _collection_state(challenge):
+    status = challenge.latest_collection_status
+    return {
+        # APPLIED is the collector's internal state; clients use COLLECTED.
+        "collection_status": (
+            "COLLECTED" if status == KothScorePeriodStatus.APPLIED
+            else status or "NOT_COLLECTED"
+        ),
+        "is_stale": status != KothScorePeriodStatus.APPLIED,
+        "collection_period_id": challenge.latest_collection_period_id,
+        "last_collected_at": challenge.last_successful_collection_at,
+    }
+
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def me(request):
@@ -185,7 +213,7 @@ def me(request):
         )
     }
     challenge_data = []
-    for challenge in with_file_metadata(KothChallenge.objects.all()):
+    for challenge in with_file_metadata(_with_collection_state(KothChallenge.objects.all())):
         solve = solves.get(challenge.koth_challenge_id)
         score = solve.earned_score if solve else Decimal("0")
         rank = None
@@ -207,6 +235,7 @@ def me(request):
                 "solved_at": solve.solved_at if solve else None,
                 "opened_at": challenge.opened_at,
                 "closed_at": challenge.closed_at,
+                **_collection_state(challenge),
             }
         )
     total = sum((solve.earned_score for solve in solves.values()), Decimal("0"))
@@ -237,7 +266,7 @@ def leaderboard(request):
     # Authentication runs before this view. Only cache the shared JSON ranking;
     # browsable HTML can contain request-specific content and must never be shared.
     cache_seconds = settings.KOTH_LEADERBOARD_CACHE_SECONDS
-    cache_key = f"koth:leaderboard:json:v2:{parsed_id}"
+    cache_key = f"koth:leaderboard:json:v3:{parsed_id}"
     cacheable = cache_seconds > 0 and request.accepted_media_type == "application/json"
     if cacheable:
         try:
@@ -248,7 +277,7 @@ def leaderboard(request):
             return HttpResponse(cached_content, content_type="application/json")
 
     try:
-        challenge = KothChallenge.objects.get(pk=parsed_id)
+        challenge = _with_collection_state(KothChallenge.objects.all()).get(pk=parsed_id)
     except KothChallenge.DoesNotExist:
         raise KothChallengeNotFound()
 
@@ -277,8 +306,6 @@ def leaderboard(request):
             }
         )
 
-    latest_period = challenge.score_periods.order_by("-period_id").first()
-    collection_status = latest_period.status if latest_period else "NOT_COLLECTED"
     response = ok(
         {
             "koth_challenge_id": str(challenge.koth_challenge_id),
@@ -287,10 +314,7 @@ def leaderboard(request):
             "leaderboard": rows,
             "total_count": len(rows),
             "updated_at": timezone.now(),
-            "collection_status": collection_status,
-            "is_stale": collection_status != KothScorePeriodStatus.APPLIED,
-            "collection_period_id": latest_period.period_id if latest_period else None,
-            "last_collected_at": latest_period.applied_at if latest_period else None,
+            **_collection_state(challenge),
         }
     )
     if cacheable:

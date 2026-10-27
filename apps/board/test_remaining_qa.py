@@ -134,7 +134,7 @@ class RemainingKothQA(TestCase):
             period.save()
             response = self.client.get(path)
             data = response.data["data"]
-            self.assertEqual(data["collection_status"], status)
+            self.assertEqual(data["collection_status"], "COLLECTED" if status == "APPLIED" else status)
             self.assertEqual(data["is_stale"], status != "APPLIED")
             self.assertEqual(data["leaderboard"][0]["earned_score"], 0)
             self.assertIsNone(data["leaderboard"][0]["rank"])

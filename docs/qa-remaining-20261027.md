@@ -22,7 +22,14 @@ findings below are handoff requests, not fixes included in this backend PR.
   state, including existing JWTs.
 - KOTH ranking includes recorded zeroes without assigning them a competitive
   rank; `collection_status`, `is_stale`, period and collection timestamps describe
-  collection independently of the score. Internal error details are not exposed.
+  collection independently of the score. Both `/api/v1/koth/me` challenge entries
+  and `/api/v1/koth/leaderboard` expose the same metadata. Public statuses are
+  `NOT_COLLECTED`, `PENDING`, `FAILED` and `COLLECTED`; internal `APPLIED` maps to
+  `COLLECTED`, which the current frontend recognizes as ready. `collection_period_id`
+  identifies the newest scoring period, while `last_collected_at` retains the most
+  recent successful application time even after a later failure or pending period.
+  Internal error details are not exposed. Collection annotations do not add per-challenge
+  queries, and the leaderboard cache uses a new namespace for this contract.
 - Team-token key replacement updates `issued_at` as well as the stored hash.
 
 ## Frontend handoff (changes reverted)
@@ -52,7 +59,8 @@ findings below are handoff requests, not fixes included in this backend PR.
 - `tools/qa_remaining_replay.py`: real Gunicorn HTTP, real PostgreSQL, real Redis;
   66 recorded HTTP requests, 26 assertions passed. The DB name is asserted before
   fixture writes. The script retains raw response/DB evidence with tokens
-  redacted in `/tmp/qa_remaining_result.json`.
+  redacted in `result.json` inside a private, uniquely created temporary directory.
+  The final JSON summary prints its `result_path`.
 - Local evidence copy: `C:/msg_BE/output/qa-remaining-fixed-20261027.json`.
 - Backend replay endpoint: `http://127.0.0.1:8016`. Dedicated DB:
   `qa_remaining_20261027`. The temporary frontend preview has been stopped.
