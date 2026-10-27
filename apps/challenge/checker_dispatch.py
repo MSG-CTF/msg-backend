@@ -31,10 +31,11 @@ def checker_request(row, method):
             "assignment_id": str(row.lease_id),
             "team_id": str(row.team_id),
             "challenge_id": str(row.challenge_id),
-            "release_id": str(row.release_id),
             "payload_sha256": row.payload_sha256,
             "selection_mode": "broker_pool",
         }
+        if row.release_id is not None:
+            body["release_id"] = str(row.release_id)
         body.update(
             timeout_seconds=row.config_snapshot["timeout_seconds"],
             max_output_bytes=65536,

@@ -6,7 +6,6 @@ from django.conf import settings
 from django.utils import timezone
 
 from apps.challenge.models import ExeSubmission, RemoteRunConfig
-from apps.instances.models import ArchitectureType, RuntimeType
 
 WINDOWS_SLUG = "pwn-msgdriver"
 
@@ -17,18 +16,6 @@ def get_remote_config(challenge):
     return RemoteRunConfig.objects.filter(
         challenge=challenge
     ).first() or RemoteRunConfig(challenge=challenge)
-
-
-def runtime_ready(challenge):
-    config = getattr(challenge, "runtime_config", None)
-    release = config.current_release if config else None
-    return bool(
-        release
-        and release.challenge_id == challenge.pk
-        and release.runtime_type == RuntimeType.VM
-        and release.architecture == ArchitectureType.AMD64
-        and release.approved_at is not None
-    )
 
 
 def _backend_ready(challenge):
@@ -79,7 +66,6 @@ def remote_run_data(challenge, team=None):
     ready = bool(
         settings.EXE_SUBMISSIONS_ENABLED
         and settings.EXE_DISPATCH_ENABLED
-        and runtime_ready(challenge)
         and checker_pool_ready()
         and _backend_ready(challenge)
     )

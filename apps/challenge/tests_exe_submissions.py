@@ -206,7 +206,7 @@ class ExeSubmissionTests(ExeFixtures, TestCase):
         self.assertEqual(
             submission.payload_sha256, hashlib.sha256(harmless_pe()).hexdigest()
         )
-        self.assertEqual(submission.release_id, self.release.pk)
+        self.assertIsNone(submission.release_id)
         data = self.client.get(f"{self.url}/{submission.pk}").data["data"]
         self.assertEqual(
             (
@@ -318,7 +318,8 @@ class ExeSubmissionTests(ExeFixtures, TestCase):
             challenge_slug="pwn-msgdriver"
         )
         ChallengeRuntimeConfig.objects.all().delete()
-        self.assertEqual(self.post_exe().data["code"], "RELEASE_NOT_READY")
+        self.release.delete()
+        self.assertEqual(self.post_exe().status_code, 202)
 
     def test_replay_survives_release_switch_and_solve(self):
         key = uuid.uuid4()
@@ -575,6 +576,8 @@ class ExeExecutionProvenanceTests(ExeFixtures, TestCase):
 class ExeProvenanceMigrationTests(ExeFixtures, TransactionTestCase):
     def test_existing_cleanup_flag_is_not_fabricated_into_separate_report_proof(self):
         submission = self.accepted()
+        # This rollback test models a row created before release-free broker_pool.
+        ExeSubmission.objects.filter(pk=submission.pk).update(release=self.release)
         executor = MigrationExecutor(connection)
         latest = executor.loader.graph.leaf_nodes()
 
@@ -597,6 +600,7 @@ class ExeProvenanceMigrationTests(ExeFixtures, TransactionTestCase):
 
     def test_existing_submission_survives_provenance_migration(self):
         submission = self.accepted()
+        ExeSubmission.objects.filter(pk=submission.pk).update(release=self.release)
         executor = MigrationExecutor(connection)
         latest = executor.loader.graph.leaf_nodes()
 
