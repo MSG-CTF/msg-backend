@@ -35,7 +35,7 @@ caddy validate --config /tmp/koth-preview-candidate.Caddyfile --adapter caddyfil
 게임 식별자는 koth-card-battle-arena, koth-jenga, koth-swanopoly, koth-pixel-smuggler, koth-grand-tour-duel, koth-dependency-hell입니다
 VM별 기존 upstream과 challenge ID를 사용해야 합니다
 관리자 미리보기 쿠키는 게임 앱으로 전달하지 않습니다
-Pixel Smuggler의 구간·순위·기준 QR 조회는 원래 게임처럼 로그인 전에도 읽을 수 있습니다
+Pixel Smuggler의 구간·순위·기준 QR·포스터 목표 그림 조회는 원래 게임처럼 로그인 전에도 읽을 수 있습니다
 이 경로도 관리자 미리보기 권한을 먼저 확인하며 GET·HEAD만 허용합니다 제출과 내 팀 조회는 게임 세션 검사를 유지합니다
 Grand Tour Duel의 로그인 화면·게임 안내·공개 순위도 같은 방식으로 읽을 수 있습니다 팀 작업 공간과 제출 API는 인증을 유지합니다
 Dependency Hell의 공개 순위와 참가자 다운로드 파일 두 개도 포함합니다 임의 다운로드 경로를 허용하지는 않습니다

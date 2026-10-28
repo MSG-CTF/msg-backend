@@ -110,6 +110,7 @@ score.example {
         public=text.split('@preview_game_public {',1)[1].split('}',1)[0]
         self.assertIn('method GET HEAD',public)
         self.assertIn('/api/v1/round /api/v1/leaderboard /api/v1/rounds/*/reference.png',public)
+        self.assertIn('/api/v1/rounds/*/target.png',public)
         for path in ['/api/v1/me','/api/v1/submissions','/api/v1/rounds/* ']:
             self.assertNotIn(path,public)
         self.assertIn('uri /api/v1/koth/preview_sessions/game_authorize',text)
