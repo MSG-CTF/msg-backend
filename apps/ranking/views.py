@@ -22,6 +22,15 @@ def format_datetime(value):
         return None
     return value.strftime("%Y-%m-%dT%H:%M:%SZ")
 
+
+def format_team_row(row):
+    """팀 순위 한 줄의 점수를 JSON 숫자로, 마지막 풀이 시각을 문자열로 바꾼다."""
+    for key in ("team_score", "koth_score", "signature_score", "line_score"):
+        row[key] = num(row[key])
+    row["last_solved_at"] = format_datetime(row["last_solved_at"])
+    return row
+
+
 def collect_category_scores(team_ids):
     """팀별 제오파디 점수를 문제 분야별로 나눠 합산한다. 점수는 순위와 같은 현재 점수를 쓴다."""
     scores = {
@@ -156,8 +165,7 @@ def team_ranking(request):
     rankings = build_team_ranking(collect_team_data(), limit=None)
 
     for row in rankings:
-        row["team_score"] = num(row["team_score"])
-        row["last_solved_at"] = format_datetime(row["last_solved_at"])
+        format_team_row(row)
 
     start = (page - 1) * size
     end = start + size
@@ -191,9 +199,7 @@ def my_team_ranking(request):
 
     for row in rankings:
         if row["team_id"] == my_team_id:
-            row["team_score"] = num(row["team_score"])
-            row["last_solved_at"] = format_datetime(row["last_solved_at"])
-            return ok(row)
+            return ok(format_team_row(row))
 
     return ok(None)
 
