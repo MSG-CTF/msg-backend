@@ -118,8 +118,9 @@ def authorize_preview(request):
         supplied = ""
     token = supplied or request.COOKIES.get(COOKIE_NAME, "")
     try:
-        load_preview_ticket(token, request.headers.get("X-KOTH-Preview-Challenge"),
-                            request.headers.get("X-KOTH-Preview-Origin"))
+        challenge, _grant = load_preview_ticket(
+            token, request.headers.get("X-KOTH-Preview-Challenge"),
+            request.headers.get("X-KOTH-Preview-Origin"))
     except (signing.BadSignature, KeyError, TypeError, ValueError):
         return fail("INVALID_PREVIEW", "테스트 접속이 만료됐습니다 관리자 화면에서 다시 열어주세요", 401)
     response = HttpResponse(status=204)
@@ -127,4 +128,12 @@ def authorize_preview(request):
     if supplied:
         response.set_cookie(COOKIE_NAME, token, max_age=MAX_AGE, secure=True,
                             httponly=True, samesite="Lax", path="/")
+        # A previous native login can redirect '/' to a protected page before
+        # the player gets a chance to log in under the new preview grant.
+        from .preview_game import GAME_COOKIE, PROFILES
+
+        response.delete_cookie(GAME_COOKIE, path="/", samesite="Lax")
+        profile = PROFILES.get(challenge.repository_slug)
+        if profile and profile.cookie:
+            response.delete_cookie(profile.cookie, path="/", samesite="Lax")
     return response

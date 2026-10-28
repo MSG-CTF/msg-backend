@@ -65,6 +65,60 @@ class AdminPreviewTests(TestCase):
         self.assertEqual(self.client.post(self.path, {}, format="json").status_code, 403)
         self.assertEqual(APIClient().post(self.path, {}, format="json").status_code, 401)
 
+    def test_new_grant_clears_only_the_selected_native_game_cookie(self):
+        from apps.koth.preview_game import GAME_COOKIE
+
+        for slug, native_cookie in (
+            ("koth-swanopoly", "swan_sid"),
+            ("koth-jenga", "session"),
+            ("koth-grand-tour-duel", "koth_duel_session"),
+        ):
+            with self.subTest(slug=slug):
+                self.challenge.repository_slug = slug
+                self.challenge.save(update_fields=["repository_slug"])
+                client = APIClient()
+                client.cookies[native_cookie] = "previous-native-session"
+                client.cookies[GAME_COOKIE] = "previous-preview-binding"
+                client.cookies["unrelated"] = "keep-this-cookie"
+                response = self.check(self.grant(), client=client)
+                self.assertEqual(response.status_code, 204)
+                for name in (GAME_COOKIE, native_cookie):
+                    self.assertEqual(response.cookies[name]["max-age"], 0)
+                    self.assertEqual(response.cookies[name]["path"], "/")
+                self.assertTrue(response.cookies[GAME_COOKIE]["secure"])
+                self.assertNotIn("unrelated", response.cookies)
+                self.assertTrue(response.cookies[COOKIE_NAME].value)
+
+    def test_asset_authorization_does_not_clear_a_native_login(self):
+        self.challenge.repository_slug = "koth-swanopoly"
+        self.challenge.save(update_fields=["repository_slug"])
+        client = APIClient()
+        client.cookies[COOKIE_NAME] = self.grant()
+        client.cookies["swan_sid"] = "existing-native-session"
+        response = self.check(client=client)
+        self.assertEqual(response.status_code, 204)
+        self.assertFalse(response.cookies)
+
+    def test_invalid_ticket_does_not_clear_an_existing_native_login(self):
+        self.challenge.repository_slug = "koth-swanopoly"
+        self.challenge.save(update_fields=["repository_slug"])
+        client = APIClient()
+        client.cookies["swan_sid"] = "existing-native-session"
+        response = self.check("invalid", client=client)
+        self.assertEqual(response.status_code, 401)
+        self.assertFalse(response.cookies)
+
+    def test_games_without_native_cookies_do_not_clear_other_sessions(self):
+        for slug in ("koth-card-battle-arena", "koth-pixel-smuggler", "unknown-game"):
+            with self.subTest(slug=slug):
+                self.challenge.repository_slug = slug
+                self.challenge.save(update_fields=["repository_slug"])
+                response = self.check(self.grant())
+                self.assertEqual(response.status_code, 204)
+                self.assertNotIn("swan_sid", response.cookies)
+                self.assertNotIn("session", response.cookies)
+                self.assertNotIn("koth_duel_session", response.cookies)
+
     def test_no_redirect_or_runtime_settings_can_be_supplied(self):
         for body in ({"url":"https://other.example"}, {"expires_in_seconds":3600}, []):
             with self.subTest(body=body):
