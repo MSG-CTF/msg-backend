@@ -239,14 +239,33 @@ def get_board_state_for_read(
     return state
 
 
+def _pause_recharge(state, now):
+    """보드 완료로 충전을 멈출 때 남은 시간을 남겨, 관리자가 재개하면 이어서 센다."""
+    if state.next_dice_reset_at is not None:
+        remaining = (state.next_dice_reset_at - now).total_seconds()
+        state.recharge_paused_seconds = max(0, int(remaining))
+    state.next_dice_reset_at = None
+
+
 def _update_dice_recharge(state, now, dice=None):
     """Update a locked state's recharge clock in memory; the caller saves it."""
     max_rolls, interval = dice or dice_settings()
-    if state.dice_rolls_left >= max_rolls or is_board_completed(state.team_id):
+    if state.dice_rolls_left >= max_rolls:
         state.next_dice_reset_at = None
+        state.recharge_paused_seconds = None
+        return
+    if is_board_completed(state.team_id):
+        _pause_recharge(state, now)
         return
     if state.next_dice_reset_at is None:
-        state.next_dice_reset_at = now + interval
+        if state.recharge_paused_seconds is not None:
+            # 완료 보드가 재개됐다. 멈출 때 남아 있던 충전 시간을 이어준다.
+            state.next_dice_reset_at = now + timedelta(
+                seconds=state.recharge_paused_seconds
+            )
+            state.recharge_paused_seconds = None
+        else:
+            state.next_dice_reset_at = now + interval
         return
     if now < state.next_dice_reset_at:
         return
@@ -262,12 +281,11 @@ def _update_dice_recharge(state, now, dice=None):
 
 def apply_pending_dice_recharge(state, *, dice=None):
     """Apply elapsed recharges up to capacity, under the board lock."""
-    previous = (state.dice_rolls_left, state.next_dice_reset_at)
+    fields = ("dice_rolls_left", "next_dice_reset_at", "recharge_paused_seconds")
+    previous = tuple(getattr(state, name) for name in fields)
     _update_dice_recharge(state, timezone.now(), dice)
-    if previous != (state.dice_rolls_left, state.next_dice_reset_at):
-        state.save(
-            update_fields=["dice_rolls_left", "next_dice_reset_at", "updated_at"]
-        )
+    if previous != tuple(getattr(state, name) for name in fields):
+        state.save(update_fields=[*fields, "updated_at"])
     return state
 
 
@@ -276,7 +294,7 @@ def grant_dice_roll(state, amount, *, dice=None):
     if amount <= 0:
         return 0
     if is_board_completed(state.team_id):
-        state.next_dice_reset_at = None
+        _pause_recharge(state, timezone.now())
         return 0
     now = timezone.now()
     dice = dice or dice_settings()
@@ -290,7 +308,7 @@ def grant_dice_roll(state, amount, *, dice=None):
 def _consume_dice_roll(state, *, dice=None):
     state.dice_rolls_left -= 1
     _update_dice_recharge(state, timezone.now(), dice)
-    state.save(update_fields=["dice_rolls_left", "next_dice_reset_at", "updated_at"])
+    state.save(update_fields=["dice_rolls_left", "next_dice_reset_at", "recharge_paused_seconds", "updated_at"])
 
 
 def get_consumed_indexes(team):
@@ -425,13 +443,13 @@ def finalize_landing(
     reward = compute_start_reward(start_pass_count, landed_on_start)
     update_fields = ["position", "updated_at"]
     if is_board_completed(team):
-        state.next_dice_reset_at = None
-        update_fields.append("next_dice_reset_at")
+        _pause_recharge(state, timezone.now())
+        update_fields += ["next_dice_reset_at", "recharge_paused_seconds"]
     if start_pass_count:
         update_fields.append("has_passed_start")
     if reward["roll_gained"]:
         reward["roll_gained"] = grant_dice_roll(state, reward["roll_gained"], dice=dice)
-        update_fields += ["dice_rolls_left", "next_dice_reset_at"]
+        update_fields += ["dice_rolls_left", "next_dice_reset_at", "recharge_paused_seconds"]
     state.save(update_fields=update_fields)
 
     if reward["mileage_gained"]:
@@ -943,7 +961,7 @@ def complete_challenge_from_submission(team, challenge, submitted_at):
             update_fields.append("active_challenge_access")
         if not was_cleared and is_extra_dice_granted:
             is_extra_dice_granted = bool(grant_dice_roll(state, 1))
-            update_fields.extend(["dice_rolls_left", "next_dice_reset_at"])
+            update_fields.extend(["dice_rolls_left", "next_dice_reset_at", "recharge_paused_seconds"])
         state.save(update_fields=update_fields)
         return is_extra_dice_granted
 
@@ -963,7 +981,7 @@ def solve_active_challenge(team):
 
     state.active_challenge_access = None
     update_fields = ["active_challenge_access", "updated_at"]
-    update_fields += ["dice_rolls_left", "next_dice_reset_at"]
+    update_fields += ["dice_rolls_left", "next_dice_reset_at", "recharge_paused_seconds"]
     state.save(update_fields=update_fields)
     return state, access, is_extra_dice_granted
 
@@ -1199,7 +1217,7 @@ def draw_chance_card(team):
         consume_cell(team, cell)
         grant_dice_roll(state, CHANCE_DRAW_ROLL_BONUS, dice=dice)
         state.save(
-            update_fields=["dice_rolls_left", "next_dice_reset_at", "updated_at"]
+            update_fields=["dice_rolls_left", "next_dice_reset_at", "recharge_paused_seconds", "updated_at"]
         )
 
     awaiting_discard = _held_cards_queryset(team).count() >= 2
@@ -1457,7 +1475,7 @@ def _effect_grant_extra_roll(team, state, draw, payload, *, dice=None):
     # Recharge may fill capacity after the timing check, even under the lock.
     if grant_dice_roll(state, 1, dice=dice) == 0:
         raise ChanceCardWrongTiming()
-    state.save(update_fields=["dice_rolls_left", "next_dice_reset_at", "updated_at"])
+    state.save(update_fields=["dice_rolls_left", "next_dice_reset_at", "recharge_paused_seconds", "updated_at"])
 
     draw.used_at = timezone.now()
     draw.save(update_fields=["used_at"])
