@@ -428,7 +428,11 @@ def verify_team_token(request):
         .filter(token_hash=candidate_hash)
         .first()
     )
-    valid = token is not None and not token.team.is_banned
+    valid = (
+        token is not None
+        and not token.team.is_banned
+        and challenge.status == KothChallengeStatus.ACTIVE
+    )
     if not valid:
         if _register_verify_failure(challenge):
             raise KothVerifyThrottled()
