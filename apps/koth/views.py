@@ -431,8 +431,10 @@ def _register_verify_failure(challenge):
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def verify_team_token(request):
-    if set(request.data) != {"koth_challenge_id", "team_token"} or not isinstance(
-        request.data.get("team_token"), str
+    if (
+        not isinstance(request.data, dict)
+        or set(request.data) != {"koth_challenge_id", "team_token"}
+        or not isinstance(request.data.get("team_token"), str)
     ):
         raise InvalidRequest()
     challenge = _internal_challenge(request)
