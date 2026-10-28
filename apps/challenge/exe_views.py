@@ -12,6 +12,7 @@ from apps.challenge.exe_submissions import (
     submission_team,
 )
 from apps.challenge.models import ExeSubmission
+from apps.challenge.checker_dispatch import dispatch_submission
 from apps.common.permissions import IsAuthenticated
 from apps.common.response import ok
 from apps.challenge.remote_run_views import RemoteRunListView
@@ -89,6 +90,10 @@ class ExeSubmissionDetailView(APIView):
                 "SUBMISSION_NOT_FOUND", "Submission not found.", 404
             )
         check_challenge_access(team, submission.challenge)
+        if submission.status == "ASSIGNED" and submission.finished_at is None:
+            refreshed = dispatch_submission(submission.pk, queue_only=True)
+            if refreshed is not None:
+                submission = refreshed
         response = ok(
             serialize_exe_submission(submission),
             message="EXE execution status and output.",
