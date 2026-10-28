@@ -105,6 +105,33 @@ score.example {
         self.assertIn('/app.js /styles.css', self.render(game_slug='koth-dependency-hell'))
         self.assertNotIn('path /api/*', self.render())
 
+    def test_pixel_public_round_and_reference_remain_read_only_in_preview(self):
+        text=self.render(game_slug='koth-pixel-smuggler')
+        public=text.split('@preview_game_public {',1)[1].split('}',1)[0]
+        self.assertIn('method GET HEAD',public)
+        self.assertIn('/api/v1/round /api/v1/leaderboard /api/v1/rounds/*/reference.png',public)
+        for path in ['/api/v1/me','/api/v1/submissions','/api/v1/rounds/* ']:
+            self.assertNotIn(path,public)
+        self.assertIn('uri /api/v1/koth/preview_sessions/game_authorize',text)
+
+    def test_grand_login_page_and_public_rules_do_not_require_a_native_session(self):
+        text=self.render(game_slug='koth-grand-tour-duel')
+        public=text.split('@preview_game_public {',1)[1].split('}',1)[0]
+        self.assertIn('method GET HEAD',public)
+        for path in ['/team/login','/problem','/card-replay','/api/card/arena','/api/card/rating-rules']:
+            self.assertIn(path,public)
+        for path in ['/team/workspace','/api/team/session','/api/team/submissions','/api/card/games/*']:
+            self.assertNotIn(path,public)
+
+    def test_dependency_public_standings_and_exact_downloads_keep_write_authentication(self):
+        text=self.render(game_slug='koth-dependency-hell')
+        public=text.split('@preview_game_public {',1)[1].split('}',1)[0]
+        self.assertIn('method GET HEAD',public)
+        for path in ['/api/v1/leaderboard','/downloads/incident-analyzer','/downloads/dependency-hell-for-user.tar.gz']:
+            self.assertIn(path,public)
+        for path in ['/api/v1/me','/api/v1/submissions','/downloads/*']:
+            self.assertNotIn(path,public)
+
     def test_repeated_or_malformed_upgrade_is_rejected(self):
         for original in [self.original,self.render(),self.v1+self.v1,
                          self.v1.replace('session begin','session end',1)]:
