@@ -105,7 +105,9 @@ GAME_PROFILES = {
 }
 GAME_PUBLIC_ASSETS = {
     "koth-swanopoly": "/common.js /images/* /login.css /login.js /style.css",
-    "koth-dependency-hell": "/app.js /styles.css",
+    "koth-dependency-hell": "/app.js /styles.css /api/v1/leaderboard /downloads/incident-analyzer /downloads/dependency-hell-for-user.tar.gz",
+    "koth-pixel-smuggler": "/api/v1/round /api/v1/leaderboard /api/v1/rounds/*/reference.png /api/v1/rounds/*/target.png",
+    "koth-grand-tour-duel": "/team/login /problem /card-replay /api/card/arena /api/card/rating-rules",
 }
 
 
