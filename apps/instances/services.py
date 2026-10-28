@@ -4,13 +4,14 @@ from datetime import timezone as dt_timezone
 from http.client import HTTPException
 from urllib.error import HTTPError
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.request import Request, build_opener
 
 from django.conf import settings
 from django.db import transaction
 from django.utils.dateparse import parse_datetime
 
 from apps.challenge.models import Challenge
+from apps.common.http import SameHostRedirectHandler
 from apps.instances.models import (
     ChallengeRelease,
     ChallengeRuntimeConfig,
@@ -48,6 +49,11 @@ FINAL_INSTANCE_STATUSES = [
     InstanceStatus.EXPIRED,
     InstanceStatus.CLEANED,
 ]
+
+
+# 스케줄러 토큰이 다른 호스트로 리다이렉트되어 새지 않도록 같은 호스트만 따라간다.
+# 테스트가 이 이름을 대체해 호출을 막으므로 urlopen 이름을 유지한다.
+urlopen = build_opener(SameHostRedirectHandler).open
 
 
 class SchedulerError(Exception):

@@ -1,3 +1,5 @@
+import logging
+
 import jwt
 from django.db import transaction
 from django.utils import timezone
@@ -26,6 +28,15 @@ from .exceptions import (
 from .models import RefreshToken, User
 from .serializers import LoginSerializer, RefreshTokenSerializer
 
+logger = logging.getLogger(__name__)
+
+
+def _log_failed_login(request, login_id):
+    # 대입 시도를 추적할 수 있게 남긴다. 비밀번호는 남기지 않고, 아이디는 repr 로 줄바꿈 삽입을 막는다.
+    logger.warning(
+        "Login failed login_id=%r ip=%s", login_id, request.META.get("REMOTE_ADDR")
+    )
+
 
 @never_cache
 @api_view(["POST"])
@@ -41,9 +52,11 @@ def login(request):
     user = User.objects.select_related("team").filter(login_id=login_id).first()
     if user is None:
         User().set_password(password)
+        _log_failed_login(request, login_id)
         raise InvalidCredentials()
 
     if not user.check_password(password):
+        _log_failed_login(request, login_id)
         raise InvalidCredentials()
 
     RefreshToken.objects.filter(user=user, expires_at__lt=timezone.now()).delete()

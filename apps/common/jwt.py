@@ -51,12 +51,12 @@ def issue_refresh_token(user):
 
 def decode_token(token, expected_type):
 
-    # exp 가 없는 토큰은 영원히 유효해지므로 반드시 요구한다.
+    # exp 가 없는 토큰은 영원히 유효해지므로 반드시 요구한다. 발급 시각(iat)도 우리 토큰엔 항상 있다.
     payload = jwt.decode(
         token,
         settings.JWT_SECRET,
         algorithms=[settings.JWT_ALGORITHM],
-        options={"require": ["exp"]},
+        options={"require": ["exp", "iat"]},
     )
     if payload.get("typ") != expected_type:
         raise jwt.InvalidTokenError("token type mismatch")
