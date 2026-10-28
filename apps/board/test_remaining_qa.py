@@ -107,12 +107,15 @@ class RemainingKothQA(TestCase):
 
     def test_rotation_reissues_team_token_and_updates_issue_time(self):
         self.auth()
-        first = self.client.get("/api/v1/koth/team_token").data["data"]
-        KothTeamToken.objects.filter(team=self.team).update(issued_at=timezone.now() - timedelta(days=400))
+        token_path = f"/api/v1/koth/team_token?koth_challenge_id={self.challenge.pk}"
+        first = self.client.get(token_path).data["data"]
+        KothTeamToken.objects.filter(team=self.team, challenge=self.challenge).update(
+            issued_at=timezone.now() - timedelta(days=400)
+        )
         with override_settings(KOTH_TEAM_TOKEN_SECRET="qa-replacement-secret"):
-            second = self.client.get("/api/v1/koth/team_token").data["data"]
+            second = self.client.get(token_path).data["data"]
         self.assertNotEqual(first["team_token"], second["team_token"])
-        stored = KothTeamToken.objects.get(team=self.team)
+        stored = KothTeamToken.objects.get(team=self.team, challenge=self.challenge)
         self.assertEqual(stored.token_hash, hash_token(second["team_token"]))
         self.assertLess(timezone.now() - stored.issued_at, timedelta(seconds=5))
 

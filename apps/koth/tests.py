@@ -398,12 +398,13 @@ class KothApiTests(TestCase):
         self.assertEqual(response.data["data"]["challenges"][0]["rank"], 2)
         self.assertEqual(response.data["data"]["total_count"], 6)
 
-        first = self.client.get("/api/v1/koth/team_token").data["data"]["team_token"]
+        token_url = f"/api/v1/koth/team_token?koth_challenge_id={self.challenge.pk}"
+        first = self.client.get(token_url).data["data"]["team_token"]
         User.objects.create_user(
             login_id="member", password="pw1234", nickname="팀원", team=self.team
         )
         self.auth("member")
-        second = self.client.get("/api/v1/koth/team_token").data["data"]["team_token"]
+        second = self.client.get(token_url).data["data"]["team_token"]
         self.assertEqual(first, second)
         self.assertEqual(KothTeamToken.objects.count(), 1)
         self.assertEqual(KothTeamToken.objects.get().token_hash, hash_token(first))
@@ -630,7 +631,7 @@ class KothApiTests(TestCase):
 
     def test_internal_token_verification_and_team_listing(self):
         self.auth()
-        raw_token = self.client.get("/api/v1/koth/team_token").data["data"][
+        raw_token = self.client.get(f"/api/v1/koth/team_token?koth_challenge_id={self.challenge.pk}").data["data"][
             "team_token"
         ]
         headers = {"HTTP_X_INTERNAL_TOKEN": "inbound-secret"}

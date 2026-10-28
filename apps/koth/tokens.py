@@ -8,10 +8,12 @@ from django.conf import settings
 from apps.common.jwt import hash_token
 
 
-def build_team_token(team_id):
-    """팀 ID와 별도 서버 비밀값에서 재현 가능한 팀 토큰을 만든다."""
+def build_team_token(team_id, challenge_id):
+    """Derive one stable token for each team and KOTH challenge pair."""
     digest = hmac.new(
-        settings.KOTH_TEAM_TOKEN_SECRET.encode(), str(team_id).encode(), hashlib.sha256
+        settings.KOTH_TEAM_TOKEN_SECRET.encode(),
+        f"{team_id}:{challenge_id}".encode(),
+        hashlib.sha256,
     ).digest()
     return "koth_" + base64.urlsafe_b64encode(digest).decode().rstrip("=")
 
