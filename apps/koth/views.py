@@ -449,6 +449,9 @@ def verify_team_token(request):
         and not token.team.is_banned
         and challenge.status == KothChallengeStatus.ACTIVE
     )
+    if token is not None and not token.team.is_banned and challenge.status == KothChallengeStatus.SCHEDULED:
+        from .preview_game import permits_token_verification
+        valid = permits_token_verification(challenge, token)
     if not valid:
         if _register_verify_failure(challenge):
             raise KothVerifyThrottled()

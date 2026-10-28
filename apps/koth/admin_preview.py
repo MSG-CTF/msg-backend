@@ -1,5 +1,6 @@
 """Short-lived administrator access to scheduled games, verified by their gateway."""
 import logging
+import time
 from urllib.parse import urlencode, urlsplit
 from uuid import UUID, uuid4
 
@@ -13,6 +14,7 @@ from rest_framework.throttling import SimpleRateThrottle
 
 from apps.accounts.models import User
 from apps.common.permissions import IsAdmin
+from apps.common.exceptions import RateLimitUnavailable
 from apps.common.response import fail, ok
 from .models import KothChallenge
 
@@ -28,6 +30,32 @@ class PreviewAuthorizeThrottle(SimpleRateThrottle):
 
     def get_cache_key(self, request, view):
         return self.cache_format % {"scope": self.scope, "ident": self.get_ident(request)}
+
+    def allow_request(self, request, view):
+        try:
+            return super().allow_request(request, view)
+        except Exception:
+            raise RateLimitUnavailable() from None
+
+
+def load_preview_ticket(token, challenge_id, origin):
+    if not token or not isinstance(token, str) or len(token) > 2048:
+        raise ValueError()
+    grant = signing.loads(token, salt=SALT, max_age=MAX_AGE)
+    if not isinstance(grant, dict) or grant.get("v") != 1:
+        raise ValueError()
+    parsed_challenge = str(UUID(str(grant["challenge_id"])))
+    user_id = str(UUID(str(grant["user_id"])))
+    if parsed_challenge != challenge_id or grant["origin"] != origin:
+        raise ValueError()
+    challenge = KothChallenge.objects.filter(pk=parsed_challenge, status="SCHEDULED").first()
+    if (challenge is None or preview_origin(challenge) != origin
+            or not User.objects.filter(pk=user_id, role="ADMIN").exists()):
+        raise ValueError()
+    expires_at = signing.b62_decode(token.rsplit(":", 2)[1]) + MAX_AGE
+    if expires_at <= time.time():
+        raise ValueError()
+    return challenge, {**grant, "expires_at": expires_at}
 
 
 def preview_origin(challenge):
@@ -90,20 +118,8 @@ def authorize_preview(request):
         supplied = ""
     token = supplied or request.COOKIES.get(COOKIE_NAME, "")
     try:
-        if not token or len(token) > 2048:
-            raise ValueError()
-        grant = signing.loads(token, salt=SALT, max_age=MAX_AGE)
-        if not isinstance(grant, dict) or grant.get("v") != 1:
-            raise ValueError()
-        challenge_id = str(UUID(str(grant["challenge_id"])))
-        user_id = str(UUID(str(grant["user_id"])))
-        if (challenge_id != request.headers.get("X-KOTH-Preview-Challenge")
-                or grant["origin"] != request.headers.get("X-KOTH-Preview-Origin")):
-            raise ValueError()
-        challenge = KothChallenge.objects.filter(pk=challenge_id, status="SCHEDULED").first()
-        if (challenge is None or preview_origin(challenge) != grant["origin"]
-                or not User.objects.filter(pk=user_id, role="ADMIN").exists()):
-            raise ValueError()
+        load_preview_ticket(token, request.headers.get("X-KOTH-Preview-Challenge"),
+                            request.headers.get("X-KOTH-Preview-Origin"))
     except (signing.BadSignature, KeyError, TypeError, ValueError):
         return fail("INVALID_PREVIEW", "테스트 접속이 만료됐습니다 관리자 화면에서 다시 열어주세요", 401)
     response = HttpResponse(status=204)
