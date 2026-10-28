@@ -6,6 +6,7 @@ from django.test import SimpleTestCase, TestCase
 from apps.accounts.models import Team, User
 from apps.challenge.models import Challenge, Solve
 from apps.koth.models import KothChallenge, KothClub, KothSolve
+from apps.ranking.models import LineMonopoly
 from apps.ranking.ranking import (
     build_team_ranking,
     build_member_ranking,
@@ -13,6 +14,7 @@ from apps.ranking.ranking import (
 )
 from apps.ranking.scoring import calculate_dynamic_score
 from apps.ranking.views import collect_team_data
+from apps.signature.models import SignatureChallenge, SignatureSolve
 
 from rest_framework.test import APITestCase
 from apps.common.jwt import issue_access_token
@@ -133,6 +135,15 @@ class BuildTeamRankingTest(SimpleTestCase):
         ]
         result = build_team_ranking(team_data)
         self.assertEqual(result[0]["team_name"], "aaa")
+
+    def test_rows_keep_koth_signature_and_line_scores(self):
+        team = make_team("A", jeopardy=100, koth=50, jeopardy_at=BASE_TIME)
+        team.update(signature_score=30, line_score=20)
+        result = build_team_ranking([team])
+        self.assertEqual(result[0]["team_score"], 200)
+        self.assertEqual(result[0]["koth_score"], 50)
+        self.assertEqual(result[0]["signature_score"], 30)
+        self.assertEqual(result[0]["line_score"], 20)
 
 
 class CalculateDynamicScoreTest(SimpleTestCase):
@@ -488,3 +499,104 @@ class TeamRankingCategoryScoresAPITest(APITestCase):
         rows = self.rows_by_name(page=2, size=1)
 
         self.assertEqual(list(rows), ["알파"])
+
+
+class TeamRankingScoreBreakdownAPITest(APITestCase):
+    """리더보드 상위 8팀 밖에서도 순위표가 KoTH, 시그니처, 라인 독점 점수를 그대로 받는다."""
+
+    def setUp(self):
+        for i in range(9):
+            self.solve(
+                Team.objects.create(team_name=f"상위{i}"), f"상위문제{i}", "1000"
+            )
+        self.team = Team.objects.create(team_name="알파")
+        self.user = User.objects.create_user(
+            login_id="me", password="pw", nickname="나", team=self.team
+        )
+        self.solve(self.team, "웹", "100")
+        club = KothClub.objects.create(name="동아리")
+        koth = KothChallenge.objects.create(
+            club=club,
+            title="koth",
+            open_group=1,
+            inbound_internal_token_hash="hash_koth",
+        )
+        KothSolve.objects.create(
+            team=self.team,
+            challenge=koth,
+            earned_score=120,
+            solved_at=BASE_TIME,
+        )
+        signature = SignatureChallenge.objects.create(
+            club=club,
+            title="시그니처",
+            description="부스 플래그",
+            score=Decimal("300"),
+            flag_hash="hash_signature",
+            is_published=True,
+        )
+        SignatureSolve.objects.create(
+            team=self.team, challenge=signature, earned_score=Decimal("300")
+        )
+        LineMonopoly.objects.create(
+            team=self.team, line_number=1, earned_score=Decimal("225.50")
+        )
+
+    def solve(self, team, name, score):
+        challenge = Challenge.objects.create(
+            title=name,
+            category="WEB",
+            difficulty="EASY",
+            score=Decimal(score),
+            current_score=Decimal(score),
+            flag_hash=f"hash_{name}",
+            is_published=True,
+        )
+        Solve.objects.create(
+            team=team,
+            challenge=challenge,
+            earned_score=Decimal(score),
+            earned_mileage=100,
+        )
+
+    def assert_breakdown(self, row):
+        self.assertEqual(row["rank"], 10)
+        self.assertEqual(row["koth_score"], 120)
+        self.assertEqual(row["signature_score"], 300)
+        self.assertEqual(row["line_score"], 225.5)
+        self.assertEqual(row["team_score"], 745.5)
+
+    def test_ranking_row_outside_top_eight_has_breakdown(self):
+        auth(self.client, self.user)
+        res = self.client.get("/api/v1/ranking", {"page": 2, "size": 6})
+
+        self.assertEqual(res.status_code, 200)
+        rows = {row["team_name"]: row for row in res.data["data"]["rankings"]}
+        self.assert_breakdown(rows["알파"])
+
+    def test_my_ranking_has_breakdown(self):
+        auth(self.client, self.user)
+        res = self.client.get("/api/v1/ranking/me")
+
+        self.assertEqual(res.status_code, 200)
+        self.assert_breakdown(res.data["data"])
+
+    def test_team_without_extra_scores_has_zero_breakdown(self):
+        auth(self.client, self.user)
+        res = self.client.get("/api/v1/ranking", {"page": 1, "size": 1})
+
+        row = res.data["data"]["rankings"][0]
+        self.assertEqual(
+            (row["koth_score"], row["signature_score"], row["line_score"]),
+            (0, 0, 0),
+        )
+
+    def test_leaderboard_team_keys_stay_the_same(self):
+        auth(self.client, self.user)
+        res = self.client.get("/api/v1/leaderboard")
+
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(
+            set(res.data["data"]["teams"][0]),
+            {"team_id", "team_name", "team_score", "solved_count", "is_top3", "solves"},
+        )

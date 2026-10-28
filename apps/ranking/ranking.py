@@ -34,6 +34,9 @@ def build_team_ranking(team_data, limit=None):
                 "team_id": row["team_id"],
                 "team_name": row["team_name"],
                 "team_score": total,
+                "koth_score": row["koth_score"],
+                "signature_score": row.get("signature_score", 0),
+                "line_score": row.get("line_score", 0),
                 "mileage": row["mileage"],
                 "last_solved_at": last_solved_at,
             }
