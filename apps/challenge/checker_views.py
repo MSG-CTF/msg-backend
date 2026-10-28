@@ -17,13 +17,13 @@ from apps.challenge.checker_auth import (
     checker_configuration,
     mint_job_token,
 )
-from apps.challenge.checker_events import apply_event
+from apps.challenge.checker_events import apply_event, event_fingerprint_matches, validate_event
 from apps.challenge.exe_submissions import (
     ExeSubmissionError,
     MAX_PAYLOAD_BYTES,
     private_payload_storage,
 )
-from apps.challenge.models import ExeSubmission
+from apps.challenge.models import ExeExecutionEvent, ExeSubmission
 from apps.common.response import ok
 
 
@@ -99,6 +99,40 @@ class CheckerEventsView(CheckerView):
             raise ExeSubmissionError(
                 "EVENT_CONFLICT", "이미 다른 실행에서 사용한 결과입니다", 409
             ) from None
+
+
+class CheckerEventReceiptView(CheckerView):
+    parser_classes = [EventJSONParser]
+
+    def post(self, request, submission_id, event_id):
+        row = ExeSubmission.objects.filter(pk=submission_id).first()
+        if row is None or row.config_snapshot.get("assignment_mode") != "broker_pool":
+            raise ExeSubmissionError("SUBMISSION_NOT_FOUND", "실행 요청을 찾지 못했습니다", 404)
+        header = request.headers.get("Authorization", "")
+        _, service_token, _ = checker_configuration(row.worker_id, broker_pool=True)
+        if (
+            not header.startswith("Bearer ")
+            or len(header) > 4096
+            or not header.isascii()
+            or not hmac.compare_digest(header[7:].encode(), service_token.encode())
+        ):
+            raise ExeSubmissionError("TOKEN_INVALID", "체커 인증 정보를 확인해주세요", 401)
+        body = request.data
+        if (
+            validate_event(body, broker_pool=True) != "CLEANUP"
+            or body["event_id"] != str(event_id)
+            or body["assignment_id"] != str(row.lease_id)
+            or not hmac.compare_digest(body["payload_sha256"], row.payload_sha256)
+        ):
+            raise ExeSubmissionError("INVALID_EVENT", "실행 배정과 정리 이벤트가 일치하지 않습니다", 409)
+        previous = ExeExecutionEvent.objects.filter(pk=event_id).first()
+        if previous is not None and (
+            previous.submission_id != row.pk
+            or previous.event_type != "CLEANUP"
+            or not event_fingerprint_matches(previous.fingerprint, body)
+        ):
+            raise ExeSubmissionError("EVENT_CONFLICT", "이미 다른 결과로 기록된 이벤트입니다", 409)
+        return ok({"submission_id": str(row.pk), "event_id": str(event_id), "accepted": previous is not None})
 
 
 class CheckerTokenRefreshView(CheckerView):

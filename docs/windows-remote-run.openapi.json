@@ -478,6 +478,27 @@
         }
       }
     },
+    "/internal/v1/checker-submissions/{submission_id}/events/{event_id}/receipt": {
+      "post": {
+        "description": "Read-only reconciliation of an exact CLEANUP event after a lost callback acknowledgement. Available after cleanup closure without issuing another job token.",
+        "security": [{"CheckerServiceToken": []}],
+        "parameters": [
+          {"name": "submission_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+          {"name": "event_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ExecutionEvent"}}}
+        },
+        "responses": {
+          "200": {"description": "Exact CLEANUP event accepted or not yet present; data contains submission_id, event_id and accepted boolean"},
+          "400": {"description": "Invalid CLEANUP event"},
+          "401": {"description": "Invalid checker service token"},
+          "404": {"description": "Unknown or legacy submission"},
+          "409": {"description": "Event ID or payload conflicts with stored event"}
+        }
+      }
+    },
     "/internal/v1/checker-submissions/{submission_id}/token": {
       "post": {
         "description": "Refresh a scoped job token for an unresolved broker_pool submission. Authenticate using this Backend's checker service token, not a job JWT. Does not grant FLAG access or prove VM cleanup.",

@@ -14,12 +14,13 @@ from django.conf import settings
 from django.core.management import call_command
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
+from django.utils.crypto import salted_hmac
 from rest_framework.test import APIClient
 
 from apps.challenge.checker_auth import AUDIENCE, mint_job_token, signing_key
 from apps.challenge.checker_dispatch import dispatch_submission
 from apps.challenge.exe_submissions import ExeSubmissionError, close_exe_submission
-from apps.challenge.models import ExeSubmission, FlagSubmission, Solve
+from apps.challenge.models import ExeExecutionEvent, ExeSubmission, FlagSubmission, Solve
 from apps.challenge.remote_run_config import remote_run_data
 from apps.challenge.tests_exe_submissions import ExeFixtures, harmless_pe
 from apps.challenge import tests_remote_run as remote_tests
@@ -283,7 +284,15 @@ class WindowsDirectRuntimeTests(ExeFixtures, TestCase):
         self.assertFalse(FlagSubmission.objects.exists())
         self.assertFalse(MileageHistory.objects.exists())
         ExeSubmission.objects.filter(pk=row.pk).update(created_at=timezone.now() - timedelta(minutes=2))
-        self.assertEqual(self.post_exe().data["code"], "EXECUTION_IN_PROGRESS")
+        next_response = self.post_exe()
+        self.assertEqual(next_response.status_code, 202, next_response.data)
+        next_row = ExeSubmission.objects.get(pk=next_response.data["data"]["submission_id"])
+        self.assertNotEqual(next_row.pk, row.pk)
+        self.assertEqual(next_row.status, "ASSIGNED")
+        row.refresh_from_db()
+        self.assertIsNone(row.cleanup_complete)
+        self.assertIsNone(row.lease_released_at)
+        self.assertTrue((self.root / row.payload_key).exists())
         with self.assertRaises(ExeSubmissionError):
             close_exe_submission(row.pk)
 
@@ -293,6 +302,26 @@ class WindowsDirectRuntimeTests(ExeFixtures, TestCase):
         self.assertEqual(self.result(row, assignment_id=str(uuid.uuid4())).status_code, 409)
         row.refresh_from_db()
         self.assertIsNone(row.finished_at)
+
+    def test_terminal_legacy_lease_still_blocks_next_submission(self):
+        row = self.accepted()
+        self.dispatch(row)
+        self.assertEqual(self.result(row).status_code, 200)
+        row.refresh_from_db()
+        row.config_snapshot.pop("assignment_mode")
+        row.created_at = timezone.now() - timedelta(minutes=2)
+        row.save(update_fields=["config_snapshot", "created_at"])
+        response = self.post_exe()
+        self.assertEqual((response.status_code, response.data["code"]), (409, "EXECUTION_IN_PROGRESS"))
+
+    def test_pool_result_without_finished_at_still_blocks_next_submission(self):
+        row = self.accepted()
+        ExeSubmission.objects.filter(pk=row.pk).update(
+            status="COMPLETED", finished_at=None,
+            created_at=timezone.now() - timedelta(minutes=2),
+        )
+        response = self.post_exe()
+        self.assertEqual((response.status_code, response.data["code"]), (409, "EXECUTION_IN_PROGRESS"))
 
     def test_result_cannot_claim_unmeasured_vm_or_driver_digests(self):
         row = self.accepted()
@@ -428,6 +457,37 @@ class WindowsDirectRuntimeTests(ExeFixtures, TestCase):
         self.assertIsNotNone(row.lease_released_at)
         self.assertEqual(row.payload_key, "")
         self.assertFalse(list(self.root.rglob("payload.exe")))
+
+    def test_service_receipt_confirms_cleanup_after_local_close(self):
+        row = self.accepted()
+        self.dispatch(row)
+        self.assertEqual(self.result(row).status_code, 200)
+        cleanup = self.event(row, "CLEANUP")
+        url = f"/internal/v1/checker-submissions/{row.pk}/events/{cleanup['event_id']}/receipt"
+        service = APIClient()
+        service.credentials(HTTP_AUTHORIZATION="Bearer " + os.environ["EXE_CHECKER_FIXTURE_TOKEN"])
+        missing = service.post(url, cleanup, format="json")
+        self.assertEqual((missing.status_code, missing.data["data"]["accepted"]), (200, False))
+        self.assertEqual(self.runtime(row).post(
+            f"/internal/v1/checker-submissions/{row.pk}/events", cleanup, format="json"
+        ).status_code, 200)
+        close_exe_submission(row.pk)
+        rotated_key = secrets.token_urlsafe(48)
+        with override_settings(EXE_CHECKER_SIGNING_KEY=rotated_key):
+            confirmed = service.post(url, cleanup, format="json")
+            self.assertEqual((confirmed.status_code, confirmed.data["data"]["accepted"]), (200, True))
+            changed = {**cleanup, "cleanup_complete": False}
+            self.assertEqual(service.post(url, changed, format="json").status_code, 409)
+        legacy_fingerprint = salted_hmac(
+            "exe-event-v1", json.dumps(cleanup, sort_keys=True, separators=(",", ":")),
+            secret=signing_key(), algorithm="sha256",
+        ).hexdigest()
+        ExeExecutionEvent.objects.filter(pk=cleanup["event_id"]).update(fingerprint=legacy_fingerprint)
+        self.assertEqual(service.post(url, cleanup, format="json").status_code, 200)
+        wrong = APIClient()
+        wrong.credentials(HTTP_AUTHORIZATION="Bearer wrong-service-token")
+        self.assertEqual(wrong.post(url, cleanup, format="json").status_code, 401)
+        self.assertEqual(self.runtime(row).post(url, cleanup, format="json").status_code, 401)
 
     def test_disabled_direct_mode_blocks_acceptance_without_scheduler_fallback(self):
         with override_settings(EXE_WINDOWS_DIRECT_RUNTIME_ENABLED=False, SCHEDULER_API_TOKEN="configured-but-unused"), patch(

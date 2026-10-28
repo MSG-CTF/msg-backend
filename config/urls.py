@@ -13,6 +13,7 @@ from apps.challenge.checker_views import (
     CheckerPayloadView,
     CheckerSecretView,
     CheckerEventsView,
+    CheckerEventReceiptView,
     CheckerTokenRefreshView,
 )
 
@@ -20,6 +21,7 @@ urlpatterns = [
     path("internal/v1/checker-submissions/<uuid:submission_id>/payload", CheckerPayloadView.as_view(), name="checker-payload"),
     path("internal/v1/checker-submissions/<uuid:submission_id>/secret", CheckerSecretView.as_view(), name="checker-secret"),
     path("internal/v1/checker-submissions/<uuid:submission_id>/events", CheckerEventsView.as_view(), name="checker-events"),
+    path("internal/v1/checker-submissions/<uuid:submission_id>/events/<uuid:event_id>/receipt", CheckerEventReceiptView.as_view(), name="checker-event-receipt"),
     path("internal/v1/checker-submissions/<uuid:submission_id>/token", CheckerTokenRefreshView.as_view(), name="checker-token-refresh"),
     path("internal/v1/runtime-secrets/resolve", RuntimeSecretResolveView.as_view(), name="runtime-secrets-resolve"),
     path("healthz", healthz),
