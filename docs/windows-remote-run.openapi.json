@@ -3,7 +3,7 @@
   "info": {
     "title": "Windows remote execution backend boundary",
     "version": "1.0.0",
-    "description": "Backend API candidate; actual Azure, Scheduler guest readiness and checker provider integration are pending. No execution quota; per-team request interval only."
+    "description": "Backend boundary with opt-in Windows broker_pool dispatch. Live execution, FLAG injection and VM restoration remain unverified; Windows never calls Scheduler; historical jobs require operator review. No execution quota; per-team request interval only."
   },
   "paths": {
     "/api/v1/challenges/{challenge_id}/exe-submissions": {
@@ -478,8 +478,68 @@
         }
       }
     },
+    "/internal/v1/checker-submissions/{submission_id}/token": {
+      "post": {
+        "description": "Refresh a scoped job token for an unresolved broker_pool submission. Authenticate using this Backend's checker service token, not a job JWT. Does not grant FLAG access or prove VM cleanup.",
+        "security": [{"CheckerServiceToken": []}],
+        "parameters": [{
+          "name": "submission_id",
+          "in": "path",
+          "required": true,
+          "schema": {"type": "string", "format": "uuid"}
+        }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "assignment_id": {"type": "string", "format": "uuid"},
+                  "payload_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+                },
+                "required": ["assignment_id", "payload_sha256"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Fresh 45-minute token; private, no-store",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "code": {"type": "string"},
+                    "message": {"type": "string"},
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "submission_id": {"type": "string", "format": "uuid"},
+                        "assignment_id": {"type": "string", "format": "uuid"},
+                        "job_token": {"type": "string"}
+                      },
+                      "required": ["submission_id", "assignment_id", "job_token"]
+                    }
+                  },
+                  "required": ["code", "message", "data"]
+                }
+              }
+            }
+          },
+          "400": {"description": "Invalid body or mismatched assignment/payload"},
+          "401": {"description": "Invalid checker service token"},
+          "404": {"description": "Unknown, legacy or already cleaned/closed submission"}
+        }
+      }
+    },
     "/internal/v1/checker-submissions/{submission_id}/secret": {
       "get": {
+        "description": "Retired FLAG endpoint. Valid execution job tokens receive 403; no secret is returned.",
         "security": [
           {
             "JobToken": []
@@ -497,56 +557,14 @@
           }
         ],
         "responses": {
-          "200": {
-            "description": "Success",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "properties": {
-                    "code": {
-                      "type": "string"
-                    },
-                    "message": {
-                      "type": "string"
-                    },
-                    "data": {
-                      "type": "object",
-                      "additionalProperties": false,
-                      "properties": {
-                        "submission_id": {
-                          "type": "string",
-                          "format": "uuid"
-                        },
-                        "env": {
-                          "type": "object",
-                          "additionalProperties": {
-                            "type": "string"
-                          },
-                          "propertyNames": {
-                            "const": "FLAG"
-                          },
-                          "minProperties": 1,
-                          "maxProperties": 1
-                        }
-                      },
-                      "required": [
-                        "submission_id",
-                        "env"
-                      ]
-                    }
-                  },
-                  "required": [
-                    "code",
-                    "message",
-                    "data"
-                  ]
-                }
-              }
-            }
+          "401": {
+            "description": "Invalid job token"
+          },
+          "403": {
+            "description": "Execution tokens cannot access FLAG secrets"
           }
-        }
+        },
+        "deprecated": true
       }
     },
     "/internal/v1/checker-submissions/{submission_id}/payload": {
@@ -1151,6 +1169,11 @@
       }
     },
     "securitySchemes": {
+      "CheckerServiceToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Dedicated checker service credential for this Backend; distinct between internal/external Backends and from Broker/VM tokens."
+      },
       "UserToken": {
         "type": "http",
         "scheme": "bearer",

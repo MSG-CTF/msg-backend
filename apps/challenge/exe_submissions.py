@@ -9,6 +9,7 @@ from django.core.files.base import ContentFile
 from django.core.files.storage import FileSystemStorage
 from django.db import DatabaseError, transaction
 from django.db.models import Count, Q
+from django.utils import timezone
 
 from apps.accounts.models import Team, User
 from apps.board.models import TeamChallengeAccess
@@ -19,7 +20,6 @@ from apps.challenge.remote_run_config import (
     retry_after_seconds,
 )
 from apps.common.exceptions import APIError
-from apps.instances.models import ArchitectureType, ChallengeRuntimeConfig, RuntimeType
 from apps.instances.models import RuntimeSecret
 from apps.instances.runtime_secrets import (
     decrypt_runtime_secret,
@@ -49,8 +49,13 @@ def require_exe_enabled():
 
 
 def private_payload_storage():
-    root = Path(settings.EXE_SUBMISSION_STORAGE_ROOT)
-    if not settings.EXE_SUBMISSION_STORAGE_ROOT or not root.is_absolute():
+    configured = settings.EXE_SUBMISSION_STORAGE_ROOT
+    if not isinstance(configured, str) or not configured or "\x00" in configured:
+        raise ExeSubmissionError(
+            "SUBMISSION_UNAVAILABLE", "Private storage is not configured.", 503
+        )
+    root = Path(configured)
+    if not root.is_absolute():
         raise ExeSubmissionError(
             "SUBMISSION_UNAVAILABLE", "Private storage is not configured.", 503
         )
@@ -260,7 +265,7 @@ def accept_exe(user, challenge_id, key, uploaded_file):
             remote = get_remote_config(challenge)
             if remote is None or not remote_run_data(challenge)["available"]:
                 raise ExeSubmissionError(
-                    "RELEASE_NOT_READY",
+                    "EXECUTION_NOT_READY",
                     "실행 환경 연결을 준비하고 있습니다",
                     409,
                 )
@@ -296,24 +301,9 @@ def accept_exe(user, challenge_id, key, uploaded_file):
                 raise ExeSubmissionError(
                     "INVALID_EXECUTABLE", "설정한 크기의 .exe 파일을 선택해주세요", 422
                 )
-            config = (
-                ChallengeRuntimeConfig.objects.filter(challenge=challenge)
-                .select_related("current_release")
-                .first()
-            )
-            release = config.current_release if config else None
-            if (
-                release is None
-                or release.challenge_id != challenge.pk
-                or release.runtime_type != RuntimeType.VM
-                or release.architecture != ArchitectureType.AMD64
-                or release.approved_at is None
-            ):
-                raise ExeSubmissionError(
-                    "RELEASE_NOT_READY", "An AMD64 VM release is required.", 409
-                )
             secret = exe_flag_secret(challenge)
             submission_id = uuid.uuid4()
+            pool_id = uuid.UUID(settings.EXE_WINDOWS_RUNTIME_POOL_ID)
             storage = private_payload_storage()
             payload_key = storage.save(
                 f"{submission_id}/payload.exe", ContentFile(payload)
@@ -323,19 +313,23 @@ def accept_exe(user, challenge_id, key, uploaded_file):
                 team=team,
                 challenge=challenge,
                 user_id=user.pk,
-                release=release,
+                release=None,
                 idempotency_key=key,
                 payload_key=payload_key,
                 payload_sha256=digest,
                 payload_size=len(payload),
                 file_name=name,
                 flag_secret=secret,
+                status=ExeSubmission.Status.ASSIGNED,
+                lease_id=uuid.uuid4(),
+                worker_id=pool_id,
                 config_snapshot={
                     "version": remote.version,
                     "environment": remote.environment,
                     "timeout_seconds": remote.timeout_seconds,
                     "max_file_bytes": remote.max_file_bytes,
                     "rate_limit_seconds": remote.rate_limit_seconds,
+                    "assignment_mode": "broker_pool",
                 },
             )
         return submission, True
@@ -354,6 +348,54 @@ def accept_exe(user, challenge_id, key, uploaded_file):
                 503,
             ) from None
         raise
+
+
+def purge_released_payload(submission):
+    if (
+        submission.config_snapshot.get("assignment_mode") != "broker_pool"
+        or submission.lease_released_at is None
+        or submission.cleanup_complete is not True
+        or submission.cleanup_confirmed_at is None
+        or not submission.payload_key
+    ):
+        return False
+    try:
+        private_payload_storage().delete(submission.payload_key)
+    except (OSError, ExeSubmissionError):
+        logger.error("Resolved EXE payload cleanup requires retry")
+        return False
+    submission.payload_key = ""
+    submission.save(update_fields=["payload_key", "updated_at"])
+    return True
+
+
+def close_exe_submission(submission_id):
+    with transaction.atomic():
+        row = ExeSubmission.objects.select_for_update().get(pk=submission_id)
+        if row.config_snapshot.get("assignment_mode") != "broker_pool":
+            raise ExeSubmissionError(
+                "LEGACY_EXECUTION_REQUIRES_REVIEW", "이전 실행 기록은 운영자 확인이 필요합니다", 409
+            )
+        if row.lease_released_at is not None:
+            purge_released_payload(row)
+            return row
+        if (
+            row.lease_id is None
+            or row.finished_at is None
+            or row.status not in {"COMPLETED", "CRASH", "TIMEOUT", "INFRA_ERROR"}
+            or row.attempt_state == ExeSubmission.AttemptState.RESERVED
+            or row.cleanup_complete is not True
+            or row.cleanup_confirmed_at is None
+        ):
+            raise ExeSubmissionError(
+                "EXECUTION_NOT_RESOLVED", "실행 결과와 별도 정리 확인이 필요합니다", 409
+            )
+        # Local tracking completion is not proof of Broker VM restoration.
+        row.lease_released_at = timezone.now()
+        row.last_error_code = ""
+        row.save(update_fields=["lease_released_at", "last_error_code", "updated_at"])
+        purge_released_payload(row)
+        return row
 
 
 def normalize_exe_output(value, truncated=False):
@@ -412,7 +454,8 @@ def serialize_exe_submission(submission):
         "vm_readiness": submission.vm_readiness,
         "cleanup_complete": cleanup,
         "requires_review": submission.status == ExeSubmission.Status.START_UNKNOWN
-        or submission.dispatch_state == "UNKNOWN",
+        or submission.dispatch_state == "UNKNOWN"
+        or submission.config_snapshot.get("assignment_mode") != "broker_pool",
         "file_name": submission.file_name,
         "file_size": submission.payload_size,
         "exit_code": submission.exit_code,

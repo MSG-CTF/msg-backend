@@ -1,4 +1,4 @@
-import re
+import uuid
 from datetime import timedelta
 from math import ceil
 
@@ -6,7 +6,6 @@ from django.conf import settings
 from django.utils import timezone
 
 from apps.challenge.models import ExeSubmission, RemoteRunConfig
-from apps.instances.models import ArchitectureType, RuntimeType
 
 WINDOWS_SLUG = "pwn-msgdriver"
 
@@ -19,18 +18,6 @@ def get_remote_config(challenge):
     ).first() or RemoteRunConfig(challenge=challenge)
 
 
-def runtime_ready(challenge):
-    config = getattr(challenge, "runtime_config", None)
-    release = config.current_release if config else None
-    return bool(
-        release
-        and release.challenge_id == challenge.pk
-        and release.runtime_type == RuntimeType.VM
-        and release.architecture == ArchitectureType.AMD64
-        and release.approved_at is not None
-    )
-
-
 def _backend_ready(challenge):
     from apps.challenge.exe_submissions import (
         ExeSubmissionError,
@@ -38,8 +25,16 @@ def _backend_ready(challenge):
         private_payload_storage,
     )
 
-    token = settings.SCHEDULER_API_TOKEN
-    if not isinstance(token, str) or not re.fullmatch(r"[\x21-\x7e]+", token):
+    if not settings.EXE_WINDOWS_DIRECT_RUNTIME_ENABLED:
+        return False
+    from apps.challenge.checker_auth import checker_configuration
+
+    try:
+        pool = uuid.UUID(settings.EXE_WINDOWS_RUNTIME_POOL_ID)
+        if pool.int == 0 or str(pool) != settings.EXE_WINDOWS_RUNTIME_POOL_ID:
+            return False
+        checker_configuration(str(pool), broker_pool=True)
+    except (ValueError, TypeError, AttributeError, ExeSubmissionError):
         return False
     try:
         private_payload_storage()
@@ -71,7 +66,6 @@ def remote_run_data(challenge, team=None):
     ready = bool(
         settings.EXE_SUBMISSIONS_ENABLED
         and settings.EXE_DISPATCH_ENABLED
-        and runtime_ready(challenge)
         and checker_pool_ready()
         and _backend_ready(challenge)
     )
