@@ -73,6 +73,47 @@ Runtime #97은 FLAG 주입, VM 이미지 복구와 CLEANUP(true)를 제공하지
 문제 운영이 미검증인 환경은 접수·전송 플래그를 False로 명시해 비활성으로 유지한다.
 복구와 정리 계약이 검증된 뒤 별도 활성화한다.
 
+## 비공개 단일 QA 시험
+
+서버 내부 명령으로만 미게시 `pwn-msgdriver`를 접수한다. 일반 HTTP API에는 QA 예외나
+새 권한을 추가하지 않는다. 운영 책임자의 승인 기록을 확보한 서버 운영자만 실행한다.
+`--approved-by`는 승인한 기존 관리자 login ID이며 실제 승인 절차를 대신하지 않는다.
+
+- 정상 PARTICIPANT 사용자와 승인된 팀 ID를 지정한다. 기존 ban과 문제 접근 권한은 유지한다.
+- 세 EXE 플래그와 문제별 실행 설정은 여전히 활성화가 필요하다. 명령이 설정을 켜거나
+  문제를 게시하거나 접근 권한을 추가하지 않는다. 문제는 계속 미게시로 유지한다.
+- 파일 SHA-256과 Runtime의 `checker_commit_sha`/`config_version`을 승인 범위와 대조한다.
+  측정하지 않은 VM/driver 해시나 Backend active release를 요구하지 않는다.
+- 승인자·승인 참조·사용자·팀·파일 해시·실행 버전을 제출 snapshot에 보존한다.
+  같은 멱등키는 같은 제출을 반환하고, 한 승인 참조로 다른 제출을 만들지 않는다.
+
+```bash
+python manage.py submit_private_qa_exe \
+  --user-id <approved-user-uuid> --team-id <approved-team-uuid> \
+  --challenge-id <pwn-msgdriver-uuid> --file /private/test.exe \
+  --sha256 <approved-file-sha256> --idempotency-key <trial-uuid> \
+  --approved-by <admin-login-id> --approval-reference <approval-record> \
+  --checker-commit-sha <runtime-sha> --config-version <runtime-config-version>
+```
+
+이 명령은 접수만 하고 Runtime을 호출하지 않는다. 일반 배치 worker도 private QA 제출은
+건너뛴다. 반환된 `submission_id`로 다음 명령을 명시적으로 실행한다.
+
+```bash
+python manage.py dispatch_exe_submissions --submission-id <submission-uuid>
+```
+
+지정 실행은 해당 제출의 전송/접수 조회만 수행하며 다른 제출·파일 정리를 처리하지 않는다.
+`--limit`과 함께 쓸 수 없다. 최초 전송 전 Runtime 실행 버전이 승인값과 달라지면 전송을
+차단한다. 응답 유실 후 같은 ID를 다시 지정하면 GET으로 조회하며 새 실행을 만들지 않는다.
+출력에는 작업 상태·오류 코드만 포함하며 토큰·FLAG·실행 stdout/stderr는 출력하지 않는다.
+
+미게시 상태에서는 참가자 상세/이력 API도 차단된다. 실행 로그는 기존 관리자
+`GET /api/v1/admin/challenges/{challenge_id}/remote_runs`에서 확인한다.
+이 시험은 Backend-Runtime 연동 검증이며 일반 참가자 HTTP 접수/조회 UI 검증은 아니다.
+callback 접근 허용·VM READY·시험 범위를 먼저 확인하고, 상시 timer는 끈 상태로 실행한다.
+RESULT 수신만으로 복구/정리를 완료하거나 두 번째 제출을 실행하지 않는다.
+
 ## 이전 실행 기록
 
 기존 Scheduler 배정 기록은 삭제하거나 broker_pool 작업으로 자동 전환하지 않는다.

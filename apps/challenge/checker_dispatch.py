@@ -105,6 +105,14 @@ def dispatch_submission(submission_id):
                 row.save(update_fields=["last_error_code", "updated_at"])
                 return row
             _, _, pins = checker_configuration(row.worker_id, broker_pool=True)
+            approval = row.config_snapshot.get("private_qa")
+            if approval is not None and any(
+                approval.get(name) != pins[name]
+                for name in ("checker_commit_sha", "config_version")
+            ):
+                row.last_error_code = "QA_EXECUTION_VERSION_CHANGED"
+                row.save(update_fields=["last_error_code", "updated_at"])
+                return row
             mint_job_token(row)
             row.config_snapshot = {**row.config_snapshot, "execution_provenance": pins}
         row.dispatch_state, row.dispatch_started_at = "SENDING", now
