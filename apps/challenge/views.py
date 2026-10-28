@@ -19,6 +19,7 @@ from apps.challenge.services import (
     is_correct_flag,
     update_dynamic_score_and_team_scores,
 )
+from apps.common.bans import check_active_team
 from apps.common.response import fail, ok
 from apps.instances.models import ChallengeRuntimeConfig, Instance
 from apps.instances.user_files import current_user_file_bundle, serialize_user_file
@@ -260,11 +261,14 @@ class ChallengeSubmitView(APIView):
                     )
                 )
             # Preserve UUID lock order; NO KEY UPDATE permits unrelated FK inserts.
-            list(
-                Team.objects.select_for_update(no_key=True)
+            locked_teams = {
+                row.pk: row
+                for row in Team.objects.select_for_update(no_key=True)
                 .filter(pk__in=affected_team_ids)
                 .order_by("pk")
-            )
+            }
+            # 잠근 행으로 정지·삭제를 다시 확인한다. 인증 뒤 정지되거나 삭제됐을 수 있다.
+            check_active_team(locked_teams.get(team.pk))
             if Solve.objects.filter(team=team, challenge=challenge).exists():
                 return fail("ALREADY_SOLVED", "이미 정답을 맞춘 문제입니다.", 409)
 

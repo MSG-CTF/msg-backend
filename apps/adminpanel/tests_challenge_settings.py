@@ -80,6 +80,14 @@ class ChallengeSettingsTests(ReleaseTestBase):
         self.assertIn("no-store", revealed["Cache-Control"])
         self.assertNotIn("MSG{flag}", " ".join(logs.output))
         self.assertEqual(logs.records[0].challenge_id, str(self.challenge.pk))
+        # 열람은 감사 기록으로도 남고 원문은 담지 않는다 (QA TC-614)
+        from apps.adminpanel.models import AdminEvent
+
+        revealed_event = AdminEvent.objects.get(
+            type=AdminEvent.EventType.CHALLENGE_FLAG_REVEALED
+        )
+        self.assertEqual(revealed_event.challenge_id, self.challenge.pk)
+        self.assertNotIn("MSG{flag}", revealed_event.message)
         self.assertEqual(self.client.get(self.url + "/flag/reveal").status_code, 405)
 
     def test_repository_flag_requires_current_grading_match(self):

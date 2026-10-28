@@ -79,6 +79,37 @@ class ChallengeSubmitTests(TestCase):
             format="json",
         )
 
+    def _change_team_after_auth(self, change):
+        """인증은 통과했고 팀 잠금 직전에 팀이 바뀐 상황을 만든다 (QA TC-60 · 127)."""
+        from apps.challenge import views
+
+        score = views.calculate_dynamic_score
+
+        def change_then_score(*args, **kwargs):
+            change()
+            return score(*args, **kwargs)
+
+        return patch.object(views, "calculate_dynamic_score", change_then_score)
+
+    def test_submit_rechecks_ban_after_locking_team(self):
+        with self._change_team_after_auth(
+            lambda: Team.objects.filter(pk=self.team.pk).update(is_banned=True)
+        ):
+            res = self.submit("MSG{correct_flag}")
+
+        self.assertEqual(res.status_code, 403)
+        self.assertEqual(res.data["code"], "TEAM_BANNED")
+        self.assertFalse(Solve.objects.filter(team=self.team).exists())
+
+    def test_submit_after_team_deleted_is_404_not_500(self):
+        with self._change_team_after_auth(
+            lambda: Team.objects.filter(pk=self.team.pk).delete()
+        ):
+            res = self.submit("MSG{correct_flag}")
+
+        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.data["code"], "USER_HAS_NO_TEAM")
+
     def test_submit_rejects_non_object_body(self):
         """배열·문자열 본문은 500 이 아니라 400 으로 거절한다 (QA TC-131 · 134)."""
         for body in ("[]", '"MSG{correct_flag}"', "123"):

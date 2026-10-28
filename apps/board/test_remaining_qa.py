@@ -60,13 +60,27 @@ class RemainingBoardQA(TestCase):
             self.set_position(position)
             response = self.client.get("/api/v1/board/dice/status")
             self.assertTrue(response.data["data"]["can_roll"])
-            response = self.post_idem("/api/v1/board/dice/roll", key=f"special-{position}")
+            with patch("apps.board.services.random.randint", return_value=1):
+                response = self.post_idem("/api/v1/board/dice/roll", key=f"special-{position}")
             self.assertEqual(response.status_code, 200)
             self.state.refresh_from_db()
             self.assertNotEqual(self.state.position_id, position)
             self.assertEqual(self.state.dice_rolls_left, 0)
             self.state.dice_rolls_left = 1
             self.state.save()
+
+    def test_optional_cell_roll_keeps_start_landing_reward(self):
+        self.set_position(25)
+        with patch("apps.board.services.random.randint", return_value=6):
+            response = self.post_idem(
+                "/api/v1/board/dice/roll", key="optional-start-pass"
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["data"]["passed_start"])
+        self.assertEqual(response.data["data"]["current_position"], 1)
+        self.assertEqual(response.data["data"]["start_reward"]["roll_gained"], 1)
+        self.state.refresh_from_db()
+        self.assertEqual(self.state.dice_rolls_left, 1)
 
     def test_admin_move_ends_active_timer_but_preserves_opened_access(self):
         self.set_position(2)

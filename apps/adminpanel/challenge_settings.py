@@ -7,6 +7,7 @@ from django.views.decorators.cache import never_cache
 from django.views.decorators.debug import sensitive_variables
 from rest_framework.decorators import api_view, permission_classes
 
+from apps.adminpanel.models import AdminEvent
 from apps.challenge.models import Challenge
 from apps.challenge.services import is_correct_flag
 from apps.common.permissions import IsAdmin
@@ -111,6 +112,14 @@ def challenge_flag_reveal(request, challenge_id):
     if value is None:
         return fail("FLAG_ORIGINAL_UNAVAILABLE", "채점 값과 일치하는 플래그 원문을 찾지 못했습니다", 409)
     logger.info("Admin viewed challenge flag", extra={"actor": request.user.login_id, "challenge_id": str(challenge.pk)})
+    # 정답 원문 열람은 감사 기록으로 남긴다. 원문 값은 넣지 않는다.
+    AdminEvent.objects.create(
+        type=AdminEvent.EventType.CHALLENGE_FLAG_REVEALED,
+        severity=AdminEvent.Severity.WARNING,
+        message=f"정답 원문 열람: {challenge.title} (출처 {metadata['source']})",
+        challenge=challenge,
+        actor=request.user.login_id,
+    )
     return ok({"flag": value, "source": metadata["source"], "source_revision": metadata["source_revision"]})
 
 

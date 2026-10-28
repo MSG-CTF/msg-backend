@@ -9,6 +9,7 @@ from django.views.decorators.cache import never_cache
 from rest_framework.decorators import api_view, permission_classes
 
 from apps.accounts.models import Team, User
+from apps.common.bans import lock_active_team
 from apps.common.exceptions import InvalidRequest, UserHasNoTeam
 from apps.common.jwt import hash_token
 from apps.common.permissions import IsAuthenticated
@@ -125,7 +126,7 @@ def qr_token(request):
     raw_token = f"pt_{secrets.token_urlsafe(16)}"
 
     with transaction.atomic():
-        team = Team.objects.select_for_update(no_key=True).get(pk=team.team_id)
+        team = lock_active_team(team.team_id)
         # 팀 수정도 같은 팀 행을 먼저 잠근다. 인증 뒤 잠금을 기다리는 동안 제외됐을 수 있다.
         current_team_id = (
             User.objects.filter(pk=request.user.pk)
