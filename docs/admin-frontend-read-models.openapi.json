@@ -1,0 +1,128 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Administrator frontend read models",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/api/v1/admin/teams/{team_id}": {
+      "get": {
+        "description": "ADMIN only. Adds data.line_monopolies ordered by line_number. Each row retains numeric earned_score and adds earned_score_exact as a fixed two-decimal string for full Decimal(20,2) precision.",
+        "responses": {
+          "200": {
+            "description": "Existing team detail with line_monopolies, including an empty array when none are owned"
+          }
+        }
+      },
+      "parameters": [
+        {
+          "name": "team_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ]
+    },
+    "/api/v1/admin/teams/{team_id}/line_monopolies/{line_number}": {
+      "patch": {
+        "description": "ADMIN only. Existing numeric values remain accepted. Exact decimal strings are also accepted without an intermediate binary float conversion.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "earned_score",
+                  "reason"
+                ],
+                "properties": {
+                  "earned_score": {
+                    "oneOf": [
+                      {
+                        "type": "number",
+                        "minimum": 0
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^[0-9]{1,18}(?:\\.[0-9]{1,2})?$"
+                      }
+                    ]
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Adds data.earned_score_exact while retaining the numeric earned_score field"
+          },
+          "400": {
+            "description": "Invalid line, unowned line, invalid score or missing reason"
+          }
+        }
+      },
+      "parameters": [
+        {
+          "name": "team_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "line_number",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 6
+          }
+        }
+      ]
+    },
+    "/api/v1/admin/publication_requests": {
+      "get": {
+        "description": "ADMIN only. Adds data.capabilities.recording_supported and dispatch_supported as booleans, including when the catalog is empty. Reading never records or dispatches a publication request.",
+        "responses": {
+          "200": {
+            "description": "Existing paginated request catalog with capabilities"
+          }
+        }
+      }
+    },
+    "/api/v1/admin/challenges/{challenge_id}/releases": {
+      "get": {
+        "description": "ADMIN only. Adds data.activation, null when no activation intent exists, otherwise the latest nonempty activation record. Fields: request_id, release_id, status, operation_status, last_error_code. It does not expose preparation specs or secrets.",
+        "responses": {
+          "200": {
+            "description": "Release catalog with latest activation intent; GET never advances the current release"
+          }
+        }
+      },
+      "parameters": [
+        {
+          "name": "challenge_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ]
+    }
+  }
+}

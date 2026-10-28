@@ -91,6 +91,25 @@ class PublicationRequestFixtures:
 
 
 class PublicationRequestTests(PublicationRequestFixtures, TestCase):
+    @override_settings(PUBLICATION_REQUESTS_ENABLED=False, PUBLICATION_DISPATCH_ENABLED=False)
+    def test_empty_catalog_reports_disabled_capabilities(self):
+        response = self.client.get(BASE)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["data"]["capabilities"], {
+            "recording_supported": False, "dispatch_supported": False,
+        })
+
+    @override_settings(PUBLICATION_REQUESTS_ENABLED=True, PUBLICATION_DISPATCH_ENABLED=True)
+    def test_catalog_capabilities_do_not_dispatch_workflows(self):
+        response = self.client.get(BASE)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["data"]["capabilities"], {
+            "recording_supported": True, "dispatch_supported": True,
+        })
+        self.assertFalse(PublicationRequest.objects.exists())
+        for external in self.network:
+            external.assert_not_called()
+
     def test_records_intent_only_without_run_or_sha_guarantee(self):
         response = self.record()
         self.assertEqual(response.status_code, 200, response.data)
