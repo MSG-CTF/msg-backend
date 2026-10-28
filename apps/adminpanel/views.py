@@ -1163,14 +1163,14 @@ def instance_force_delete(request, instance_id):
             try:
                 if cleanup:
                     data = call_scheduler_force_cleanup(instance, scheduler_auth_header(request))
+                    applied = ("정리", f"정리 응답 수신: {data['status']}")
                     update_instance_from_scheduler(instance, data)
                 else:
                     call_scheduler_delete(instance, scheduler_auth_header(request))
+                    applied = ("종료", "종료 요청 접수")
             except SchedulerError as error:
                 _record_force_failed(request, instance, "정리" if cleanup else "종료", error)
                 return fail(error.code, error.message, error.status_code)
-            applied = ("정리" if cleanup else "종료", "종료 요청 접수")
-
             if not cleanup:
                 instance.status = InstanceStatus.STOPPING
                 instance.delete_reason = DeleteReason.ADMIN_FORCED

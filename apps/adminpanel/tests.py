@@ -3587,6 +3587,43 @@ class AdminEventRecordingTests(TestCase):
         self.assertEqual(event.severity, AdminEvent.Severity.CRITICAL)
         self.assertIn("종료 요청 접수", event.message)
 
+    def test_force_cleanup_db_failure_after_scheduler_is_recorded(self):
+        from django.db import DatabaseError
+        from apps.adminpanel.models import AdminEvent
+
+        for remote_status in (InstanceStatus.CLEANED, InstanceStatus.FAILED):
+            with self.subTest(remote_status=remote_status):
+                inst = self.instance()
+                inst.status = InstanceStatus.CLEANUP_PENDING
+                inst.save(update_fields=["status"])
+                data = {
+                    "instance_id": str(inst.pk),
+                    "team_id": str(inst.team_id),
+                    "challenge_id": str(inst.challenge_id),
+                    "status": remote_status,
+                }
+                with patch(
+                    "apps.adminpanel.views.call_scheduler_force_cleanup",
+                    return_value=data,
+                ) as cleanup, patch.object(
+                    Instance, "save", side_effect=DatabaseError("db down")
+                ):
+                    response = self.client.delete(
+                        f"/api/v1/admin/instances/{inst.pk}"
+                    )
+
+                self.assertEqual(response.status_code, 500)
+                cleanup.assert_called_once()
+                inst.refresh_from_db()
+                self.assertEqual(inst.status, InstanceStatus.CLEANUP_PENDING)
+                event = AdminEvent.objects.get(
+                    type=AdminEvent.EventType.INSTANCE_FORCED,
+                    instance_id=inst.pk,
+                )
+                self.assertEqual(event.severity, AdminEvent.Severity.CRITICAL)
+                self.assertIn("DB 반영 실패", event.message)
+                self.assertIn(f"정리 응답 수신: {remote_status}", event.message)
+
     # ---- 설정 ----
 
     def test_settings_change_records_changed_keys(self):
