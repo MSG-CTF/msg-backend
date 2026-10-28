@@ -267,3 +267,84 @@ class SignatureAdminAuditTests(TestCase):
         self.challenge.refresh_from_db()
         self.assertEqual(self.challenge.title, "Original")
         self.assertFalse(AdminEvent.objects.exists())
+
+    def publish(self, value):
+        return self.client.patch(
+            f"{self.url}/publish", {"is_published": value}, format="json"
+        )
+
+    def test_visibility_changes_record_actor_state_and_safe_ids(self):
+        for value in (True, False):
+            with self.subTest(value=value):
+                self.assertEqual(self.publish(value).status_code, 200)
+                self.challenge.refresh_from_db()
+                self.assertEqual(self.challenge.is_published, value)
+                event = AdminEvent.objects.order_by("-created_at").first()
+                self.assertEqual(event.type, "SIGNATURE_VISIBILITY_CHANGED")
+                self.assertEqual(event.actor, self.admin.login_id)
+                self.assertEqual(event.severity, AdminEvent.Severity.WARNING)
+                self.assertIn(f"signature_id={self.challenge.pk}", event.message)
+                self.assertIn(f"club_id={self.club.pk}", event.message)
+                self.assertIn(f"is_published: {not value} -> {value}", event.message)
+                self.assertIsNone(event.challenge_id)
+                for secret in ("qa-original-flag", self.challenge.flag_hash):
+                    self.assertNotIn(secret, event.message)
+        response = self.client.get(
+            "/api/v1/admin/events", {"type": "SIGNATURE_VISIBILITY_CHANGED"}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["data"]["total_count"], 2)
+
+    def test_visibility_noop_does_not_record_an_event(self):
+        self.assertEqual(self.publish(False).status_code, 200)
+        self.assertFalse(AdminEvent.objects.exists())
+        self.assertEqual(self.publish(True).status_code, 200)
+        self.assertEqual(self.publish(True).status_code, 200)
+        self.assertEqual(AdminEvent.objects.count(), 1)
+
+    def test_invalid_missing_and_unready_publish_do_not_record_events(self):
+        self.assertEqual(self.publish("invalid").status_code, 400)
+        self.assertEqual(
+            self.client.patch(
+                f"/api/v1/admin/signatures/{uuid.uuid4()}/publish",
+                {"is_published": True}, format="json",
+            ).status_code,
+            404,
+        )
+        self.challenge.description = ""
+        self.challenge.save(update_fields=["description"])
+        self.assertEqual(self.publish(True).status_code, 409)
+        self.challenge.refresh_from_db()
+        self.assertFalse(self.challenge.is_published)
+        self.assertFalse(AdminEvent.objects.exists())
+
+    def test_non_admin_cannot_publish_or_record_an_event(self):
+        participant = User.objects.create_user(login_id="publish-audit-player")
+        for user, status in ((None, 401), (participant, 403)):
+            with self.subTest(user=user):
+                self.client.force_authenticate(user)
+                self.assertEqual(self.publish(True).status_code, status)
+        self.challenge.refresh_from_db()
+        self.assertFalse(self.challenge.is_published)
+        self.assertFalse(AdminEvent.objects.exists())
+
+    def test_event_write_failure_rolls_back_visibility(self):
+        with patch(
+            "apps.signature.admin_views._record_event",
+            side_effect=DatabaseError("QA audit failure"),
+        ):
+            response = self.publish(True)
+        self.assertEqual(response.status_code, 500)
+        self.challenge.refresh_from_db()
+        self.assertFalse(self.challenge.is_published)
+        self.assertFalse(AdminEvent.objects.exists())
+
+    def test_outer_rollback_removes_visibility_and_event(self):
+        with self.assertRaises(RuntimeError):
+            with transaction.atomic():
+                self.assertEqual(self.publish(True).status_code, 200)
+                self.assertEqual(AdminEvent.objects.count(), 1)
+                raise RuntimeError("QA rollback")
+        self.challenge.refresh_from_db()
+        self.assertFalse(self.challenge.is_published)
+        self.assertFalse(AdminEvent.objects.exists())

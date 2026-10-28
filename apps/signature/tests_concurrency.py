@@ -10,6 +10,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.accounts.models import Team, User
+from apps.adminpanel.models import AdminEvent
 from apps.challenge.models import Challenge, Solve
 from apps.challenge.services import get_team_total_score
 from apps.koth.models import KothChallenge, KothClub, KothSolve
@@ -103,6 +104,7 @@ class ConcurrentSignatureSubmitTests(TransactionTestCase):
             ],
         )
         self.assertEqual(get_team_total_score(self.team.pk), Decimal("300"))
+        self.assertEqual(AdminEvent.objects.filter(type="SIGNATURE_SOLVED").count(), 1)
 
     def test_different_teams_submit_same_challenge_without_serializing(self):
         other_team = Team.objects.create(team_name="signature-race-other-team")
@@ -154,6 +156,7 @@ class ConcurrentSignatureSubmitTests(TransactionTestCase):
             SignatureSolve.objects.filter(challenge=self.challenge).count(),
             2,
         )
+        self.assertEqual(AdminEvent.objects.filter(type="SIGNATURE_SOLVED").count(), 2)
 
 
 class SignatureScoreAggregationTests(TestCase):
