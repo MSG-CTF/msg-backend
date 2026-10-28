@@ -174,7 +174,8 @@ class ChallengeSubmitView(APIView):
         if team is None:
             return fail("USER_HAS_NO_TEAM", "소속된 팀이 없습니다", 404)
 
-        flag = request.data.get("flag")
+        # 배열·문자열 본문은 .get 이 없어 500 이 나므로 먼저 거절한다.
+        flag = request.data.get("flag") if isinstance(request.data, dict) else None
         if not isinstance(flag, str) or not flag or len(flag) > 512:
             return fail("INVALID_REQUEST", "요청 값이 올바르지 않습니다", 400)
 
