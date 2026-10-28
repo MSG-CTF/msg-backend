@@ -70,6 +70,22 @@ class StagedActivationApiTests(ReleaseTestBase):
         self.assertEqual(first.data['data']['preparation']['request_id'], second.data['data']['preparation']['request_id'])
         self.assertEqual(ImagePreparationRequest.objects.count(), 1)
 
+    def test_release_list_reports_pending_and_failed_activation_without_switch(self):
+        self.assertEqual(self.activate(self.new).status_code, 202)
+        row = ImagePreparationRequest.objects.get()
+        for state in ("PENDING", "FAILED"):
+            row.activation_status = state
+            row.save(update_fields=["activation_status"])
+            response = self.client.get(self.base_url)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.data["data"]["current_release_id"], self.old)
+            activation = response.data["data"]["activation"]
+            self.assertEqual(activation["status"], state)
+            self.assertEqual(activation["request_id"], str(row.pk))
+            self.assertEqual(activation["release_id"], self.new)
+            self.assertNotIn("spec", activation)
+        self.assertEqual(ImagePreparationRequest.objects.count(), 1)
+
     def test_later_activation_supersedes_pending_even_when_current_is_requested(self):
         self.assertEqual(self.activate(self.new).status_code, 202)
         self.assertEqual(self.activate(self.old).status_code, 200)

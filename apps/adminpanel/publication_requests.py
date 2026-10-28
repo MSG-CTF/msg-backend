@@ -196,6 +196,10 @@ def publication_requests(request):
             "total_count": total,
             "page": values["page"],
             "size": values["size"],
+            "capabilities": {
+                "recording_supported": settings.PUBLICATION_REQUESTS_ENABLED,
+                "dispatch_supported": settings.PUBLICATION_DISPATCH_ENABLED,
+            },
         }
     )
 

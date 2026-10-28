@@ -5487,7 +5487,9 @@ class AdminLineMonopolyTests(TestCase):
             ({"earned_score": 1, "reason": "보정"}, "7"),
             ({"earned_score": 1, "reason": "보정"}, "abc"),
             ({"earned_score": True, "reason": "보정"}, "3"),
-            ({"earned_score": "10", "reason": "보정"}, "3"),
+            ({"earned_score": "1e2", "reason": "보정"}, "3"),
+            ({"earned_score": "NaN", "reason": "보정"}, "3"),
+            ({"earned_score": "0.001", "reason": "보정"}, "3"),
             ({"earned_score": -1, "reason": "보정"}, "3"),
             ({"earned_score": -0.001, "reason": "보정"}, "3"),
             ({"earned_score": 10**18, "reason": "보정"}, "3"),
@@ -5527,6 +5529,24 @@ class AdminLineMonopolyTests(TestCase):
         self.auth("player")
         res = self.patch({"earned_score": 1, "reason": "보정"})
         self.assertEqual(res.status_code, 403)
+
+
+    def test_exact_decimal_text_and_owned_line_readback(self):
+        self.monopolize()
+        res = self.patch({"earned_score": "999999999999999999.99", "reason": "정밀도 보정"})
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data["data"]["earned_score_exact"], "999999999999999999.99")
+        from apps.ranking.models import LineMonopoly
+        other = Team.objects.create(team_name="별도 팀")
+        LineMonopoly.objects.create(team=other, line_number=1, earned_score=5)
+        detail = self.client.get(f"/api/v1/admin/teams/{self.team.pk}")
+        self.assertEqual(detail.status_code, 200)
+        rows = detail.data["data"]["line_monopolies"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["line_number"], 3)
+        self.assertEqual(rows[0]["earned_score_exact"], "999999999999999999.99")
+        self.auth("player")
+        self.assertEqual(self.client.get(f"/api/v1/admin/teams/{self.team.pk}").status_code, 403)
 
 
 class AdminSettingsAppliedTests(TestCase):

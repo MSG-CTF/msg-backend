@@ -102,6 +102,9 @@ class ReleaseListCreateView(APIView):
         )
         bundles = list(challenge.user_file_bundles.all())
         rows = [serialize_release(release, current_id, bundles) for release in releases]
+        activation = ImagePreparationRequest.objects.filter(
+            release__challenge=challenge,
+        ).exclude(activation_status="").order_by("-created_at", "-request_id").first()
 
         return ok(
             {
@@ -109,6 +112,13 @@ class ReleaseListCreateView(APIView):
                 "current_release_id": str(current_id) if current_id else None,
                 "releases": rows,
                 "total_count": len(rows),
+                "activation": {
+                    "request_id": str(activation.pk),
+                    "release_id": str(activation.release_id),
+                    "status": activation.activation_status,
+                    "operation_status": activation.operation_status or None,
+                    "last_error_code": activation.last_error_code or None,
+                } if activation else None,
             }
         )
 

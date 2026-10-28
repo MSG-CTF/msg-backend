@@ -1,5 +1,6 @@
 import logging
 import math
+import re
 import uuid
 from decimal import ROUND_HALF_UP, Decimal
 
@@ -1439,6 +1440,16 @@ def team_detail(request, team_id):
                     "created_at": r.created_at,
                 }
                 for r in recent
+            ],
+            "line_monopolies": [
+                {
+                    "line_number": row.line_number,
+                    "earned_score": num(row.earned_score),
+                    "earned_score_exact": format(row.earned_score, ".2f"),
+                    "is_category_bonus": row.is_category_bonus,
+                    "monopolized_at": row.monopolized_at,
+                }
+                for row in team.line_monopolies.order_by("line_number")
             ],
         }
     )
@@ -2890,7 +2901,10 @@ def _parse_line_number(raw):
 
 
 def _parse_line_score(raw):
-    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+    if isinstance(raw, str):
+        if not re.fullmatch(r"[0-9]{1,18}(?:\.[0-9]{1,2})?", raw):
+            raise InvalidRequest("earned_score 는 소수 둘째 자리까지의 점수여야 합니다")
+    elif isinstance(raw, bool) or not isinstance(raw, (int, float)):
         raise InvalidRequest("earned_score 는 숫자여야 합니다")
     if isinstance(raw, float) and not math.isfinite(raw):
         raise InvalidRequest("earned_score 는 숫자여야 합니다")
@@ -2936,6 +2950,7 @@ def line_monopoly_score(request, team_id, line_number):
             "team_id": str(team.team_id),
             "team_name": team.team_name,
             "earned_score": num(earned_score),
+            "earned_score_exact": format(earned_score, ".2f"),
             "is_category_bonus": monopoly.is_category_bonus,
             "monopolized_at": monopoly.monopolized_at,
         },
