@@ -1,6 +1,7 @@
 import hashlib
 import logging
 import uuid
+from datetime import timedelta
 from pathlib import Path
 
 import pefile
@@ -10,6 +11,7 @@ from django.core.files.storage import FileSystemStorage
 from django.db import DatabaseError, transaction
 from django.db.models import Count, Q
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 
 from apps.accounts.models import Role, Team, User
 from apps.board.models import TeamChallengeAccess
@@ -29,6 +31,16 @@ from apps.challenge.services import is_correct_flag
 from apps.instances.services import isoformat_z
 
 logger = logging.getLogger(__name__)
+
+
+def queue_time(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = parse_datetime(value)
+    except ValueError:
+        return None
+    return parsed if parsed and timezone.is_aware(parsed) else None
 MAX_PAYLOAD_BYTES = 10 * 1024 * 1024
 MAX_OUTPUT_BYTES = 64 * 1024
 EXE_CHALLENGE_SLUG = "pwn-msgdriver"
@@ -343,7 +355,8 @@ def accept_exe(user, challenge_id, key, uploaded_file, *, qa_approval=None):
                 error.wait = retry
                 error.data = {"retry_after_seconds": retry}
                 raise error
-            prior = ExeSubmission.objects.filter(team=team, challenge=challenge)
+            # All Windows problems share one team slot and the same FIFO VM pool.
+            prior = ExeSubmission.objects.filter(team=team)
             active = prior.filter(
                 status__in=["QUEUED", "ASSIGNED", "RUNNING", "START_UNKNOWN"]
             ).exists()
@@ -363,7 +376,7 @@ def accept_exe(user, challenge_id, key, uploaded_file, *, qa_approval=None):
             if active or unresolved_legacy_lease:
                 raise ExeSubmissionError(
                     "EXECUTION_IN_PROGRESS",
-                    "이전 실행의 종료를 기다려주세요",
+                    "팀의 대기 또는 실행 중인 요청이 끝날 때까지 기다려주세요",
                     409,
                 )
             name = uploaded_file.name.replace("\\", "/").rsplit("/", 1)[-1]
@@ -507,10 +520,22 @@ def serialize_exe_submission(submission):
         }
     )
     status = submission.status
+    queue_position = None
+    observed = None
     if status == ExeSubmission.Status.ASSIGNED:
         status = (
             "START_UNKNOWN" if submission.dispatch_state == "UNKNOWN" else "PREPARING"
         )
+        queue = submission.config_snapshot.get("runtime_queue", {})
+        if submission.dispatch_state == "PENDING":
+            status = "QUEUED"
+        elif status != "START_UNKNOWN" and isinstance(queue, dict):
+            if queue.get("state") in {"QUEUED", "PREPARING", "RUNNING"}:
+                status = queue["state"]
+            observed = queue_time(queue.get("observed_at"))
+            position = queue.get("position")
+            if status == "QUEUED" and observed and timezone.is_aware(observed) and timedelta(0) <= timezone.now() - observed <= timedelta(seconds=15) and type(position) is int and position > 0:
+                queue_position = position
     cleanup = submission.cleanup_complete
     if cleanup is True and submission.cleanup_confirmed_at is None:
         cleanup = None
@@ -520,6 +545,9 @@ def serialize_exe_submission(submission):
         "submission_id": str(submission.pk),
         "challenge_id": str(submission.challenge_id),
         "status": status,
+        "queue_position": queue_position,
+        "queue_policy": "TEAM_FIFO",
+        "queue_observed_at": isoformat_z(observed) if queue_position is not None else None,
         "execution_status": (
             "QUEUED"
             if submission.status == ExeSubmission.Status.ASSIGNED

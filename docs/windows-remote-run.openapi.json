@@ -687,6 +687,8 @@
           "max_attempts": {
             "type": "null"
           },
+          "queue_policy": { "const": "TEAM_FIFO" },
+          "max_pending_per_team": { "const": 1 },
           "rate_limit_seconds": {
             "type": "integer",
             "minimum": 1,
@@ -720,6 +722,8 @@
           "max_file_bytes",
           "timeout_seconds",
           "max_attempts",
+          "queue_policy",
+          "max_pending_per_team",
           "rate_limit_seconds",
           "retry_after_seconds",
           "available",
@@ -856,6 +860,17 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "queue_position": {
+            "description": "Current team position in the shared Windows queue, or null while unconfirmed or older than 15 seconds",
+            "type": ["integer", "null"],
+            "minimum": 1
+          },
+          "queue_policy": { "const": "TEAM_FIFO" },
+          "queue_observed_at": {
+            "description": "Server observation time for a current queue_position",
+            "type": ["string", "null"],
+            "format": "date-time"
           }
         },
         "required": [
@@ -880,7 +895,10 @@
           "submitted_at",
           "started_at",
           "finished_at",
-          "updated_at"
+          "updated_at",
+          "queue_position",
+          "queue_policy",
+          "queue_observed_at"
         ]
       },
       "RemoteRunSettings": {

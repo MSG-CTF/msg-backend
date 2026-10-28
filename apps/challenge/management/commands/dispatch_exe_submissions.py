@@ -3,6 +3,7 @@ import uuid
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
+from django.db.models import F
 
 from apps.challenge.checker_dispatch import dispatch_submission
 from apps.challenge.exe_submissions import ExeSubmissionError, close_exe_submission
@@ -51,7 +52,7 @@ class Command(BaseCommand):
         ).exclude(config_snapshot__has_key="private_qa")
         ids = (
             rows.filter(status="ASSIGNED", finished_at__isnull=True)
-            .order_by("created_at")
+            .order_by(F("dispatch_started_at").asc(nulls_first=True), "created_at", "submission_id")
             .values_list("pk", flat=True)[:limit]
         )
         for submission_id in ids:

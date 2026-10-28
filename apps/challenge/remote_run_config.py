@@ -77,6 +77,8 @@ def remote_run_data(challenge, team=None):
         "max_file_bytes": config.max_file_bytes,
         "timeout_seconds": config.timeout_seconds,
         "max_attempts": None,
+        "queue_policy": "TEAM_FIFO",
+        "max_pending_per_team": 1,
         "rate_limit_seconds": config.rate_limit_seconds,
         "retry_after_seconds": retry_after_seconds(
             team.pk, challenge.pk, config.rate_limit_seconds

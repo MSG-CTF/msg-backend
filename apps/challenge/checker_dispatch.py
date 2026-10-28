@@ -8,7 +8,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from apps.challenge.checker_auth import checker_configuration, mint_job_token
-from apps.challenge.exe_submissions import ExeSubmissionError
+from apps.challenge.exe_submissions import ExeSubmissionError, queue_time
 from apps.challenge.models import ExeSubmission
 
 
@@ -77,7 +77,7 @@ def checker_request(row, method):
         ) from None
 
 
-def dispatch_submission(submission_id):
+def dispatch_submission(submission_id, *, queue_only=False):
     if not settings.EXE_DISPATCH_ENABLED:
         return None
     with transaction.atomic():
@@ -90,6 +90,14 @@ def dispatch_submission(submission_id):
         ):
             return row
         now = timezone.now()
+        queue = row.config_snapshot.get("runtime_queue", {})
+        checked = queue_time(queue.get("checked_at")) if isinstance(queue, dict) else None
+        if queue_only and (
+            row.dispatch_state != "CONFIRMED"
+            or not row.checker_job_id
+            or (checked and now - timedelta(seconds=5) < checked <= now)
+        ):
+            return row
         if (
             row.dispatch_state == "SENDING"
             and row.dispatch_started_at
@@ -133,15 +141,24 @@ def dispatch_submission(submission_id):
         row = ExeSubmission.objects.select_for_update().get(pk=submission_id)
         # A callback can commit before its HTTP acknowledgement reaches this worker.
         if row.status == "ASSIGNED" and row.finished_at is None:
-            row.dispatch_state = "CONFIRMED" if result else "UNKNOWN"
+            # Losing a queue refresh does not make an acknowledged execution unknown.
+            row.dispatch_state = "CONFIRMED" if result or row.checker_job_id else "UNKNOWN"
             row.last_error_code = "" if result else failure
+            previous_queue = row.config_snapshot.get("runtime_queue")
+            queue = dict(previous_queue) if isinstance(previous_queue, dict) else {}
+            queue["checked_at"] = timezone.now().isoformat()
             if result:
                 row.checker_job_id = result["checker_job_id"]
+                state, position = result.get("queue_state"), result.get("queue_position")
+                if state in {"QUEUED", "PREPARING", "RUNNING"}:
+                    queue.update(state=state, position=position if state == "QUEUED" and type(position) is int and 1 <= position <= 1000000 else None, observed_at=queue["checked_at"])
+            row.config_snapshot = {**row.config_snapshot, "runtime_queue": queue}
             row.save(
                 update_fields=[
                     "dispatch_state",
                     "last_error_code",
                     "checker_job_id",
+                    "config_snapshot",
                     "updated_at",
                 ]
             )
