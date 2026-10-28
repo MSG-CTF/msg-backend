@@ -12,9 +12,11 @@ from django.utils.dateparse import parse_datetime
 from apps.instances.models import Instance, InstanceStatus
 from apps.instances.services import (
     SchedulerError,
+    SchedulerResponseError,
     call_scheduler_detail,
     scheduler_auth_header,
     scheduler_delete_reason,
+    validate_failed_cleanup_transition,
 )
 
 logger = logging.getLogger(__name__)
@@ -23,8 +25,8 @@ ACTIVE_STATUSES = (
     InstanceStatus.RUNNING, InstanceStatus.RESTARTING, InstanceStatus.RESETTING,
 )
 PENDING_STATUSES = (*ACTIVE_STATUSES, InstanceStatus.STOPPING, InstanceStatus.CLEANUP_PENDING,
-                    InstanceStatus.EXPIRED, InstanceStatus.STOPPED)
-FINAL_STATUSES = (InstanceStatus.CLEANED, InstanceStatus.FAILED)
+                    InstanceStatus.EXPIRED, InstanceStatus.STOPPED, InstanceStatus.FAILED)
+FINAL_STATUSES = (InstanceStatus.CLEANED,)
 RESULT_STATUSES = (*PENDING_STATUSES, *FINAL_STATUSES)
 # 다른 기능의 advisory lock과 키를 공유하지 않는다
 LOCK_NAMESPACE = 0x4D534749
@@ -74,6 +76,7 @@ def _validate_snapshot(instance, data):
         raise SchedulerError(
             "SCHEDULER_UNAVAILABLE", "종료 이력 응답의 소유 정보나 상태가 일치하지 않습니다", 503,
         )
+    validate_failed_cleanup_transition(instance, data["status"])
     scheduler_delete_reason(data)
 
 
@@ -146,6 +149,11 @@ def reconcile_instances_once(*, batch_size=100, max_seconds=20, instance_ids=())
             stop = False
             try:
                 data = call_scheduler_detail(snapshot, auth_header)
+            except (SchedulerResponseError, ValueError, TypeError, AttributeError):
+                # 행 하나의 잘못된 응답이 뒤의 정상 기록까지 막지 않게 한다
+                # 본문은 기록하지 않고 다음 행을 확인한다
+                summary["error"] += 1
+                logger.warning("instance history payload rejected: instance_id=%s", snapshot.pk)
             except SchedulerError as error:
                 if error.code == "INSTANCE_NOT_FOUND":
                     # 404만으로 실제 workload가 정리됐다고 판단하지 않는다
@@ -154,11 +162,6 @@ def reconcile_instances_once(*, batch_size=100, max_seconds=20, instance_ids=())
                     summary["error"] += 1
                     logger.warning("instance history lookup failed: instance_id=%s http_status=%s", snapshot.pk, error.status_code)
                     stop = error.status_code in (401, 403, 502, 503, 504)
-            except (ValueError, TypeError, AttributeError):
-                # 정상 HTTP 응답이어도 JSON이나 공통 응답 형식이 깨질 수 있다
-                # 본문은 기록하지 않고 다음 행을 확인한다
-                summary["error"] += 1
-                logger.warning("instance history payload rejected: instance_id=%s", snapshot.pk)
             else:
                 try:
                     _validate_snapshot(snapshot, data)

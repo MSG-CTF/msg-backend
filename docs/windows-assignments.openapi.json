@@ -3,7 +3,7 @@
   "info": {
     "title": "Windows assignment consumer contract",
     "version": "1.0.0-draft",
-    "description": "Backend consumer requirements. Scheduler PR #81 implements assignment/release but deployment, Azure Windows pools, guest readiness evidence and the checker remain pending. Backend calls the Runtime checker directly. Broker complete queues recreation and is not proof that the guest was reset."
+    "description": "HISTORICAL ONLY: Backend Windows execution no longer calls these Scheduler APIs. Current execution uses Runtime checker broker_pool selection; this draft is retained solely to interpret old assignment records."
   },
   "security": [{"scheduler_service": []}],
   "paths": {

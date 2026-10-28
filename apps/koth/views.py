@@ -8,7 +8,7 @@ from django.db import transaction
 from django.db.models import Count, OuterRef, Prefetch, Subquery
 from django.http import HttpResponse
 from django.utils import timezone
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, permission_classes, throttle_classes
 from rest_framework.permissions import AllowAny
 
 from apps.accounts.models import Team
@@ -23,10 +23,12 @@ from apps.common.exceptions import (
     KothVerifyThrottled,
     RateLimitUnavailable,
     UserHasNoTeam,
+    TeamBanned,
 )
 from apps.common.jwt import hash_token
 from apps.common.permissions import IsAuthenticated
 from apps.common.response import ok
+from apps.common.throttling import ReadApiThrottle
 from apps.common.utils import num
 
 from .models import (
@@ -35,6 +37,8 @@ from .models import (
     KothSolve,
     KothTeamToken,
     KothTokenVerificationAttempt,
+    KothScorePeriod,
+    KothScorePeriodStatus,
 )
 from .tokens import build_team_token, matches_token
 from .files import public_file_metadata, with_file_metadata
@@ -90,6 +94,7 @@ def _challenge_payload(challenge, include_times=True):
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
+@throttle_classes([ReadApiThrottle])
 def clubs(request):
     from .models import KothClub
 
@@ -121,6 +126,7 @@ def clubs(request):
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
+@throttle_classes([ReadApiThrottle])
 def club_detail(request, club_id):
     try:
         uuid.UUID(str(club_id))
@@ -152,7 +158,37 @@ def club_detail(request, club_id):
 def _request_team(request):
     if request.user.team_id is None:
         raise UserHasNoTeam()
-    return request.user.team
+    team = request.user.team
+    if team.is_banned:
+        raise TeamBanned()
+    return team
+
+
+def _with_collection_state(queryset):
+    periods = KothScorePeriod.objects.filter(challenge_id=OuterRef("pk"))
+    latest = periods.order_by("-period_id")
+    successful = periods.filter(
+        status=KothScorePeriodStatus.APPLIED, applied_at__isnull=False
+    ).order_by("-applied_at")
+    return queryset.annotate(
+        latest_collection_status=Subquery(latest.values("status")[:1]),
+        latest_collection_period_id=Subquery(latest.values("period_id")[:1]),
+        last_successful_collection_at=Subquery(successful.values("applied_at")[:1]),
+    )
+
+
+def _collection_state(challenge):
+    status = challenge.latest_collection_status
+    return {
+        # APPLIED is the collector's internal state; clients use COLLECTED.
+        "collection_status": (
+            "COLLECTED" if status == KothScorePeriodStatus.APPLIED
+            else status or "NOT_COLLECTED"
+        ),
+        "is_stale": status != KothScorePeriodStatus.APPLIED,
+        "collection_period_id": challenge.latest_collection_period_id,
+        "last_collected_at": challenge.last_successful_collection_at,
+    }
 
 
 @api_view(["GET"])
@@ -177,7 +213,7 @@ def me(request):
         )
     }
     challenge_data = []
-    for challenge in with_file_metadata(KothChallenge.objects.all()):
+    for challenge in with_file_metadata(_with_collection_state(KothChallenge.objects.all())):
         solve = solves.get(challenge.koth_challenge_id)
         score = solve.earned_score if solve else Decimal("0")
         rank = None
@@ -199,6 +235,7 @@ def me(request):
                 "solved_at": solve.solved_at if solve else None,
                 "opened_at": challenge.opened_at,
                 "closed_at": challenge.closed_at,
+                **_collection_state(challenge),
             }
         )
     total = sum((solve.earned_score for solve in solves.values()), Decimal("0"))
@@ -229,7 +266,7 @@ def leaderboard(request):
     # Authentication runs before this view. Only cache the shared JSON ranking;
     # browsable HTML can contain request-specific content and must never be shared.
     cache_seconds = settings.KOTH_LEADERBOARD_CACHE_SECONDS
-    cache_key = f"koth:leaderboard:json:v1:{parsed_id}"
+    cache_key = f"koth:leaderboard:json:v3:{parsed_id}"
     cacheable = cache_seconds > 0 and request.accepted_media_type == "application/json"
     if cacheable:
         try:
@@ -240,13 +277,13 @@ def leaderboard(request):
             return HttpResponse(cached_content, content_type="application/json")
 
     try:
-        challenge = KothChallenge.objects.get(pk=parsed_id)
+        challenge = _with_collection_state(KothChallenge.objects.all()).get(pk=parsed_id)
     except KothChallenge.DoesNotExist:
         raise KothChallengeNotFound()
 
     solves = (
         KothSolve.objects.filter(
-            challenge=challenge, earned_score__gt=0, team__is_banned=False
+            challenge=challenge, team__is_banned=False
         )
         .order_by("-earned_score", "solved_at", "team__team_name", "team_id")
         .values("team_id", "team__team_name", "earned_score", "solved_at")
@@ -255,16 +292,17 @@ def leaderboard(request):
     previous_score = None
     rank = 0
     for index, solve in enumerate(solves, start=1):
-        if solve["earned_score"] != previous_score:
+        if solve["earned_score"] > 0 and solve["earned_score"] != previous_score:
             rank = index
             previous_score = solve["earned_score"]
         rows.append(
             {
-                "rank": rank,
+                "rank": rank if solve["earned_score"] > 0 else None,
                 "team_id": str(solve["team_id"]),
                 "team_name": solve["team__team_name"],
                 "earned_score": num(solve["earned_score"]),
                 "solved_at": solve["solved_at"],
+                "score_status": "COLLECTED",
             }
         )
 
@@ -276,6 +314,7 @@ def leaderboard(request):
             "leaderboard": rows,
             "total_count": len(rows),
             "updated_at": timezone.now(),
+            **_collection_state(challenge),
         }
     )
     if cacheable:
@@ -304,7 +343,8 @@ def team_token(request):
         if not created and not matches_token(raw_token, stored.token_hash):
             # 비밀값이 교체됐을 때는 운영자가 토큰을 의도적으로 재발급할 수 있게 갱신한다.
             stored.token_hash = hash_token(raw_token)
-            stored.save(update_fields=["token_hash"])
+            stored.issued_at = timezone.now()
+            stored.save(update_fields=["token_hash", "issued_at"])
     response = ok(
         {
             "team_id": str(team.team_id),

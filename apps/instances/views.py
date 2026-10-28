@@ -66,8 +66,17 @@ class InstanceCreateView(APIView):
 
     def post(self, request):
         # 새 인스턴스 생성을 Scheduler에 요청하고 응답값으로 DB row를 만든다
-        if not isinstance(request.data, dict) or set(request.data) != {"challenge_id"}:
-            return fail("INVALID_REQUEST", "문제 ID만 지정할 수 있습니다", 400)
+        if (not isinstance(request.data, dict) or "challenge_id" not in request.data
+                or set(request.data) - {"challenge_id", "replace_instance_id"}):
+            return fail("INVALID_REQUEST", "문제 ID와 확인한 교체 대상만 지정할 수 있습니다", 400)
+        replacement_id = request.data.get("replace_instance_id")
+        if replacement_id is not None:
+            try:
+                parsed_replacement = uuid.UUID(replacement_id) if isinstance(replacement_id, str) else None
+                if parsed_replacement is None or parsed_replacement.int == 0 or str(parsed_replacement) != replacement_id:
+                    raise ValueError()
+            except ValueError:
+                return fail("INVALID_REQUEST", "교체 대상 ID가 올바르지 않습니다", 400)
         user = request.user
         team = getattr(user, "team", None)
         if team is None:
@@ -109,6 +118,8 @@ class InstanceCreateView(APIView):
                     runtime_config,
                     release,
                     scheduler_auth_header(request),
+                    require_replacement_confirmation=True,
+                    replace_instance_id=replacement_id,
                 )
             except SchedulerError as error:
                 return fail(error.code, error.message, error.status_code)

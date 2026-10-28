@@ -2,13 +2,8 @@ from django.conf import settings
 from django.core.management.base import BaseCommand
 
 from apps.challenge.checker_dispatch import dispatch_submission
-from apps.challenge.exe_submissions import ExeSubmissionError
+from apps.challenge.exe_submissions import ExeSubmissionError, close_exe_submission
 from apps.challenge.models import ExeSubmission
-from apps.challenge.windows_assignments import (
-    assign_oldest_exe_submission,
-    release_windows_assignment,
-)
-from apps.instances.services import SchedulerError
 
 
 class Command(BaseCommand):
@@ -22,20 +17,19 @@ class Command(BaseCommand):
             self.stdout.write("Windows execution is disabled")
             return
         limit = max(1, min(options["limit"], 100))
-        # At most one reservation per pass, so an unavailable pool is not hammered.
-        assign_oldest_exe_submission()
+        rows = ExeSubmission.objects.filter(config_snapshot__assignment_mode="broker_pool")
         ids = (
-            ExeSubmission.objects.filter(status="ASSIGNED", finished_at__isnull=True)
+            rows.filter(status="ASSIGNED", finished_at__isnull=True)
             .order_by("created_at")
             .values_list("pk", flat=True)[:limit]
         )
         for submission_id in ids:
             try:
                 dispatch_submission(submission_id)
-            except (ExeSubmissionError, SchedulerError) as error:
+            except ExeSubmissionError as error:
                 self.stderr.write(error.code)
         ids = (
-            ExeSubmission.objects.filter(
+            rows.filter(
                 lease_released_at__isnull=False,
                 cleanup_complete=True,
                 cleanup_confirmed_at__isnull=False,
@@ -44,20 +38,19 @@ class Command(BaseCommand):
             .values_list("pk", flat=True)[:limit]
         )
         for submission_id in ids:
-            release_windows_assignment(submission_id)
+            close_exe_submission(submission_id)
         ids = (
-            ExeSubmission.objects.filter(
+            rows.filter(
                 cleanup_complete=True,
                 cleanup_confirmed_at__isnull=False,
                 finished_at__isnull=False,
                 lease_released_at__isnull=True,
             )
             .exclude(attempt_state="RESERVED")
-            .exclude(last_error_code="WINDOWS_ASSIGNMENT_NOT_FOUND")
             .values_list("pk", flat=True)[:limit]
         )
         for submission_id in ids:
             try:
-                release_windows_assignment(submission_id)
-            except (ExeSubmissionError, SchedulerError) as error:
+                close_exe_submission(submission_id)
+            except ExeSubmissionError as error:
                 self.stderr.write(error.code)
