@@ -1,4 +1,5 @@
 import io
+import json
 import uuid
 from datetime import timedelta
 from unittest.mock import patch
@@ -83,6 +84,19 @@ class WindowsTeamQueueTests(ExeFixtures, TestCase):
         for value in [True, "3", 0, -1, 1.5, 1000001]:
             self.acknowledge(row, queue_state="QUEUED", queue_position=value)
             self.assertIsNone(serialize_exe_submission(row)["queue_position"])
+
+    def test_detail_refresh_has_a_short_timeout_and_does_not_reload_executable(self):
+        row = self.accepted()
+        self.acknowledge(row, queue_state="QUEUED", queue_position=2)
+        row.config_snapshot["runtime_queue"]["checked_at"] = (timezone.now() - timedelta(seconds=6)).isoformat()
+        row.save(update_fields=["config_snapshot"])
+        response = {"code":"SUCCESS","data":{"submission_id":str(row.pk),"assignment_id":str(row.lease_id),"checker_job_id":row.checker_job_id,"queue_state":"QUEUED","queue_position":1}}
+        opener = self.http_response(json.dumps(response).encode())
+        with patch("apps.challenge.checker_dispatch.build_opener",return_value=opener):
+            data = self.client.get(f"{self.url}/{row.pk}").data["data"]
+        self.assertEqual(opener.open.call_args.kwargs["timeout"],2)
+        self.assertEqual(opener.open.call_args.args[0].method,"GET")
+        self.assertEqual(data["queue_position"],1)
         self.acknowledge(row, queue_state="QUEUED", queue_position=2)
         for observed in [(timezone.now() - timedelta(seconds=16)).isoformat(), (timezone.now() + timedelta(seconds=16)).isoformat(), "bad", "2026-99-99", None, 42]:
             row.config_snapshot["runtime_queue"]["observed_at"] = observed

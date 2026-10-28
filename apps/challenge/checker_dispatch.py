@@ -17,7 +17,7 @@ class _NoRedirect(HTTPRedirectHandler):
         return None
 
 
-def checker_request(row, method):
+def checker_request(row, method, *, timeout=10):
     origin, token, _ = checker_configuration(
         row.worker_id,
         broker_pool=row.config_snapshot.get("assignment_mode") == "broker_pool",
@@ -54,7 +54,7 @@ def checker_request(row, method):
     )
     try:
         with build_opener(ProxyHandler({}), _NoRedirect()).open(
-            request, timeout=10
+            request, timeout=timeout
         ) as response:  # nosec B310
             raw = response.read(65537)
         if len(raw) > 65536:
@@ -133,7 +133,7 @@ def dispatch_submission(submission_id, *, queue_only=False):
             ]
         )
     try:
-        result = checker_request(row, method)
+        result = checker_request(row, method, timeout=2) if queue_only else checker_request(row, method)
         failure = None
     except ExeSubmissionError as error:
         result, failure = None, error.code
