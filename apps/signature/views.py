@@ -7,7 +7,8 @@ from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
 
 from apps.accounts.models import Team
-from apps.adminpanel.models import setting_values
+from apps.adminpanel.models import AdminEvent, setting_values
+from apps.adminpanel.views import _record_event
 from apps.challenge.services import get_team_total_score, hash_flag, is_correct_flag
 from apps.common.exceptions import UserHasNoTeam
 from apps.common.permissions import IsAuthenticated
@@ -220,6 +221,13 @@ def signature_submit(request, signature_id):
             result=SignatureFlagSubmission.SubmissionResult.CORRECT,
         )
         team_score = get_team_total_score(team.pk)
+        _record_event(
+            AdminEvent.EventType.SIGNATURE_SOLVED,
+            f"시그니처 정답 (signature_id={challenge.pk}, club_id={challenge.club_id}, "
+            f"solve_id={solve.pk}, user_id={request.user.pk}): earned_score={solve.earned_score}",
+            request.user.login_id,
+            team=team,
+        )
 
     return ok(
         {
