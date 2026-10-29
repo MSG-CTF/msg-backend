@@ -3,6 +3,7 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.db import transaction
+from django.utils.decorators import method_decorator
 from django.utils import timezone
 from rest_framework.views import APIView
 
@@ -13,7 +14,13 @@ from apps.common.exceptions import TeamBanned
 from apps.common.permissions import IsAuthenticated
 from apps.challenge.models import Challenge
 from apps.common.response import fail, ok
-from apps.instances.models import DeleteReason, Instance, InstanceLock, InstanceStatus
+from apps.instances.models import (
+    DeleteReason, Instance, InstanceLock, InstanceStatus, InstanceWriteOperation,
+)
+from apps.instances.write_recovery import (
+    begin_write, bind_remote_instance, complete_write, record_write_failure,
+    validate_write_owner,
+)
 from apps.instances.services import (
     ACTIVE_INSTANCE_STATUSES,
     DELETABLE_INSTANCE_STATUSES,
@@ -61,6 +68,7 @@ def can_create_instance_for_challenge(team, challenge):
     ).exists()
 
 
+@method_decorator(transaction.non_atomic_requests, name="dispatch")
 class InstanceCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -109,31 +117,41 @@ class InstanceCreateView(APIView):
         with transaction.atomic():
             lock_instance_user(user)
             reject_if_team_banned(team.pk)
-
             try:
+                operation = begin_write(
+                    action=InstanceWriteOperation.Action.CREATE,
+                    user=user, team=team, challenge=challenge, release=release,
+                    source_instance_id=replacement_id,
+                )
+            except SchedulerError as error:
+                return fail(error.code, error.message, error.status_code)
+
+        sent = False
+        try:
+            with transaction.atomic():
+                lock_instance_user(user)
+                reject_if_team_banned(team.pk)
+                validate_write_owner(operation)
+                auth_header = scheduler_auth_header(request)
+                sent = True
                 scheduler_data = call_scheduler_create(
                     user,
                     team,
                     challenge,
                     runtime_config,
                     release,
-                    scheduler_auth_header(request),
+                    auth_header,
                     require_replacement_confirmation=True,
                     replace_instance_id=replacement_id,
                 )
-            except SchedulerError as error:
-                return fail(error.code, error.message, error.status_code)
-
-            replaced_instance = None
-            replaced_instance_id = scheduler_data.get("replaced_instance_id")
-            if replaced_instance_id:
-                replaced_instance = (
-                    Instance.objects.select_for_update()
-                    .filter(instance_id=replaced_instance_id, user=user)
-                    .first()
-                )
-
-            try:
+                bind_remote_instance(operation, scheduler_data)
+                replaced_instance = None
+                if operation.source_instance_id:
+                    replaced_instance = (
+                        Instance.objects.select_for_update()
+                        .filter(instance_id=operation.source_instance_id, user=user, team=team)
+                        .first()
+                    )
                 instance = create_instance_from_scheduler(
                     scheduler_data,
                     user=user,
@@ -142,9 +160,14 @@ class InstanceCreateView(APIView):
                     replaced_instance=replaced_instance,
                     release=release,
                 )
-            except SchedulerError as error:
-                return fail(error.code, error.message, error.status_code)
-            mark_instance_replaced(replaced_instance)
+                mark_instance_replaced(replaced_instance)
+                complete_write(operation)
+        except SchedulerError as error:
+            record_write_failure(operation, error, sent=sent)
+            return fail(error.code, error.message, error.status_code)
+        except Exception as error:
+            record_write_failure(operation, error, sent=sent)
+            raise
 
         message = "인스턴스 생성 요청이 접수되었습니다."
         if replaced_instance is not None:
@@ -218,6 +241,7 @@ class InstanceDeleteView(APIView):
         )
 
 
+@method_decorator(transaction.non_atomic_requests, name="dispatch")
 class InstanceResetView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -252,13 +276,38 @@ class InstanceResetView(APIView):
 
             reject_if_team_banned(instance.team_id)
             try:
-                scheduler_data = call_scheduler_reset(
-                    instance, scheduler_auth_header(request)
+                operation = begin_write(
+                    action=InstanceWriteOperation.Action.RESET, user=request.user,
+                    team=instance.team, challenge=instance.challenge,
+                    release=instance.release, source_instance_id=instance.pk,
                 )
             except SchedulerError as error:
                 return fail(error.code, error.message, error.status_code)
 
-            try:
+        sent = False
+        try:
+            with transaction.atomic():
+                lock_instance_user(request.user)
+                instance = (
+                    Instance.objects.select_for_update()
+                    .select_related("challenge").filter(pk=instance_id).first()
+                )
+                if instance is None:
+                    raise SchedulerError("INSTANCE_NOT_FOUND", "존재하지 않는 인스턴스 ID입니다.", 404)
+                if instance.user_id != request.user.pk or instance.team_id != request.user.team_id:
+                    raise SchedulerError("FORBIDDEN", "권한이 필요합니다", 403)
+                if instance.status not in RESETTABLE_INSTANCE_STATUSES:
+                    raise SchedulerError(
+                        "INVALID_STATE_TRANSITION", "현재 상태에서는 요청을 처리할 수 없습니다.", 400,
+                    )
+                reject_if_team_banned(instance.team_id)
+                validate_write_owner(operation)
+                auth_header = scheduler_auth_header(request)
+                sent = True
+                scheduler_data = call_scheduler_reset(
+                    instance, auth_header
+                )
+                bind_remote_instance(operation, scheduler_data)
                 new_instance = create_instance_from_scheduler(
                     scheduler_data,
                     user=instance.user,
@@ -267,10 +316,15 @@ class InstanceResetView(APIView):
                     replaced_instance=instance,
                     release=instance.release,
                 )
-            except SchedulerError as error:
-                return fail(error.code, error.message, error.status_code)
-            mark_instance_replaced(instance)
-            response_data = serialize_instance(new_instance, include_replaced=True)
+                mark_instance_replaced(instance)
+                response_data = serialize_instance(new_instance, include_replaced=True)
+                complete_write(operation)
+        except SchedulerError as error:
+            record_write_failure(operation, error, sent=sent)
+            return fail(error.code, error.message, error.status_code)
+        except Exception as error:
+            record_write_failure(operation, error, sent=sent)
+            raise
 
         return ok(
             response_data,
