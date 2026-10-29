@@ -16,7 +16,7 @@ class LoginRateThrottle(SimpleRateThrottle):
         # 객체가 아닌 본문은 뷰가 400 으로 거절한다. 여기서 .get 이 터지면 캐시 장애(503)로 잘못 잡힌다.
         data = request.data if isinstance(request.data, dict) else {}
         login_id = str(data.get("login_id") or "").strip().lower()
-        return f"throttle_login_{self.get_ident(request)}_{login_id}"
+        return f"throttle_login_{login_id}"
 
     def allow_request(self, request, view):
         try:
