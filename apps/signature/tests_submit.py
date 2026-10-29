@@ -3,11 +3,12 @@ from decimal import Decimal
 from unittest.mock import patch
 
 from django.contrib.auth.hashers import make_password
+from django.db import DatabaseError, transaction
 from django.test import TestCase
 from rest_framework.test import APIClient
 
 from apps.accounts.models import Role, Team, User
-from apps.adminpanel.models import AdminSetting
+from apps.adminpanel.models import AdminEvent, AdminSetting
 from apps.koth.models import KothClub
 from apps.ranking.views import collect_team_data
 
@@ -190,6 +191,33 @@ class SignatureSubmitApiTests(TestCase):
         self.assertEqual(lock.failed_count, 0)
         self.assertIsNone(lock.locked_until)
 
+        event = AdminEvent.objects.get(type="SIGNATURE_SOLVED")
+        self.assertEqual(event.actor, self.user.login_id)
+        self.assertEqual(event.team_id, self.team.pk)
+        self.assertEqual(event.team_snapshot_name, self.team.team_name)
+        self.assertIsNone(event.challenge_id)
+        self.assertEqual(event.severity, AdminEvent.Severity.INFO)
+        self.assertIn(f"signature_id={self.challenge.pk}", event.message)
+        self.assertIn(f"club_id={self.club.pk}", event.message)
+        self.assertIn(f"solve_id={solve.pk}", event.message)
+        self.assertIn(f"user_id={self.user.pk}", event.message)
+        self.assertIn("300", event.message)
+        self.assertIsNotNone(event.created_at)
+        for secret in (
+            "MSG{correct_signature}", self.challenge.flag_hash,
+            SignatureFlagSubmission.objects.get().submitted_flag_hash,
+        ):
+            self.assertNotIn(secret, event.message)
+        admin = User.objects.create_user(login_id="solve-audit-admin", role=Role.ADMIN)
+        admin_client = APIClient()
+        admin_client.force_authenticate(admin)
+        events = admin_client.get(
+            "/api/v1/admin/events", {"type": "SIGNATURE_SOLVED", "team_id": self.team.pk}
+        )
+        self.assertEqual(events.status_code, 200)
+        self.assertEqual(events.data["data"]["total_count"], 1)
+        self.assertEqual(events.data["data"]["events"][0]["event_id"], str(event.pk))
+
         ranking_row = next(
             row for row in collect_team_data() if row["team_id"] == str(self.team.pk)
         )
@@ -221,6 +249,7 @@ class SignatureSubmitApiTests(TestCase):
         self.assertEqual(duplicate.status_code, 409)
         self.assertEqual(duplicate.data["code"], "ALREADY_SOLVED")
         self.assertEqual(SignatureSolve.objects.filter(team=self.team).count(), 1)
+        self.assertEqual(AdminEvent.objects.filter(type="SIGNATURE_SOLVED").count(), 1)
         self.assertEqual(
             SignatureFlagSubmission.objects.order_by("created_at").last().result,
             SignatureFlagSubmission.SubmissionResult.ALREADY_SOLVED,
@@ -241,6 +270,7 @@ class SignatureSubmitApiTests(TestCase):
         self.assertEqual(third.data["data"]["retry_after_seconds"], 30)
         self.assertEqual(blocked.status_code, 429)
         self.assertFalse(SignatureSolve.objects.filter(team=self.team).exists())
+        self.assertFalse(AdminEvent.objects.exists())
         lock = SignatureSubmissionLock.objects.get(
             team=self.team, challenge=self.challenge
         )
@@ -297,6 +327,7 @@ class SignatureSubmitApiTests(TestCase):
         )
         self.assertEqual(missing.status_code, 404)
         self.assertEqual(missing.data["code"], "SIGNATURE_NOT_FOUND")
+        self.assertFalse(AdminEvent.objects.exists())
 
     def test_user_without_team_and_unauthenticated_user_are_rejected(self):
         no_team = User.objects.create_user(
@@ -313,3 +344,31 @@ class SignatureSubmitApiTests(TestCase):
         response = self.submit("MSG{correct_signature}")
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.data["code"], "TOKEN_MISSING")
+        self.assertFalse(AdminEvent.objects.exists())
+
+    def test_event_write_failure_rolls_back_solve_submission_and_lock_reset(self):
+        lock = SignatureSubmissionLock.objects.create(
+            team=self.team, challenge=self.challenge, failed_count=1,
+        )
+        with patch(
+            "apps.signature.views._record_event",
+            side_effect=DatabaseError("QA audit failure"),
+        ):
+            response = self.submit("MSG{correct_signature}")
+        self.assertEqual(response.status_code, 500)
+        lock.refresh_from_db()
+        self.assertEqual(lock.failed_count, 1)
+        self.assertFalse(SignatureSolve.objects.exists())
+        self.assertFalse(SignatureFlagSubmission.objects.exists())
+        self.assertFalse(AdminEvent.objects.exists())
+
+    def test_outer_rollback_removes_solve_submission_and_event(self):
+        with self.assertRaises(RuntimeError):
+            with transaction.atomic():
+                self.assertEqual(self.submit("MSG{correct_signature}").status_code, 200)
+                self.assertEqual(AdminEvent.objects.count(), 1)
+                raise RuntimeError("QA rollback")
+        self.assertFalse(SignatureSolve.objects.exists())
+        self.assertFalse(SignatureFlagSubmission.objects.exists())
+        self.assertFalse(SignatureSubmissionLock.objects.exists())
+        self.assertFalse(AdminEvent.objects.exists())

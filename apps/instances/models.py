@@ -139,6 +139,51 @@ class InstanceLock(models.Model):
         return str(self.user_id)
 
 
+class InstanceWriteOperation(models.Model):
+    class Action(models.TextChoices):
+        CREATE = "CREATE"
+        RESET = "RESET"
+
+    class Status(models.TextChoices):
+        STARTED = "STARTED"
+        RECOVERY_PENDING = "RECOVERY_PENDING"
+        COMPLETED = "COMPLETED"
+        REJECTED = "REJECTED"
+        REVIEW_REQUIRED = "REVIEW_REQUIRED"
+
+    operation_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    action = models.CharField(max_length=10, choices=Action.choices)
+    status = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.STARTED,
+    )
+    # Snapshots survive deletion of the local owner or instance while recovery is pending.
+    user_id = models.UUIDField()
+    team_id = models.UUIDField()
+    challenge_id = models.UUIDField()
+    release_id = models.UUIDField(null=True, blank=True)
+    source_instance_id = models.UUIDField(null=True, blank=True)
+    remote_instance_id = models.UUIDField(null=True, blank=True)
+    attempts = models.PositiveIntegerField(default=0)
+    last_error_code = models.CharField(max_length=40, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "instance_write_operations"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user_id"],
+                condition=models.Q(
+                    status__in=["STARTED", "RECOVERY_PENDING", "REVIEW_REQUIRED"],
+                ),
+                name="uq_instance_write_pending_user",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["status", "created_at"], name="instance_write_recovery_due"),
+        ]
+
+
 class ChallengeRelease(models.Model):
     """공급망 publish bundle(artifact-v2.json) 한 벌을 그대로 담는 배포 릴리스."""
 

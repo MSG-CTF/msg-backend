@@ -218,8 +218,17 @@ def signature_publish(request, signature_id):
 
         if serializer.validated_data["is_published"] and missing_signature_fields(challenge):
             return fail("SIGNATURE_NOT_READY", "지문과 플래그를 등록한 뒤 공개해주세요", 409)
+        previous_visibility = challenge.is_published
         challenge.is_published = serializer.validated_data["is_published"]
         challenge.save(update_fields=["is_published", "updated_at"])
+        if previous_visibility != challenge.is_published:
+            _record_event(
+                AdminEvent.EventType.SIGNATURE_VISIBILITY_CHANGED,
+                f"시그니처 공개 상태 변경 (signature_id={challenge.pk}, club_id={challenge.club_id}): "
+                f"is_published: {previous_visibility} -> {challenge.is_published}",
+                request.user.login_id,
+                severity=AdminEvent.Severity.WARNING,
+            )
 
     return ok(
         _serialize_signature(challenge),
