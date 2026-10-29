@@ -116,6 +116,7 @@ from apps.instances.services import (
     scheduler_auth_header,
     update_instance_from_scheduler,
 )
+from apps.instances.write_recovery import require_no_pending_write
 from .resource_broker import fetch_resource_targets
 from .node_allocation import enrich_allocations
 from .serializers import ChallengeCreateSerializer, ChallengeUpdateSerializer
@@ -1282,6 +1283,7 @@ def instance_force_reset(request, instance_id):
                 )
 
             try:
+                require_no_pending_write(instance.user)
                 scheduler_data = call_scheduler_reset(
                     instance, scheduler_auth_header(request)
                 )

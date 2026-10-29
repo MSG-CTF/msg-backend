@@ -4,6 +4,7 @@ import uuid
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from django.db import transaction
 from django.test import SimpleTestCase, TestCase, override_settings
 
 from apps.adminpanel import tests as admin_existing
@@ -68,13 +69,15 @@ class SchedulerMalformedResponseTests(TestCase):
             b'{}',
         )
         for body in bodies:
-            with self.subTest(body=body), scheduler_response(body) as requests:
+            # Each body is an independent request, not a retry of an ambiguous prior POST.
+            with self.subTest(body=body), transaction.atomic(), scheduler_response(body) as requests:
                 response = self.client.post(
                     "/api/v1/instances", {"challenge_id": str(self.challenge.pk)}, format="json",
                 )
                 self.assertEqual((response.status_code, response.data["code"]), (503, "SCHEDULER_UNAVAILABLE"))
                 self.assertEqual(Instance.objects.count(), 0)
                 self.assertEqual(requests, [("POST", "Bearer test-scheduler-token")])
+                transaction.set_rollback(True)
 
     def test_malformed_response_after_acceptance_can_recover_the_same_instance(self):
         instance_id = str(uuid.uuid4())
@@ -100,7 +103,7 @@ class SchedulerMalformedResponseTests(TestCase):
     def test_malformed_error_response_never_creates_an_instance(self):
         for status in (400, 401, 404, 409, 503):
             for body in (b'[]', b'null', b'{"message":"\xff"}', b'{"code":', b'{"code":[],"message":{}}'):
-                with self.subTest(status=status, body=body), scheduler_response(body, status):
+                with self.subTest(status=status, body=body), transaction.atomic(), scheduler_response(body, status):
                     response = self.client.post(
                         "/api/v1/instances", {"challenge_id": str(self.challenge.pk)}, format="json",
                     )
@@ -108,6 +111,7 @@ class SchedulerMalformedResponseTests(TestCase):
                     self.assertIsInstance(response.data["code"], str)
                     self.assertIsInstance(response.data["message"], str)
                     self.assertFalse(Instance.objects.exists())
+                    transaction.set_rollback(True)
 
     def test_valid_scheduler_error_fields_keep_their_status(self):
         body = json.dumps({"code": "USER_INSTANCE_LIMIT_EXCEEDED", "message": "인스턴스 한도 초과"}).encode()
