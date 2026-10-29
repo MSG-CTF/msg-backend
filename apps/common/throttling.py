@@ -1,11 +1,40 @@
+import hashlib
 import logging
+import threading
+import uuid
 
-from rest_framework.exceptions import APIException
+from django.core.cache import cache as default_cache, caches
+from django.core.cache.backends.locmem import LocMemCache
+from django_redis.cache import RedisCache
+
+from rest_framework.exceptions import APIException, ValidationError
 from rest_framework.throttling import SimpleRateThrottle, UserRateThrottle
 
+from apps.accounts.serializers import LoginSerializer
 from apps.common.exceptions import RateLimitUnavailable
 
 logger = logging.getLogger(__name__)
+
+_LOCAL_LOGIN_LOCK = threading.RLock()
+
+# 한 계정의 최근 시도 확인과 추가를 한 번에 처리한다
+_LOGIN_WINDOW_SCRIPT = """
+local clock = redis.call('TIME')
+local now = tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000)
+local window = tonumber(ARGV[1])
+local limit = tonumber(ARGV[2])
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now - window)
+if limit < 1 then
+    return {0, window}
+end
+if redis.call('ZCARD', KEYS[1]) < limit then
+    redis.call('ZADD', KEYS[1], now, ARGV[3])
+    redis.call('PEXPIRE', KEYS[1], window)
+    return {1, 0}
+end
+local oldest = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
+return {0, math.max(1, tonumber(oldest[2]) + window - now)}
+"""
 
 
 class LoginRateThrottle(SimpleRateThrottle):
@@ -13,19 +42,64 @@ class LoginRateThrottle(SimpleRateThrottle):
     scope = "login"
 
     def get_cache_key(self, request, view):
-        # 객체가 아닌 본문은 뷰가 400 으로 거절한다. 여기서 .get 이 터지면 캐시 장애(503)로 잘못 잡힌다.
-        data = request.data if isinstance(request.data, dict) else {}
-        login_id = str(data.get("login_id") or "").strip().lower()
-        return f"throttle_login_{login_id}"
+        # 인증과 같은 변환을 쓰되 대소문자가 다른 별도 계정은 구분한다
+        if not isinstance(request.data, dict):
+            return None
+        try:
+            login_id = LoginSerializer().fields["login_id"].run_validation(
+                request.data.get("login_id")
+            )
+        except ValidationError:
+            # 잘못된 입력의 400 응답은 기존 로그인 serializer가 처리한다
+            return None
+        digest = hashlib.sha256(login_id.encode("utf-8")).hexdigest()
+        # 이전 pickle 목록과 Redis sorted set이 같은 키를 사용하지 않게 한다
+        return f"throttle_login_v2_{digest}"
 
     def allow_request(self, request, view):
         try:
-            return super().allow_request(request, view)
+            if self.rate is None:
+                return True
+            key = self.get_cache_key(request, view)
+            if key is None:
+                return True
+            backend = caches["default"] if self.cache is default_cache else self.cache
+            if isinstance(backend, LocMemCache):
+                # 개발·단위 시험의 프로세스 내 캐시도 횟수 갱신을 직렬 처리한다
+                with _LOCAL_LOGIN_LOCK:
+                    return super().allow_request(request, view)
+            if not isinstance(backend, RedisCache):
+                raise RuntimeError("Unsupported login rate-limit cache")
+            result = backend.client.get_client(write=True).eval(
+                _LOGIN_WINDOW_SCRIPT,
+                1,
+                backend.make_key(key),
+                int(self.duration * 1000),
+                self.num_requests,
+                uuid.uuid4().hex,
+            )
+            if (
+                not isinstance(result, (list, tuple))
+                or len(result) != 2
+                or any(type(value) is not int for value in result)
+                or result[0] not in (0, 1)
+                or not 0 <= result[1] <= self.duration * 1000
+                or (result[0] == 1 and result[1] != 0)
+                or (result[0] == 0 and result[1] == 0)
+            ):
+                raise RuntimeError("Invalid login rate-limit result")
+            self._retry_after = result[1] / 1000
+            return result[0] == 1
         except APIException:
             raise
         except Exception:
             logger.warning("Login rate limit unavailable; request rejected")
             raise RateLimitUnavailable() from None
+
+    def wait(self):
+        if hasattr(self, "_retry_after"):
+            return self._retry_after
+        return super().wait()
 
     def throttle_success(self):
         self.history.insert(0, self.now)
