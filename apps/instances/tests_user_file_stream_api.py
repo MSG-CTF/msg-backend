@@ -80,5 +80,5 @@ class GCSUserFileApiTests(UserFilesTestBase):
             response = self.client.head(self.path)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response["Content-Length"], str(len(self.content)))
-        response.close()
+        self.assertEqual(b"".join(response.streaming_content), b"")
         pinned.open.assert_not_called()
