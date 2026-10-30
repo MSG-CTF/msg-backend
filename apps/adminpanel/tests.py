@@ -1263,7 +1263,7 @@ class AdminDashboardTests(TestCase):
         self.assertEqual(
             d["payment"], {"purchase_count": 1, "refund_count": 1, "net_spent": 70}
         )
-        self.assertEqual(d["instances"], {"running": 1, "failed": 1, "total": 2})
+        self.assertEqual(d["instances"], {"running": 1, "failed": 1, "total": 2, "write_review": 0})
         self.assertEqual(
             d["challenges"], {"total": 2, "published": 1, "solved_total": 1}
         )
@@ -1284,6 +1284,19 @@ class AdminDashboardTests(TestCase):
         res = self.client.get("/api/v1/admin/dashboard")
         self.assertEqual(res.data["data"]["contest"]["status"], "RUNNING")
         self.assertGreater(res.data["data"]["contest"]["remaining_seconds"], 0)
+
+    def test_dashboard_counts_instance_writes_waiting_for_review(self):
+        from apps.instances.models import InstanceWriteOperation
+
+        self.auth("root")
+        ids = dict(user_id=uuid.uuid4(), team_id=uuid.uuid4(), challenge_id=uuid.uuid4())
+        stuck = InstanceWriteOperation.objects.create(action="CREATE", status="REVIEW_REQUIRED", **ids)
+        InstanceWriteOperation.objects.filter(pk=stuck.pk).update(updated_at=timezone.now() - timedelta(minutes=5))
+        # 방금 시작한 요청은 정상 진행 중이라 세지 않는다
+        InstanceWriteOperation.objects.create(action="CREATE", status="STARTED", user_id=uuid.uuid4(), team_id=uuid.uuid4(), challenge_id=uuid.uuid4())
+        InstanceWriteOperation.objects.create(action="CREATE", status="COMPLETED", user_id=uuid.uuid4(), team_id=uuid.uuid4(), challenge_id=uuid.uuid4())
+        res = self.client.get("/api/v1/admin/dashboard")
+        self.assertEqual(res.data["data"]["instances"]["write_review"], 1)
 
     def test_dashboard_participant_blocked(self):
         self.auth("player")
