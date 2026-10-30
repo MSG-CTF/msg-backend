@@ -758,9 +758,11 @@ def mileage_history(request):
 
     mtype = request.query_params.get("type")
     if mtype:
-        if mtype not in MILEAGE_TYPES:
+        # 쉼표로 여러 유형을 함께 받는다 (예: PURCHASE,REFUND) 하나라도 모르는 유형이면 거절한다
+        types = [value.strip() for value in mtype.split(",") if value.strip()]
+        if not types or any(value not in MILEAGE_TYPES for value in types):
             raise InvalidRequest("type 이 올바르지 않습니다")
-        queryset = queryset.filter(type=mtype)
+        queryset = queryset.filter(type__in=types)
 
     page = _page_number(request.query_params.get("page"), 1, MAX_PAGE)
     size = min(

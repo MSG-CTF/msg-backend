@@ -446,6 +446,17 @@ class AdminTests(TestCase):
         self.assertEqual(res.data["data"]["total_count"], 1)
         self.assertEqual(res.data["data"]["history"][0]["type"], "PURCHASE")
 
+    def test_mileage_history_filter_by_several_types(self):
+        self.auth("root")
+        for kind, amount in ((MileageType.ADMIN_GRANT, 100), (MileageType.PURCHASE, -30), (MileageType.REFUND, 30)):
+            MileageHistory.objects.create(team=self.team, type=kind, amount=amount, reason="x", processed_by="root")
+        res = self.client.get("/api/v1/admin/mileage_history?type=PURCHASE,REFUND")
+        self.assertEqual(res.data["data"]["total_count"], 2)
+        self.assertEqual({row["type"] for row in res.data["data"]["history"]}, {"PURCHASE", "REFUND"})
+        # 하나라도 모르는 유형이면 전체를 거절한다
+        self.assertEqual(self.client.get("/api/v1/admin/mileage_history?type=PURCHASE,NOPE").status_code, 400)
+        self.assertEqual(self.client.get("/api/v1/admin/mileage_history?type=,").status_code, 400)
+
     def test_mileage_history_filter_by_team(self):
         other = Team.objects.create(team_name="다른팀")
         MileageHistory.objects.create(
