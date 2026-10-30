@@ -446,6 +446,17 @@ class AdminTests(TestCase):
         self.assertEqual(res.data["data"]["total_count"], 1)
         self.assertEqual(res.data["data"]["history"][0]["type"], "PURCHASE")
 
+    def test_mileage_history_filter_by_several_types(self):
+        self.auth("root")
+        for kind, amount in ((MileageType.ADMIN_GRANT, 100), (MileageType.PURCHASE, -30), (MileageType.REFUND, 30)):
+            MileageHistory.objects.create(team=self.team, type=kind, amount=amount, reason="x", processed_by="root")
+        res = self.client.get("/api/v1/admin/mileage_history?type=PURCHASE,REFUND")
+        self.assertEqual(res.data["data"]["total_count"], 2)
+        self.assertEqual({row["type"] for row in res.data["data"]["history"]}, {"PURCHASE", "REFUND"})
+        # 하나라도 모르는 유형이면 전체를 거절한다
+        self.assertEqual(self.client.get("/api/v1/admin/mileage_history?type=PURCHASE,NOPE").status_code, 400)
+        self.assertEqual(self.client.get("/api/v1/admin/mileage_history?type=,").status_code, 400)
+
     def test_mileage_history_filter_by_team(self):
         other = Team.objects.create(team_name="다른팀")
         MileageHistory.objects.create(
@@ -1252,7 +1263,7 @@ class AdminDashboardTests(TestCase):
         self.assertEqual(
             d["payment"], {"purchase_count": 1, "refund_count": 1, "net_spent": 70}
         )
-        self.assertEqual(d["instances"], {"running": 1, "failed": 1, "total": 2})
+        self.assertEqual(d["instances"], {"running": 1, "failed": 1, "total": 2, "write_review": 0})
         self.assertEqual(
             d["challenges"], {"total": 2, "published": 1, "solved_total": 1}
         )
@@ -1273,6 +1284,19 @@ class AdminDashboardTests(TestCase):
         res = self.client.get("/api/v1/admin/dashboard")
         self.assertEqual(res.data["data"]["contest"]["status"], "RUNNING")
         self.assertGreater(res.data["data"]["contest"]["remaining_seconds"], 0)
+
+    def test_dashboard_counts_instance_writes_waiting_for_review(self):
+        from apps.instances.models import InstanceWriteOperation
+
+        self.auth("root")
+        ids = dict(user_id=uuid.uuid4(), team_id=uuid.uuid4(), challenge_id=uuid.uuid4())
+        stuck = InstanceWriteOperation.objects.create(action="CREATE", status="REVIEW_REQUIRED", **ids)
+        InstanceWriteOperation.objects.filter(pk=stuck.pk).update(updated_at=timezone.now() - timedelta(minutes=5))
+        # 방금 시작한 요청은 정상 진행 중이라 세지 않는다
+        InstanceWriteOperation.objects.create(action="CREATE", status="STARTED", user_id=uuid.uuid4(), team_id=uuid.uuid4(), challenge_id=uuid.uuid4())
+        InstanceWriteOperation.objects.create(action="CREATE", status="COMPLETED", user_id=uuid.uuid4(), team_id=uuid.uuid4(), challenge_id=uuid.uuid4())
+        res = self.client.get("/api/v1/admin/dashboard")
+        self.assertEqual(res.data["data"]["instances"]["write_review"], 1)
 
     def test_dashboard_participant_blocked(self):
         self.auth("player")

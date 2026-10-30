@@ -154,6 +154,16 @@ class InstanceLockTests(TestCase):
                 delete.reset_mock()
                 detail.reset_mock()
 
+    def test_serialized_instance_reports_how_many_extensions_were_used(self):
+        from apps.instances.services import serialize_instance
+
+        instance = Instance.objects.create(
+            user=self.user, team=self.team, challenge=self.challenge,
+            status=InstanceStatus.REQUESTED, extend_count=2,
+        )
+        # 화면은 이 값으로 남은 연장(3회 중)을 보이고 다 쓰면 연장 버튼을 막는다
+        self.assertEqual(serialize_instance(instance)["extend_count"], 2)
+
     @patch("apps.instances.views.call_scheduler_delete")
     @patch("apps.instances.views.call_scheduler_detail")
     def test_delete_still_rejects_an_instance_that_is_not_ready(self, detail, delete):

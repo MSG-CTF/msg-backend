@@ -25,7 +25,7 @@ from django.db.models.functions import Coalesce
 from django.db.models.deletion import SET_NULL
 from django.utils import timezone
 from django.views.decorators.cache import never_cache
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from rest_framework.decorators import api_view, permission_classes
 
@@ -100,6 +100,7 @@ from apps.instances.models import (
     Instance,
     InstanceLock,
     InstanceStatus,
+    InstanceWriteOperation,
 )
 from apps.instances.services import (
     ACTIVE_INSTANCE_STATUSES,
@@ -116,7 +117,7 @@ from apps.instances.services import (
     scheduler_auth_header,
     update_instance_from_scheduler,
 )
-from apps.instances.write_recovery import require_no_pending_write
+from apps.instances.write_recovery import BLOCKING_STATUSES, require_no_pending_write
 from .resource_broker import fetch_resource_targets
 from .node_allocation import enrich_allocations
 from .serializers import ChallengeCreateSerializer, ChallengeUpdateSerializer
@@ -758,9 +759,11 @@ def mileage_history(request):
 
     mtype = request.query_params.get("type")
     if mtype:
-        if mtype not in MILEAGE_TYPES:
+        # 쉼표로 여러 유형을 함께 받는다 (예: PURCHASE,REFUND) 하나라도 모르는 유형이면 거절한다
+        types = [value.strip() for value in mtype.split(",") if value.strip()]
+        if not types or any(value not in MILEAGE_TYPES for value in types):
             raise InvalidRequest("type 이 올바르지 않습니다")
-        queryset = queryset.filter(type=mtype)
+        queryset = queryset.filter(type__in=types)
 
     page = _page_number(request.query_params.get("page"), 1, MAX_PAGE)
     size = min(
@@ -1288,6 +1291,12 @@ def instance_force_reset(request, instance_id):
                     instance, scheduler_auth_header(request)
                 )
             except SchedulerError as error:
+                if error.code == "INSTANCE_REVIEW_REQUIRED":
+                    return fail(
+                        error.code,
+                        "이 참가자의 이전 인스턴스 요청이 저장 확인을 기다리고 있습니다 서버에서 recover_instance_writes --show로 확인하세요",
+                        error.status_code,
+                    )
                 _record_force_failed(request, instance, "재시작", error)
                 return fail(error.code, error.message, error.status_code)
             # 스케줄러는 새 인스턴스를 이미 만들었다. 아래 저장이 실패해도 새 ID 를 남긴다.
@@ -1487,6 +1496,10 @@ def dashboard(request):
             failed=Count("instance_id", filter=Q(status=InstanceStatus.FAILED)),
             total=Count("instance_id"),
         )
+        # 2분 넘게 끝나지 않은 생성·재시작 기록은 참가자를 막고 있어 서버에서 직접 확인해야 한다
+        write_review = InstanceWriteOperation.objects.filter(
+            status__in=BLOCKING_STATUSES, updated_at__lt=now - timedelta(minutes=2)
+        ).count()
         challenges = {
             "total": Challenge.objects.count(),
             "published": Challenge.objects.filter(is_published=True).count(),
@@ -1522,6 +1535,7 @@ def dashboard(request):
                 "running": inst["running"],
                 "failed": inst["failed"],
                 "total": inst["total"],
+                "write_review": write_review,
             },
             "challenges": challenges,
             "collected_at": now,

@@ -37,10 +37,11 @@ def require_no_pending_write(user):
     if InstanceWriteOperation.objects.filter(
         user_id=user.pk, status__in=BLOCKING_STATUSES
     ).exists():
+        # 서버 장애(SCHEDULER_UNAVAILABLE)와 달리 기다려도 풀리지 않으므로 따로 알린다
         raise SchedulerError(
-            "SCHEDULER_UNAVAILABLE",
-            "이전 인스턴스 요청의 저장 복구를 먼저 확인해주세요.",
-            503,
+            "INSTANCE_REVIEW_REQUIRED",
+            "이전 인스턴스 요청을 운영진이 확인해야 합니다 운영진에게 알려주세요",
+            409,
         )
 
 

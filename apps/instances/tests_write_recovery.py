@@ -96,7 +96,11 @@ class InstanceWriteRecoveryTests(Fixtures, TestCase):
         row = self.failed_write()
         self.assertEqual(row.action, "CREATE")
         with patch("apps.instances.views.call_scheduler_create") as create:
-            self.assertEqual(self.post().status_code, 503)
+            response = self.post()
+        # 기다려도 풀리지 않는 대기라 서버 장애(503)와 다른 코드로 운영진 확인을 안내한다
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["code"], "INSTANCE_REVIEW_REQUIRED")
+        self.assertIn("운영진에게 알려주세요", response.json()["message"])
         create.assert_not_called()
         self.assertEqual(InstanceWriteOperation.objects.count(), 1)
 
@@ -105,19 +109,19 @@ class InstanceWriteRecoveryTests(Fixtures, TestCase):
         row = self.failed_write(source)
         self.assertEqual(row.source_instance_id, source.pk)
         with patch("apps.instances.views.call_scheduler_reset") as reset:
-            self.assertEqual(self.post(source).status_code, 503)
+            self.assertEqual(self.post(source).status_code, 409)
         reset.assert_not_called()
         source.refresh_from_db()
         self.assertEqual(source.status, InstanceStatus.RUNNING)
         admin = User.objects.create_user(login_id="recovery-admin", role=Role.ADMIN)
         self.client.force_authenticate(admin)
         with patch("apps.adminpanel.views.call_scheduler_reset") as reset:
-            self.assertEqual(
-                self.client.post(
-                    f"/api/v1/admin/instances/{source.pk}/reset", {}, format="json"
-                ).status_code,
-                503,
+            response = self.client.post(
+                f"/api/v1/admin/instances/{source.pk}/reset", {}, format="json"
             )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["code"], "INSTANCE_REVIEW_REQUIRED")
+        self.assertIn("recover_instance_writes --show", response.json()["message"])
         reset.assert_not_called()
 
     def test_recovery_adopts_exact_remote_and_original_release_once(self):
@@ -237,7 +241,7 @@ class InstanceWriteRecoveryTests(Fixtures, TestCase):
             InstanceWriteOperation.objects.filter(status="REVIEW_REQUIRED").count(), 1
         )
         with patch("apps.instances.views.call_scheduler_create") as create:
-            self.assertEqual(self.post().status_code, 503)
+            self.assertEqual(self.post().status_code, 409)
         create.assert_not_called()
 
     def test_interrupted_started_operation_is_not_automatically_reissued(self):
@@ -250,7 +254,7 @@ class InstanceWriteRecoveryTests(Fixtures, TestCase):
         )
         self.assertEqual(recover_write(row.pk), "STARTED")
         with patch("apps.instances.views.call_scheduler_create") as create:
-            self.assertEqual(self.post().status_code, 503)
+            self.assertEqual(self.post().status_code, 409)
         create.assert_not_called()
 
     def test_command_is_read_only_with_show_and_processes_selected_record(self):
@@ -482,7 +486,7 @@ class InstanceWriteCommitTests(Fixtures, TransactionTestCase):
                 second = pool.submit(post)
             finally:
                 proceed.set()
-            self.assertEqual(sorted([first.result(15), second.result(15)]), [500, 503])
+            self.assertEqual(sorted([first.result(15), second.result(15)]), [409, 500])
         remote.assert_called_once()
         self.assertEqual(InstanceWriteOperation.objects.count(), 1)
 
