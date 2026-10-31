@@ -16,6 +16,7 @@ from apps.instances.views import (
     InstanceExtendView,
     InstanceResetView,
     MyInstanceView,
+    TeamMemberInstanceView,
 )
 
 urlpatterns = [
@@ -88,4 +89,5 @@ urlpatterns = [
         name="instance-extend",
     ),
     path("teams/me/instances", MyInstanceView.as_view(), name="my-instances"),
+    path("teams/me/member_instances", TeamMemberInstanceView.as_view(), name="member-instances"),
 ]
