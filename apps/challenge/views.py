@@ -3,7 +3,6 @@ from datetime import timedelta
 from django.core.files.storage import default_storage
 from django.db import IntegrityError, transaction
 from django.db.models import F
-from django.http import FileResponse
 from django.utils import timezone
 from rest_framework.views import APIView
 
@@ -22,6 +21,7 @@ from apps.challenge.services import (
 from apps.common.bans import check_active_team
 from apps.common.response import fail, ok
 from apps.instances.models import ChallengeRuntimeConfig, Instance
+from apps.instances.user_file_downloads import user_file_response
 from apps.instances.user_files import current_user_file_bundle, serialize_user_file
 from apps.challenge.remote_run_config import remote_run_data
 from apps.instances.services import (
@@ -149,15 +149,13 @@ class ChallengeFileDownloadView(APIView):
         except SchedulerError as error:
             return fail(error.code, error.message, error.status_code)
         bundle = current_user_file_bundle(challenge, release=instance.release if instance else None)
-        if bundle is None or bundle.bundle_id != file_id or not default_storage.exists(bundle.object_key):
+        if bundle is None or bundle.bundle_id != file_id:
             return fail("CHALLENGE_FILE_NOT_FOUND", "존재하지 않는 문제 파일입니다.", 404)
 
-        response = FileResponse(
-            default_storage.open(bundle.object_key, "rb"),
-            as_attachment=True,
-            filename="user-files.zip",
-            content_type="application/zip",
-        )
+        try:
+            response = user_file_response(bundle, default_storage)
+        except FileNotFoundError:
+            return fail("CHALLENGE_FILE_NOT_FOUND", "존재하지 않는 문제 파일입니다.", 404)
         response["Cache-Control"] = "private, no-store"
         return response
 
