@@ -346,6 +346,36 @@ class PublishedChallengeTests(ReleaseTestBase):
         self.make_static()
         self.assertFalse(self.preview().data["data"]["can_import"])
         self.assertEqual(self.import_body(self.body(), "static-conflict").status_code, 409)
+        self.assertTrue(ChallengeRuntimeConfig.objects.filter(challenge__challenge_slug=SLUG).exists())
+        self.assertEqual(ChallengeRelease.objects.count(), 1)
+        self.assertEqual(ChallengeUserFileBundle.objects.count(), 1)
+
+    def test_static_file_update_preserves_retired_runtime_history(self):
+        first = self.import_body(self.body()).data["data"]
+        challenge = Challenge.objects.get(pk=first["challenge_id"])
+        retired_release = challenge.releases.get()
+        old_file = challenge.user_file_bundles.get()
+        challenge.runtime_config.delete()
+        self.make_static()
+        self.manifest["registry_revision"] = 2
+        self.artifacts[0]["id"] += 100
+
+        preview = self.preview()
+        self.assertTrue(preview.data["data"]["can_import"])
+        body = self.body()
+        response = self.import_body(body, "static-after-retirement")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["data"]["challenge_id"], str(challenge.pk))
+        self.assertIsNone(response.data["data"]["release_id"])
+        retry = self.import_body(body, "static-after-retirement")
+        self.assertEqual(retry.status_code, 200, retry.data)
+
+        self.assertFalse(ChallengeRuntimeConfig.objects.filter(challenge=challenge).exists())
+        self.assertEqual(list(challenge.releases.values_list("pk", flat=True)), [retired_release.pk])
+        old_file.refresh_from_db()
+        self.assertEqual(old_file.release_id, retired_release.pk)
+        self.assertEqual(challenge.user_file_bundles.count(), 2)
+        self.assertIsNone(challenge.user_file_bundles.get(registry_revision=2).release_id)
 
     def test_source_pair_and_revision_mismatches_fail_before_write(self):
         for field, bad in (("source_sha", "d" * 40), ("registry_revision", 2), ("challenge_id", str(self.challenge.pk))):

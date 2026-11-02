@@ -273,8 +273,8 @@ def conflict_reason(prepared, challenge):
         if (not prepared["release"] or secret is None
                 or not is_correct_flag(decrypt_runtime_secret(secret), challenge.flag_hash)):
             return "채점 플래그와 주입할 비밀값이 다릅니다 기본 정보와 비밀값 설정을 먼저 확인해주세요"
-    if not prepared["release"] and (ChallengeRuntimeConfig.objects.filter(challenge=challenge).exists()
-                                    or ChallengeRelease.objects.filter(challenge=challenge).exists()):
+    # Retired image releases remain as history after the runtime config is removed.
+    if not prepared["release"] and ChallengeRuntimeConfig.objects.filter(challenge=challenge).exists():
         return "실행 문제로 등록된 항목에 정적 파일 발행본을 가져올 수 없습니다"
     return None
 
