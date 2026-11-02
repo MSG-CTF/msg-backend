@@ -9,7 +9,7 @@ from apps.adminpanel.models import AdminEvent
 from apps.challenge.models import Challenge
 from apps.common.permissions import IsAdmin
 from apps.common.response import fail, ok
-from apps.instances.models import ChallengeRelease, ChallengeRuntimeConfig, ImagePreparationRequest
+from apps.instances.models import ChallengeRelease, ChallengeRuntimeConfig, ImagePreparationRequest, IsolationProfile, RuntimeType
 from apps.instances.image_preparations import enqueue_on_approval, queue_preparation, serialize_preparation
 from apps.instances.releases import (
     ReleaseValidationError,
@@ -250,7 +250,10 @@ class ReleaseActivateView(APIView):
             pending = ImagePreparationRequest.objects.filter(
                 release__challenge=challenge, activation_status="PENDING"
             )
-            if settings.IMAGE_PREPARATION_ACTIVATE_WHEN_READY and config.current_release_id != release.pk:
+            # The preparation agent manages K3s caches, not legacy Docker targets.
+            legacy_docker = release.runtime_type == RuntimeType.DOCKER and release.isolation_profile in IsolationProfile.values
+            staged = settings.IMAGE_PREPARATION_ACTIVATE_WHEN_READY and not legacy_docker
+            if staged and config.current_release_id != release.pk:
                 row = pending.filter(release=release, activation_generation=config.activation_generation).first()
                 if row is None:
                     # Approval, intent and immutable preparation outbox commit together.
@@ -287,7 +290,7 @@ class ReleaseActivateView(APIView):
                     challenge, previous, release, reason, request.user.login_id
                 )
 
-            if not settings.IMAGE_PREPARATION_ACTIVATE_WHEN_READY:
+            if not staged:
                 enqueue_on_approval(release, request.user.login_id)
 
         return ok(
