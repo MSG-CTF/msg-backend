@@ -11,6 +11,8 @@ from apps.common.permissions import IsAdmin
 from apps.common.response import fail, ok
 from apps.instances.models import ChallengeRelease, ChallengeRuntimeConfig, ImagePreparationRequest, IsolationProfile, RuntimeType
 from apps.instances.image_preparations import enqueue_on_approval, queue_preparation, serialize_preparation
+from apps.instances.bundle_environment import fill_bundle_environment, read_bundle_environment
+from apps.instances.repository_source import RepositorySourceUnavailable
 from apps.instances.releases import (
     ReleaseValidationError,
     check_slug_consistency,
@@ -129,6 +131,31 @@ class ReleaseListCreateView(APIView):
         except ReleaseValidationError as error:
             return fail("RELEASE_INVALID", error.message, 400)
 
+        challenge = _get_challenge(challenge_id)
+        if challenge is None:
+            return fail("CHALLENGE_NOT_FOUND", "존재하지 않는 문제 ID입니다.", 404)
+        try:
+            check_slug_consistency(challenge, validated["challenge_slug"])
+        except ReleaseValidationError as error:
+            return fail("RELEASE_INVALID", error.message, 400)
+        if ChallengeRelease.objects.filter(
+            challenge=challenge, registry_revision=validated["registry_revision"]
+        ).exists():
+            return fail("RELEASE_DUPLICATED", "같은 registry_revision의 릴리스가 이미 등록되어 있습니다.", 409)
+
+        # Resolve the same immutable source as the poller, before acquiring locks.
+        artifact = request.data["artifact"]
+        try:
+            environment = read_bundle_environment(
+                validated, artifact.get("source_sha") or artifact.get("commit_sha")
+            )
+        except RepositorySourceUnavailable:
+            return fail(
+                "REPOSITORY_SOURCE_UNAVAILABLE",
+                "문제 저장소를 읽지 못해 환경변수를 확인하지 못했습니다 잠시 뒤 다시 시도해주세요",
+                503,
+            )
+
         with transaction.atomic():
             challenge = _get_challenge(challenge_id, for_update=True)
             if challenge is None:
@@ -151,7 +178,12 @@ class ReleaseListCreateView(APIView):
                 )
 
             try:
-                release = create_release(challenge, validated, request.user.login_id)
+                with transaction.atomic():
+                    if environment:
+                        validated["repository_env"] = fill_bundle_environment(
+                            challenge, validated, environment, request.user.login_id
+                        )
+                    release = create_release(challenge, validated, request.user.login_id)
             except ReleaseValidationError as error:
                 return fail("RELEASE_INVALID", error.message, 400)
             except RuntimeSecretUnavailable:
