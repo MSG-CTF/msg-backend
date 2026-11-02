@@ -551,3 +551,62 @@ class MyInstanceView(APIView):
             serialize_instance(instance, include_title=True),
             message="인스턴스 상태 조회 성공",
         )
+
+
+class TeamMemberInstanceView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        # 본인을 뺀 팀원의 활성 인스턴스를 Scheduler와 맞춰 보여준다
+        # 인스턴스는 한 사람당 1개라 팀원이 같은 문제를 이미 켰는지 보고 같이 쓰게 한다
+        team = getattr(request.user, "team", None)
+        if team is None:
+            return fail("USER_HAS_NO_TEAM", "소속된 팀이 없습니다", 404)
+
+        try:
+            auth_header = scheduler_auth_header(request)
+        except SchedulerError as error:
+            return fail(error.code, error.message, error.status_code)
+
+        items = []
+        members = team.members.exclude(pk=request.user.pk).order_by("-is_leader", "nickname")
+        for member in members:
+            try:
+                scheduler_data = call_scheduler_active(member, auth_header)
+            except SchedulerError as error:
+                if error.code == "INSTANCE_NOT_FOUND":
+                    continue
+                return fail(error.code, error.message, error.status_code)
+
+            try:
+                if not isinstance(scheduler_data, dict):
+                    raise ValueError()
+                instance_id = uuid.UUID(scheduler_data["instance_id"])
+            except (KeyError, ValueError, TypeError, AttributeError):
+                return fail("SCHEDULER_UNAVAILABLE", "인스턴스 서버 응답이 올바르지 않습니다.", 503)
+
+            # 백엔드에 아직 기록되지 않은 요청은 그 팀원이 조회할 때 생기므로 여기서 만들지 않는다
+            instance = (
+                Instance.objects.filter(instance_id=instance_id, user=member, team=team)
+                .select_related("challenge")
+                .first()
+            )
+            if instance is None:
+                continue
+            try:
+                update_instance_from_scheduler(instance, scheduler_data)
+            except SchedulerError as error:
+                return fail(error.code, error.message, error.status_code)
+            if instance.status not in ACTIVE_INSTANCE_STATUSES:
+                continue
+
+            items.append(
+                {
+                    "user_id": str(member.user_id),
+                    "nickname": member.nickname,
+                    "is_leader": member.is_leader,
+                    "instance": serialize_instance(instance, include_title=True),
+                }
+            )
+
+        return ok({"instances": items}, message="팀원 인스턴스 조회 성공")

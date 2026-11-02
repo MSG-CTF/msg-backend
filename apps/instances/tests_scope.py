@@ -7,7 +7,7 @@ from django.utils import timezone
 
 from apps.accounts.models import Team, User
 from apps.instances import tests as instance_tests
-from apps.instances.models import Instance, InstanceStatus
+from apps.instances.models import Instance, InstanceStatus, InstanceWriteOperation
 from apps.instances.services import SchedulerError
 
 
@@ -110,6 +110,8 @@ class InstanceScopeTests(TestCase):
     def test_create_rejects_mismatched_response_scope(self, create):
         for field in ("user_id", "team_id", "challenge_id"):
             with self.subTest(field=field):
+                # 앞 subTest가 남긴 저장 확인 대기 기록이 이번 요청을 409로 먼저 막지 않게 지운다
+                InstanceWriteOperation.objects.all().delete()
                 create.return_value = {**self.scheduler_data(), field: str(uuid.uuid4())}
                 response = self.client.post(
                     "/api/v1/instances", {"challenge_id": str(self.challenge.pk)}, format="json",
@@ -122,6 +124,7 @@ class InstanceScopeTests(TestCase):
         instance = self.instance()
         for field in ("user_id", "team_id", "challenge_id"):
             with self.subTest(field=field):
+                InstanceWriteOperation.objects.all().delete()
                 reset.return_value = {**self.scheduler_data(), field: str(uuid.uuid4())}
                 response = self.client.post(f"/api/v1/instances/{instance.pk}/reset")
                 self.assert_scope_error(response)

@@ -15,6 +15,7 @@ from apps.common.jwt import hash_token
 from apps.common.permissions import IsAuthenticated
 from apps.common.response import ok
 from apps.common.utils import num
+from apps.board.models import TeamChallengeAccess
 from apps.challenge.models import Solve
 from apps.koth.models import KothSolve
 from apps.signature.models import SignatureSolve
@@ -97,6 +98,12 @@ def mileage_history(request):
                 "-created_at", "-history_id"
             )
         )
+    # 같은 스냅샷의 잔액에서 최신 내역부터 거슬러 올라가며 각 내역 직후의 잔액을 구한다
+    balances = []
+    balance = mileage
+    for row in rows:
+        balances.append(balance)
+        balance -= row.amount
     history = [
         {
             "history_id": str(row.history_id),
@@ -107,8 +114,9 @@ def mileage_history(request):
             "is_refunded": row.is_refunded,
             "ref_history_id": str(row.ref_history_id) if row.ref_history_id else None,
             "created_at": row.created_at,
+            "balance_after": balance_after,
         }
-        for row in rows
+        for row, balance_after in zip(rows, balances)
     ]
 
     return ok(
@@ -178,17 +186,28 @@ def solves(request):
     team = _get_team(request)
 
     items = []
+    # 보드에서 문제를 연 시각부터 푼 시각까지를 걸린 시간으로 본다
+    opened_at = dict(
+        TeamChallengeAccess.objects.filter(team=team).values_list("challenge_id", "opened_at")
+    )
 
     for row in (
         Solve.objects.filter(team=team)
         .select_related("challenge", "solved_by_user")
         .order_by("-solved_at", "-solve_id")
     ):
+        opened = opened_at.get(row.challenge_id)
         items.append(
             {
                 "source_type": "JEOPARDY",
                 "challenge_id": str(row.challenge_id),
                 "challenge_title": row.challenge.title,
+                "category": row.challenge.category,
+                "elapsed_seconds": (
+                    max(0, int((row.solved_at - opened).total_seconds()))
+                    if opened and row.solved_at
+                    else None
+                ),
                 "earned_score": num(row.earned_score),
                 "earned_mileage": row.earned_mileage,
                 "is_extra_dice_granted": row.is_extra_dice_granted,

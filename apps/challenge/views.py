@@ -36,7 +36,7 @@ from apps.common.permissions import IsAuthenticated
 from apps.accounts.models import Team
 from apps.adminpanel.models import setting_values
 from apps.board.models import TeamBoardState, TeamChallengeAccess
-from apps.board.services import complete_challenge_from_submission
+from apps.board.services import challenge_solve_deadline, complete_challenge_from_submission
 from apps.ranking.services import check_and_record_line_monopoly
 from apps.ranking.scoring import calculate_dynamic_score
 from apps.teams.models import MileageHistory, MileageType
@@ -96,6 +96,8 @@ class ChallengeDetailView(APIView):
             instance = active_challenge_instance(request, challenge, team)
         except SchedulerError as error:
             return fail(error.code, error.message, error.status_code)
+        # 보드 문제가 아니면 출제 동아리 정보가 없다
+        board_meta = getattr(challenge, "board_meta", None)
 
         return ok(
             message="문제 상세 조회 성공",
@@ -118,6 +120,11 @@ class ChallengeDetailView(APIView):
                 "solved_team_count": Solve.objects.filter(challenge=challenge).count(),
                 "is_solved": solve is not None,
                 "instance": serialize_instance(instance),
+                # 보드 열린 문제 목록과 같은 기준이라 상세 화면도 첫 풀이 보상 남은 시간을 보일 수 있다
+                "status": challenge_access.status,
+                "opened_at": isoformat_z(challenge_access.opened_at),
+                "solve_deadline_at": isoformat_z(challenge_solve_deadline(challenge_access)),
+                "club_name": (board_meta.club_name or None) if board_meta else None,
             },
         )
 

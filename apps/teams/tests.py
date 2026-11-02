@@ -67,6 +67,20 @@ class MyPageTests(TestCase):
         self.assertEqual(data["mileage"], 121)
         self.assertEqual(sum(row["amount"] for row in data["history"]), 121)
 
+    def test_mileage_history_rows_carry_balance_after_each_change(self):
+        """마이페이지 BALANCE 칸: 최신 줄은 현재 잔액이고 아래로 갈수록 그 시점 잔액이다."""
+        from datetime import timedelta
+        from django.utils import timezone
+        from apps.teams.models import MileageHistory, MileageType
+
+        base = timezone.now() - timedelta(hours=1)
+        for minutes, kind, amount in ((0, MileageType.CHALLENGE_SOLVE, 300), (10, MileageType.PURCHASE, -120), (20, MileageType.ADMIN_GRANT, 50)):
+            row = MileageHistory.objects.create(team=self.team, type=kind, amount=amount)
+            MileageHistory.objects.filter(pk=row.pk).update(created_at=base + timedelta(minutes=minutes))
+        Team.objects.filter(pk=self.team.pk).update(mileage=230)
+        data = self.client.get("/api/v1/teams/me/mileage_history").data["data"]
+        self.assertEqual([(row["amount"], row["balance_after"]) for row in data["history"]], [(50, 230), (-120, 180), (300, 300)])
+
     def test_qr_token_rechecks_ban_after_locking_team(self):
         """인증 뒤 정지가 커밋돼도 결제 토큰을 만들지 않는다 (QA TC-60)."""
         from apps.teams import views
@@ -258,9 +272,14 @@ class MyPageTests(TestCase):
                 "is_extra_dice_granted",
                 "solved_by",
                 "solved_at",
+                "category",
+                "elapsed_seconds",
             },
         )
         self.assertEqual(row["source_type"], "JEOPARDY")
+        self.assertEqual(row["category"], "WEB")
+        # 보드에서 연 기록이 없으면 걸린 시간을 지어내지 않는다
+        self.assertIsNone(row["elapsed_seconds"])
         self.assertEqual(row["challenge_title"], "웹 상 문제")
         self.assertEqual(row["earned_score"], 100)
         self.assertEqual(row["earned_mileage"], 30)
@@ -268,6 +287,18 @@ class MyPageTests(TestCase):
         self.assertEqual(set(row["solved_by"]), {"user_id", "nickname"})
         self.assertEqual(row["solved_by"]["nickname"], "나")
         self.assertEqual(res.data["data"]["total_count"], 1)
+
+    def test_solves_elapsed_seconds_counts_from_board_open_to_solve(self):
+        from datetime import timedelta
+        from apps.board.models import Cell, TeamChallengeAccess
+
+        ch = self._challenge()
+        cell = Cell.objects.create(cell_index=3, type=Cell.CellType.CHALLENGE, difficulty=Cell.Difficulty.EASY, name="c3")
+        access = TeamChallengeAccess.objects.create(team=self.team, challenge=ch, source_cell=cell)
+        solve = Solve.objects.create(team=self.team, challenge=ch, solved_by_user=self.user, earned_score=100, earned_mileage=30)
+        Solve.objects.filter(pk=solve.pk).update(solved_at=access.opened_at + timedelta(minutes=7, seconds=5))
+        row = self.client.get("/api/v1/teams/me/solves").data["data"]["solves"][0]
+        self.assertEqual(row["elapsed_seconds"], 425)
 
     def test_solves_other_team_isolated(self):
         ch = self._challenge(title="남의 문제")

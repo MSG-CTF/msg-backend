@@ -136,6 +136,23 @@ class ChallengeSubmitTests(TestCase):
         self.assertEqual(submit.status_code, 403)
         self.assertEqual(submit.data["code"], "CHALLENGE_LOCKED")
 
+    def test_detail_reports_board_open_state_bonus_deadline_and_club(self):
+        from datetime import timedelta
+        from apps.board.models import BoardChallenge
+        from apps.board.services import solve_limit_seconds
+
+        path = f"/api/v1/challenges/{self.challenge.challenge_id}"
+        data = self.client.get(path).data["data"]
+        access = TeamChallengeAccess.objects.get(team=self.team, challenge=self.challenge)
+        self.assertEqual(data["status"], "OPENED")
+        self.assertEqual(data["opened_at"], access.opened_at.isoformat().replace("+00:00", "Z"))
+        deadline = access.opened_at + timedelta(seconds=solve_limit_seconds())
+        self.assertEqual(data["solve_deadline_at"], deadline.isoformat().replace("+00:00", "Z"))
+        # 보드 배치 정보가 없으면 출제 동아리를 비워 둔다
+        self.assertIsNone(data["club_name"])
+        BoardChallenge.objects.create(challenge=self.challenge, challenge_number=7, club_name="seKUrity")
+        self.assertEqual(self.client.get(path).data["data"]["club_name"], "seKUrity")
+
     def test_detail_only_requires_instance_when_a_runtime_release_is_selected(self):
         path = f"/api/v1/challenges/{self.challenge.challenge_id}"
         self.assertFalse(self.client.get(path).data["data"]["requires_instance"])

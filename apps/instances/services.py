@@ -367,6 +367,8 @@ def serialize_instance(instance, include_title=False, include_replaced=False, in
         "status": instance.status,
         "expires_at": isoformat_z(instance.expires_at),
         "hard_expires_at": isoformat_z(instance.hard_expires_at),
+        # 화면이 남은 연장 횟수를 보이고 3회를 다 쓰면 연장 버튼을 막는다
+        "extend_count": instance.extend_count,
     }
 
     if include_title:
