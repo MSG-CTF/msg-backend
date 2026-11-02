@@ -12,7 +12,7 @@ pefile==2024.8.26
 psycopg==3.3.4
 psycopg-binary==3.3.4
 pycparser==3.0
-PyJWT==2.14.0
+PyJWT==2.15.0
 python-dotenv==1.2.2
 PyYAML==6.0.3
 redis==8.0.1
