@@ -115,6 +115,25 @@ class StagedActivationApiTests(ReleaseTestBase):
             self.assertEqual(str(ChallengeRuntimeConfig.objects.get().current_release_id), self.old)
         self.assertFalse(ImagePreparationRequest.objects.exists())
 
+    def test_legacy_docker_activation_and_rollback_do_not_use_kubernetes_preparation(self):
+        ChallengeRelease.objects.filter(pk__in=[self.old, self.new]).update(runtime_type='DOCKER')
+        with patch('apps.instances.image_preparations._call_runtime', side_effect=AssertionError('Docker must not call Kubernetes preparation')):
+            for release_id, reason in ((self.new, 'Docker update'), (self.old, 'Docker rollback')):
+                response = self.client.post(f'{self.base_url}/{release_id}/activate', {'reason': reason}, format='json')
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(str(ChallengeRuntimeConfig.objects.get().current_release_id), release_id)
+                self.assertEqual(AdminEvent.objects.filter(type='CHALLENGE_RELEASE_ACTIVATED', message__contains=reason).count(), 1)
+        self.assertFalse(ImagePreparationRequest.objects.exists())
+
+    def test_docker_switch_supersedes_older_pending_kubernetes_activation(self):
+        self.assertEqual(self.activate(self.new).status_code, 202)
+        row = ImagePreparationRequest.objects.get()
+        docker = self.register(revision=3, runtime_type='DOCKER').data['data']['release_id']
+        self.assertEqual(self.activate(docker).status_code, 200)
+        row.refresh_from_db()
+        self.assertEqual(row.activation_status, 'SUPERSEDED')
+        self.assertEqual(str(ChallengeRuntimeConfig.objects.get().current_release_id), docker)
+
 
 def readiness(row):
     now = timezone.now()
