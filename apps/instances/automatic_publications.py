@@ -98,6 +98,12 @@ def process_automatic_publications(limit=100):
                 row.state, row.error_code = "SUPERSEDED", "NEWER_VERSION_OR_OPERATOR_SWITCH"
             elif not settings.IMAGE_PREPARATION_ACTIVATE_WHEN_READY:
                 continue
+            elif ImagePreparationRequest.objects.filter(
+                release__challenge=challenge, activation_status="PENDING",
+            ).exclude(pk__in=AutomaticPublication.objects.filter(
+                preparation__isnull=False,
+            ).values("preparation_id")).exists():
+                row.state, row.error_code = "HELD", "MANUAL_ACTIVATION_IN_PROGRESS"
             elif execution_profile(row.release) != execution_profile(runtime.current_release):
                 row.state, row.error_code = "HELD", "EXECUTION_PROFILE_CHANGED"
             elif row.release.repository_env.get("missing"):

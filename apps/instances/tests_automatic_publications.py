@@ -11,7 +11,7 @@ from django.utils import timezone
 from apps.adminpanel.models import AdminEvent
 from apps.challenge.models import Challenge
 from apps.instances.automatic_publications import record_verified, process_automatic_publications
-from apps.instances.image_preparations import process_preparation
+from apps.instances.image_preparations import process_preparation, queue_preparation
 from apps.instances.models import AutomaticPublication, ChallengeRelease, ChallengeRuntimeConfig, ChallengeUserFileBundle, ImagePreparationRequest, ReleaseContainer
 from apps.instances.tests_image_preparations import CONFIG, accepted, detail
 from apps.instances.tests_staged_activation import readiness
@@ -149,6 +149,16 @@ class AutomaticPublicationTests(TransactionTestCase):
         self.assertEqual(AutomaticPublication.objects.get().state, "SUPERSEDED")
         record_verified(*self.evidence()); process_automatic_publications()
         self.assertEqual(ImagePreparationRequest.objects.count(), 1)
+
+    def test_new_ci_does_not_cancel_an_existing_manual_activation(self):
+        manual=self.make_release(3); manual.created_by="operator"; manual.approved_at=timezone.now(); manual.save()
+        request=queue_preparation(manual,"operator")
+        request.activation_status="PENDING"; request.save()
+        record_verified(*self.evidence()); self.files(); process_automatic_publications()
+        row=AutomaticPublication.objects.get(pk=self.new.pk)
+        self.assertEqual((row.state,row.error_code),("HELD","MANUAL_ACTIVATION_IN_PROGRESS"))
+        request.refresh_from_db(); self.assertEqual(request.activation_status,"PENDING")
+        self.assertEqual(ImagePreparationRequest.objects.count(),1)
 
     def test_newer_publication_supersedes_old_unstarted_intent(self):
         record_verified(*self.evidence())
