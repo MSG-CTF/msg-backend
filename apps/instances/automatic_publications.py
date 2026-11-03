@@ -116,12 +116,13 @@ def process_automatic_publications(limit=100):
                 row.save(update_fields=["error_code", "updated_at"])
                 continue
             else:
-                row.release.approved_at = row.release.approved_at or timezone.now()
-                row.release.save(update_fields=["approved_at"])
                 try:
-                    preparation = queue_preparation(row.release, ACTOR)
+                    with transaction.atomic():
+                        row.release.approved_at = row.release.approved_at or timezone.now()
+                        row.release.save(update_fields=["approved_at"])
+                        preparation = queue_preparation(row.release, ACTOR)
                 except PreparationError as error:
-                    row.state, row.error_code = "HELD", error.code
+                    row.state, row.error_code = ("PENDING" if error.status_code >= 500 else "HELD"), error.code
                 else:
                     ImagePreparationRequest.objects.filter(release__challenge=challenge, activation_status="PENDING").update(activation_status="SUPERSEDED")
                     runtime.activation_generation += 1

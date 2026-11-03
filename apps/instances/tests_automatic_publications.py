@@ -108,6 +108,19 @@ class AutomaticPublicationTests(TransactionTestCase):
         record_verified(*self.evidence()); self.files(); process_automatic_publications()
         self.assertEqual(AutomaticPublication.objects.get().error_code, "EXECUTION_PROFILE_CHANGED")
 
+    def test_configuration_failure_rolls_back_approval_then_recovers_without_manual_approval(self):
+        record_verified(*self.evidence()); self.files()
+        with override_settings(IMAGE_PREPARATION_TARGET_IDS=""):
+            process_automatic_publications()
+        self.new.refresh_from_db()
+        self.assertIsNone(self.new.approved_at)
+        self.assertFalse(ImagePreparationRequest.objects.exists())
+        self.assertFalse(AdminEvent.objects.filter(type="CHALLENGE_RELEASE_APPROVED").exists())
+        self.assertEqual(AutomaticPublication.objects.get().state,"PENDING")
+        process_automatic_publications()
+        self.assertEqual(AutomaticPublication.objects.get().state,"PREPARING")
+        self.assertEqual(AdminEvent.objects.filter(type="CHALLENGE_RELEASE_APPROVED").count(),1)
+
     def test_successful_preparation_is_not_enough_all_nodes_need_fresh_readiness(self):
         row = self.prepare()
         for _ in range(3): record_verified(*self.evidence()); process_automatic_publications()
