@@ -7,7 +7,7 @@ from django.test import override_settings
 from apps.instances.models import ChallengeRelease, ChallengeRuntimeConfig, RuntimeSecret, UserFilesMode
 from apps.instances.poller import register_bundle
 from apps.instances.published_challenges import _same_release
-from apps.instances.releases import serialize_release, validate_release_payload
+from apps.instances.releases import ReleaseValidationError, serialize_release, validate_release_payload
 from apps.instances.repository_source import RepositorySourceUnavailable
 from apps.instances.runtime_secrets import create_runtime_secret, decrypt_runtime_secret
 from apps.instances.tests_releases import ReleaseTestBase, artifact_payload
@@ -67,6 +67,59 @@ class BundleEnvironmentTests(ReleaseTestBase):
         self.assertEqual(serialize_release(release)["repository_env"]["files"], ["env/app.env"])
         self.auth("root")
         self.assertEqual(self.activate(release.pk).status_code, 200)
+
+    def test_uploaded_release_file_gets_same_commit_environment(self):
+        self.auth("root")
+        response = self.client.post(self.base_url, {"artifact": self.bundle()}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        release = ChallengeRelease.objects.get(pk=response.data["data"]["release_id"])
+        container = release.containers.get()
+        self.assertEqual(container.env, {"PORT": "8080"})
+        self.assertEqual(set(container.secret_env), {"FLAG", "REDIS_URL", "API_TOKEN"})
+        self.assertEqual(self.reads, [("web-basic", SHA)])
+        self.assertEqual(release.repository_env, {"revision": SHA, "files": ["env/app.env"], "missing": []})
+        self.assertEqual(self.activate(release.pk).status_code, 200)
+
+    def test_uploaded_release_repository_outage_does_not_save_empty_version(self):
+        self.auth("root")
+        with patch("apps.instances.bundle_environment.RepositorySnapshot", side_effect=RepositorySourceUnavailable()):
+            response = self.client.post(self.base_url, {"artifact": self.bundle()}, format="json")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.data["code"], "REPOSITORY_SOURCE_UNAVAILABLE")
+        self.assertFalse(ChallengeRelease.objects.filter(challenge=self.challenge).exists())
+        self.assertFalse(RuntimeSecret.objects.filter(challenge=self.challenge).exists())
+
+    def test_uploaded_release_missing_values_block_activation(self):
+        self.auth("root")
+        self.files["env/app.env"] = "PORT=8080\nFLAG=MSG{other}\nDB_PASS=\n"
+        response = self.client.post(self.base_url, {"artifact": self.bundle()}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        release = ChallengeRelease.objects.get(pk=response.data["data"]["release_id"])
+        self.assertEqual({row["name"] for row in release.repository_env["missing"]}, {"FLAG", "DB_PASS"})
+        self.assertEqual(self.activate(release.pk).data["code"], "RELEASE_ENV_INCOMPLETE")
+
+    def test_uploaded_explicit_environment_does_not_read_repository(self):
+        self.auth("root")
+        response = self.client.post(self.base_url, {"artifact": self.bundle(env={"PORT": "9090"})}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(self.reads, [])
+        self.assertEqual(ChallengeRelease.objects.get(pk=response.data["data"]["release_id"]).containers.get().env, {"PORT": "9090"})
+
+    def test_uploaded_duplicate_does_not_depend_on_repository_availability(self):
+        self.register()
+        self.auth("root")
+        with patch("apps.instances.bundle_environment.RepositorySnapshot", side_effect=RepositorySourceUnavailable()):
+            response = self.client.post(self.base_url, {"artifact": self.bundle()}, format="json")
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["code"], "RELEASE_DUPLICATED")
+
+    def test_uploaded_release_failure_rolls_back_imported_secrets(self):
+        self.auth("root")
+        with patch("apps.instances.admin_views.create_release", side_effect=ReleaseValidationError("invalid release")):
+            response = self.client.post(self.base_url, {"artifact": self.bundle()}, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(ChallengeRelease.objects.filter(challenge=self.challenge).exists())
+        self.assertFalse(RuntimeSecret.objects.filter(challenge=self.challenge).exists())
 
     def test_next_version_reuses_stored_secrets_and_the_admin_kind(self):
         first = self.register()
