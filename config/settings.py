@@ -394,6 +394,8 @@ RELEASE_POLL_REPO = os.getenv("RELEASE_POLL_REPO", "MSG-CTF/2026_MSG_CTF")
 RELEASE_POLL_GITHUB_TOKEN = os.getenv("RELEASE_POLL_GITHUB_TOKEN", "")
 RELEASE_POLL_LIMIT = int(os.getenv("RELEASE_POLL_LIMIT", "100"))
 RELEASE_POLL_SOURCE_REF = os.getenv("RELEASE_POLL_SOURCE_REF", "refs/heads/main")
+AUTO_ACTIVATE_PUBLISHED_RELEASES = os.getenv("AUTO_ACTIVATE_PUBLISHED_RELEASES", "False").lower() == "true"
+AUTO_ACTIVATE_RELEASE_WORKFLOW = os.getenv("AUTO_ACTIVATE_RELEASE_WORKFLOW", ".github/workflows/challenge-validation.yml")
 
 # Recording alone does not enable workflow_dispatch or automatic import.
 PUBLICATION_REQUESTS_ENABLED = os.getenv("PUBLICATION_REQUESTS_ENABLED", "False").lower() == "true"

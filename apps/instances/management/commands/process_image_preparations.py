@@ -32,6 +32,8 @@ class Command(BaseCommand):
             return
         try:
             configuration()
+            from apps.instances.automatic_publications import process_automatic_publications
+            process_automatic_publications(limit=options["limit"])
             ids = list(
                 ImagePreparationRequest.objects.filter(
                     next_attempt_at__lte=timezone.now()
@@ -40,6 +42,7 @@ class Command(BaseCommand):
                 .values_list("pk", flat=True)[: options["limit"]]
             )
             processed = sum(process_preparation(request_id) for request_id in ids)
+            process_automatic_publications(limit=options["limit"])
         except PreparationError as exc:
             raise CommandError(exc.code) from None
         self.stdout.write(f"Processed {processed} image preparation requests.")

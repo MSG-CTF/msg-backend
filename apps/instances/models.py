@@ -300,6 +300,24 @@ class ImagePreparationRequest(models.Model):
         indexes = [models.Index(fields=["next_attempt_at", "request_id"], name="image_prep_due_idx")]
 
 
+class AutomaticPublication(models.Model):
+    release = models.OneToOneField(ChallengeRelease, on_delete=models.CASCADE, primary_key=True, related_name="automatic_publication")
+    artifact_id = models.BigIntegerField(unique=True)
+    run_id = models.BigIntegerField()
+    source_sha = models.CharField(max_length=40)
+    expected_release_id = models.UUIDField(null=True, blank=True)
+    expected_generation = models.PositiveBigIntegerField()
+    state = models.CharField(max_length=16, default="PENDING")
+    preparation = models.ForeignKey(ImagePreparationRequest, on_delete=models.SET_NULL, null=True, blank=True)
+    error_code = models.CharField(max_length=64, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "automatic_publications"
+        indexes = [models.Index(fields=["state", "created_at"], name="automatic_publications_due")]
+
+
 class ReleaseContainer(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     release = models.ForeignKey(

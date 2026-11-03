@@ -401,6 +401,9 @@ def poll_once(token=None, full_scan=False):
                 note="공급망 자동 등록: " + str(artifact.get("name", "")),
             )
         summary[status] += 1
+        if status in {"registered", "duplicate"}:
+            from apps.instances.automatic_publications import record_verified
+            record_verified(artifact, workflow_run, artifact_data)
         # An unknown problem needs one reviewed first import. Do not download
         # the same old bundle every five minutes; that import requeues its slug.
         if status != "error":
