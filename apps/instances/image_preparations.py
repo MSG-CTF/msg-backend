@@ -544,15 +544,19 @@ def _complete_activation(row, claim, data, config, error, permanent):
             runtime.current_release = current.release
             runtime.activation_generation += 1
             runtime.save(update_fields=["current_release", "activation_generation", "updated_at"])
+            from apps.instances.automatic_publications import AutomaticPublication, carry_pending_intents
+            if AutomaticPublication.objects.filter(preparation=current).exists():
+                carry_pending_intents(challenge, previous.pk, current.release_id,
+                                      runtime.activation_generation - 1, runtime.activation_generation)
             _record_release_switch(challenge, previous, current.release, current.activation_reason, current.created_by)
             current.activation_status = "ACTIVATED"
             current.last_error_code = ""
             current.next_attempt_at = None
         else:
             current.last_error_code = error
-            current.consecutive_failures += 1
+            current.consecutive_failures += 0 if error == "RUNTIME_POLICY_PENDING" else 1
             current.next_attempt_at = None if permanent or current.consecutive_failures >= config["attempts"] else (
-                timezone.now() + timedelta(seconds=config["poll"] * 2 ** (current.consecutive_failures - 1))
+                timezone.now() + timedelta(seconds=config["poll"] * 2 ** max(0, current.consecutive_failures - 1))
             )
             if current.next_attempt_at is None:
                 current.activation_status = "FAILED"
@@ -645,6 +649,10 @@ def process_preparation(request_id):
             422: "RUNTIME_POLICY_REJECTED",
         }.get(exc.code, "RUNTIME_HTTP_ERROR")
         permanent = exc.code in {400, 401, 403, 404, 409, 422} or 300 <= exc.code < 400
+        if exc.code == 422:
+            from apps.instances.automatic_publications import policy_pending
+            if policy_pending(row):
+                error, permanent = "RUNTIME_POLICY_PENDING", False
         exc.close()
     except (URLError, TimeoutError, OSError, HTTPException):
         error = "RUNTIME_UNAVAILABLE"
@@ -671,7 +679,7 @@ def process_preparation(request_id):
                 else timezone.now() + timedelta(seconds=config["poll"])
             )
         else:
-            current.consecutive_failures += 1
+            current.consecutive_failures += 0 if error == "RUNTIME_POLICY_PENDING" else 1
             current.delivery_status = (
                 "ACCEPTED"
                 if detail
@@ -686,7 +694,7 @@ def process_preparation(request_id):
                 if permanent or current.consecutive_failures >= config["attempts"]
                 else timezone.now()
                 + timedelta(
-                    seconds=config["poll"] * 2 ** (current.consecutive_failures - 1)
+                    seconds=config["poll"] * 2 ** max(0, current.consecutive_failures - 1)
                 )
             )
         current.save()

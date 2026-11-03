@@ -11,7 +11,7 @@ class Command(BaseCommand):
     help = (
         "공급망 publish bundle과 참가자 파일 bundle을 자동 수집한다. "
         "기본은 1회 실행이라 cron에 걸기 좋고, --interval을 주면 주기 실행한다. "
-        "릴리스 전환은 하지 않으므로 배포 버전 선택은 관리자 몫으로 남는다."
+        "자동 전환을 켜면 검증된 새 발행본의 이미지 준비 후 버전을 전환한다."
     )
 
     def add_arguments(self, parser):
@@ -44,6 +44,8 @@ class Command(BaseCommand):
                 "매핑 실패 {unmatched}, 형식 오류 {invalid}, 통신 오류 {error}".format(**summary)
             )
             user_files_summary = poll_user_files_once(token=token, full_scan=full_scan)
+            from apps.instances.automatic_publications import process_automatic_publications
+            process_automatic_publications()
             self.stdout.write(
                 "참가자 파일 poll 완료: 등록 {registered}, 중복 {duplicate}, "
                 "매핑 실패 {unmatched}, 형식 오류 {invalid}, 통신 오류 {error}".format(
