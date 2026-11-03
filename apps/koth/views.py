@@ -11,7 +11,7 @@ from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes, throttle_classes
 from rest_framework.permissions import AllowAny
 
-from apps.accounts.models import Team
+from apps.accounts.models import Role, Team
 from apps.common.exceptions import (
     ClubNotFound,
     InvalidClubId,
@@ -20,6 +20,7 @@ from apps.common.exceptions import (
     InvalidRequest,
     KothChallengeIdRequired,
     KothChallengeNotFound,
+    KothPreviewTokenUnavailable,
     KothVerifyThrottled,
     RateLimitUnavailable,
     UserHasNoTeam,
@@ -34,13 +35,14 @@ from apps.common.utils import num
 from .models import (
     KothChallenge,
     KothChallengeStatus,
+    KothPreviewToken,
     KothSolve,
     KothTeamToken,
     KothTokenVerificationAttempt,
     KothScorePeriod,
     KothScorePeriodStatus,
 )
-from .tokens import build_team_token, matches_token
+from .tokens import PREVIEW_TEAM_NAME, build_preview_token, build_team_token, matches_token, preview_team_id
 from .files import public_file_metadata, with_file_metadata
 
 
@@ -331,10 +333,7 @@ def leaderboard(request):
     return response
 
 
-@api_view(["GET"])
-@permission_classes([IsAuthenticated])
-def team_token(request):
-    team = _request_team(request)
+def _token_challenge(request):
     challenge_id = request.query_params.get("koth_challenge_id")
     if challenge_id is None:
         raise KothChallengeIdRequired()
@@ -343,9 +342,55 @@ def team_token(request):
     except (ValueError, TypeError, AttributeError):
         raise InvalidKothChallengeId()
     try:
-        challenge = KothChallenge.objects.get(pk=parsed_id)
+        return KothChallenge.objects.get(pk=parsed_id)
     except KothChallenge.DoesNotExist:
         raise KothChallengeNotFound()
+
+
+def _token_response(data):
+    response = ok(data)
+    # 팀 토큰은 민감값이므로 브라우저·프록시 캐시에 저장되지 않게 명시한다(F08).
+    response["Cache-Control"] = "no-store, private"
+    response["Pragma"] = "no-cache"
+    return response
+
+
+def _preview_token(request):
+    # 팀이 없는 관리자는 공개 전 문제의 게임 테스트용 토큰만 받는다. 진행 중이거나 끝난 문제에서는 주지 않는다
+    challenge = _token_challenge(request)
+    if challenge.status != KothChallengeStatus.SCHEDULED:
+        raise KothPreviewTokenUnavailable()
+    admin = request.user
+    raw_token = build_preview_token(admin.user_id, challenge.koth_challenge_id)
+    with transaction.atomic():
+        stored, created = KothPreviewToken.objects.get_or_create(
+            admin=admin,
+            challenge=challenge,
+            defaults={"token_hash": hash_token(raw_token), "preview_team_id": preview_team_id(admin.user_id)},
+        )
+        if not created and not matches_token(raw_token, stored.token_hash):
+            stored.token_hash = hash_token(raw_token)
+            stored.issued_at = timezone.now()
+            stored.save(update_fields=["token_hash", "issued_at"])
+    return _token_response(
+        {
+            "team_id": str(stored.preview_team_id),
+            "team_name": PREVIEW_TEAM_NAME,
+            "koth_challenge_id": str(challenge.koth_challenge_id),
+            "team_token": raw_token,
+            "issued_at": stored.issued_at,
+            "preview": True,
+        }
+    )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def team_token(request):
+    if request.user.team_id is None and request.user.role == Role.ADMIN:
+        return _preview_token(request)
+    team = _request_team(request)
+    challenge = _token_challenge(request)
     raw_token = build_team_token(team.team_id, challenge.koth_challenge_id)
     with transaction.atomic():
         stored, created = KothTeamToken.objects.get_or_create(
@@ -358,7 +403,7 @@ def team_token(request):
             stored.token_hash = hash_token(raw_token)
             stored.issued_at = timezone.now()
             stored.save(update_fields=["token_hash", "issued_at"])
-    response = ok(
+    return _token_response(
         {
             "team_id": str(team.team_id),
             "team_name": team.team_name,
@@ -367,10 +412,6 @@ def team_token(request):
             "issued_at": stored.issued_at,
         }
     )
-    # 팀 토큰은 민감값이므로 브라우저·프록시 캐시에 저장되지 않게 명시한다(F08).
-    response["Cache-Control"] = "no-store, private"
-    response["Pragma"] = "no-cache"
-    return response
 
 
 def _internal_challenge(request):
@@ -452,16 +493,28 @@ def verify_team_token(request):
     if token is not None and not token.team.is_banned and challenge.status == KothChallengeStatus.SCHEDULED:
         from .preview_game import permits_token_verification
         valid = permits_token_verification(challenge, token)
+    preview = None
+    if token is None and challenge.status == KothChallengeStatus.SCHEDULED:
+        # 관리자 테스트 토큰은 공개 전 문제의 게임 테스트 로그인 순간에만 통과한다. 진행 중이면 찾지도 않는다
+        from .preview_game import permits_token_verification
+        preview = KothPreviewToken.objects.filter(token_hash=candidate_hash, challenge=challenge).first()
+        valid = preview is not None and permits_token_verification(challenge, preview, owner_id=preview.admin_id)
     if not valid:
         if _register_verify_failure(challenge):
             raise KothVerifyThrottled()
         KothTokenVerificationAttempt.objects.create(challenge=challenge)
+    if valid and preview is not None:
+        identity = (str(preview.preview_team_id), PREVIEW_TEAM_NAME, Team.KothDivision.EXTERNAL)
+    elif valid:
+        identity = (str(token.team_id), token.team.team_name, token.team.koth_division)
+    else:
+        identity = (None, None, None)
     return ok(
         {
             "valid": valid,
-            "team_id": str(token.team_id) if valid else None,
-            "team_name": token.team.team_name if valid else None,
-            "koth_division": token.team.koth_division if valid else None,
+            "team_id": identity[0],
+            "team_name": identity[1],
+            "koth_division": identity[2],
             "koth_challenge_id": str(challenge.koth_challenge_id),
         }
     )

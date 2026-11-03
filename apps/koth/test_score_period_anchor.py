@@ -98,6 +98,8 @@ class ScorePeriodAnchorTests(TestCase):
 class ScorePeriodAnchorMigrationTests(TransactionTestCase):
     def test_existing_dependency_uses_end_and_applied_history_is_preserved(self):
         executor = MigrationExecutor(connection)
+        # 뒤 테스트가 최신 스키마를 쓰도록 0011이 아니라 마지막 마이그레이션까지 되돌린다
+        latest = executor.loader.graph.leaf_nodes()
         old = [("koth", "0010_kothscoreperiod_award_snapshot")]
         new = [("koth", "0011_score_period_anchor")]
         executor.migrate(old)
@@ -122,4 +124,4 @@ class ScorePeriodAnchorMigrationTests(TransactionTestCase):
             self.assertEqual(challenge.objects.get(pk=other.pk).score_period_anchor, "START")
             self.assertEqual(apps.get_model("koth", "KothScorePeriod").objects.get(pk=recorded.pk).status, "APPLIED")
         finally:
-            MigrationExecutor(connection).migrate(new)
+            MigrationExecutor(connection).migrate(latest)

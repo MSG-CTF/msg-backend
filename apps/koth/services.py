@@ -15,7 +15,7 @@ from django.utils.dateparse import parse_datetime
 
 from apps.accounts.models import Team
 
-from .models import KothScorePeriod, KothScorePeriodStatus, KothSolve
+from .models import KothPreviewToken, KothScorePeriod, KothScorePeriodStatus, KothSolve
 
 FIRST_PLACE_POINTS = 40
 
@@ -157,6 +157,14 @@ def _validated_results(challenge, period, payload):
         parsed.append((team_id, rank, metric))
 
     _validate_rank_sequence([(team_id, rank) for team_id, rank, _ in parsed])
+    # 공개 전 게임 테스트에 들어간 관리자 팀이 게임 기록에 남아 섞여 와도 점수판에는 넣지 않는다
+    # 구간 전체를 실패시키지 않고 그 줄만 빼며, 남은 팀은 부문별로 순위를 다시 매긴다
+    preview_ids = set(
+        KothPreviewToken.objects.filter(
+            preview_team_id__in=[team_id for team_id, _, _ in parsed]
+        ).values_list("preview_team_id", flat=True)
+    )
+    parsed = [row for row in parsed if row[0] not in preview_ids]
     teams = Team.objects.in_bulk(
         [team_id for team_id, _, _ in parsed], field_name="team_id"
     )

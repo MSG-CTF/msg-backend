@@ -18,6 +18,7 @@ from .models import (
     KothChallenge,
     KothChallengeStatus,
     KothClub,
+    KothPreviewToken,
     KothScorePeriod,
     KothScorePeriodStatus,
     KothSolve,
@@ -25,6 +26,7 @@ from .models import (
     KothTokenVerificationAttempt,
 )
 from .services import ScoreFetchError, _request_scores, poll_challenge_period, rank_points
+from .tokens import preview_team_id
 
 LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 
@@ -899,6 +901,40 @@ class KothScorePollingTests(TestCase):
         self.assertEqual(
             KothScorePeriod.objects.get().status, KothScorePeriodStatus.APPLIED
         )
+
+    @patch("apps.koth.services._request_scores")
+    def test_admin_preview_team_left_in_game_scores_never_reaches_the_scoreboard(self, request_scores):
+        admin = User.objects.create_user(login_id="score-admin", password="pw1234", nickname="운영", role="ADMIN")
+        preview = KothPreviewToken.objects.create(admin=admin, challenge=self.challenge,
+                                                  preview_team_id=preview_team_id(admin.pk), token_hash=hash_token("preview-score"))
+        payload = self.payload()
+        payload["data"]["results"] = [
+            {"team_id": str(preview.preview_team_id), "period_rank": 1, "metric_score": 120},
+            {"team_id": str(self.first.team_id), "period_rank": 2, "metric_score": 99},
+            {"team_id": str(self.second.team_id), "period_rank": 3, "metric_score": 80},
+        ]
+        request_scores.return_value = payload
+
+        # 테스트 팀 줄만 빠지고 구간은 그대로 반영돼 실제 1위 팀이 1위 점수를 받는다
+        self.assertTrue(poll_challenge_period(self.challenge, self.period))
+        record = KothScorePeriod.objects.get()
+        self.assertEqual(record.status, KothScorePeriodStatus.APPLIED)
+        self.assertEqual(KothSolve.objects.get(team=self.first).earned_score, rank_points(3)[0])
+        self.assertFalse(KothSolve.objects.filter(team=self.second).exists())
+        self.assertNotIn(str(preview.preview_team_id), str(record.award_snapshot))
+        # 관리자 계정이 지워져도 게임 기록에 남은 테스트 팀은 계속 걸러진다
+        admin.delete()
+        self.assertTrue(KothPreviewToken.objects.filter(preview_team_id=preview.preview_team_id, admin=None).exists())
+
+    @patch("apps.koth.services._request_scores")
+    def test_unknown_team_in_scores_still_marks_period_failed(self, request_scores):
+        payload = self.payload()
+        payload["data"]["results"][2]["team_id"] = "6b0a5e44-5cfa-4a7c-9a39-2c8c8a3c1f11"
+        request_scores.return_value = payload
+
+        with self.assertRaises(ScoreFetchError):
+            poll_challenge_period(self.challenge, self.period)
+        self.assertEqual(KothScorePeriod.objects.get().status, KothScorePeriodStatus.FAILED)
 
     @patch("apps.koth.services._request_scores")
     def test_invalid_tie_rank_sequence_marks_period_failed(self, request_scores):
