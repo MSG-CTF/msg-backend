@@ -24,7 +24,7 @@ from apps.accounts.models import User
 from apps.common.exceptions import RateLimitUnavailable
 from apps.common.jwt import hash_token
 from apps.common.response import fail
-from .admin_preview import COOKIE_NAME, MAX_AGE, PreviewAuthorizeThrottle, load_preview_ticket
+from .admin_preview import COOKIE_NAME, PreviewAuthorizeThrottle, load_preview_ticket, preview_seconds_left
 from .models import KothPreviewToken, KothTeamToken
 
 GAME_COOKIE = "__Host-msg_koth_game"
@@ -294,11 +294,14 @@ def _native_login(request, challenge, grant, profile, uri, body):
               "team_version": token.team.updated_at.isoformat() if token else "",
               "preview": preview is not None,
               "native_hash": hash_token(credential)}
+    remaining = preview_seconds_left(grant)
+    if not remaining:
+        raise PreviewDenied()
     try:
-        cache.set(_session_key(sid), stored, timeout=MAX_AGE)
+        cache.set(_session_key(sid), stored, timeout=remaining)
     except Exception:
         raise RateLimitUnavailable() from None
-    response.set_cookie(GAME_COOKIE, sid, max_age=MAX_AGE, secure=True, httponly=True, samesite="Lax", path="/")
+    response.set_cookie(GAME_COOKIE, sid, max_age=remaining, secure=True, httponly=True, samesite="Lax", path="/")
     return response
 
 
