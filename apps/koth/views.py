@@ -356,9 +356,11 @@ def _token_response(data):
 
 
 def _preview_token(request):
-    # 팀이 없는 관리자는 공개 전 문제의 게임 테스트용 토큰만 받는다. 진행 중이거나 끝난 문제에서는 주지 않는다
+    from .operator_qa import operator_qa_open
+
     challenge = _token_challenge(request)
-    if challenge.status != KothChallengeStatus.SCHEDULED:
+    qa_open = operator_qa_open(challenge)
+    if challenge.status != KothChallengeStatus.SCHEDULED and not qa_open:
         raise KothPreviewTokenUnavailable()
     admin = request.user
     raw_token = build_preview_token(admin.user_id, challenge.koth_challenge_id)
@@ -380,6 +382,7 @@ def _preview_token(request):
             "team_token": raw_token,
             "issued_at": stored.issued_at,
             "preview": True,
+            "qa_open": qa_open,
         }
     )
 
@@ -494,11 +497,15 @@ def verify_team_token(request):
         from .preview_game import permits_token_verification
         valid = permits_token_verification(challenge, token)
     preview = None
-    if token is None and challenge.status == KothChallengeStatus.SCHEDULED:
-        # 관리자 테스트 토큰은 공개 전 문제의 게임 테스트 로그인 순간에만 통과한다. 진행 중이면 찾지도 않는다
+    from .operator_qa import operator_qa_open
+
+    qa_open = operator_qa_open(challenge)
+    if token is None and (challenge.status == KothChallengeStatus.SCHEDULED or qa_open):
         from .preview_game import permits_token_verification
-        preview = KothPreviewToken.objects.filter(token_hash=candidate_hash, challenge=challenge).first()
-        valid = preview is not None and permits_token_verification(challenge, preview, owner_id=preview.admin_id)
+        preview = KothPreviewToken.objects.filter(
+            token_hash=candidate_hash, challenge=challenge, admin__role=Role.ADMIN,
+        ).first()
+        valid = preview is not None and (qa_open or permits_token_verification(challenge, preview, owner_id=preview.admin_id))
     if not valid:
         if _register_verify_failure(challenge):
             raise KothVerifyThrottled()

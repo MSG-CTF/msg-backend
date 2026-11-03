@@ -338,3 +338,57 @@ class AdminPreviewTokenTests(TestCase):
         from django.utils import timezone
         KothPreviewToken.objects.filter(admin=self.admin).update(issued_at=timezone.now())
         self.assertEqual(self.client.get("/api/v1/koth/preview_sessions/game_authorize", **gate).status_code, 401)
+
+    def test_direct_operator_login_is_enabled_only_until_the_explicit_qa_deadline(self):
+        from datetime import timedelta
+        from django.utils import timezone
+
+        until = timezone.now() + timedelta(hours=2)
+        KothChallenge.objects.filter(pk=self.challenge.pk).update(status="ACTIVE")
+        with override_settings(KOTH_OPERATOR_QA_UNTIL=until.isoformat()):
+            issued = self.issue()
+            self.assertEqual(issued.status_code, 200)
+            self.assertTrue(issued.data["data"]["qa_open"])
+            raw = issued.data["data"]["team_token"]
+            self.assertTrue(self.verify(raw)["valid"])
+            self.assertFalse(Team.objects.exists())
+            with patch("apps.koth.operator_qa.timezone.now", return_value=until):
+                self.assertFalse(self.verify(raw)["valid"])
+                self.assertEqual(self.issue().status_code, 409)
+        self.assertFalse(self.verify(raw)["valid"])
+
+    def test_qa_window_never_accepts_another_problem_token_or_removed_admin(self):
+        from datetime import timedelta
+        from django.utils import timezone
+
+        raw = self.issue().data["data"]["team_token"]
+        other = KothChallenge.objects.create(
+            club=self.challenge.club, title="Other QA", open_group=2,
+            challenge_url="https://game.example", status="ACTIVE", inbound_internal_token_hash=hash_token("preview-token-internal"))
+        with override_settings(KOTH_OPERATOR_QA_UNTIL=(timezone.now()+timedelta(hours=2)).isoformat()):
+            KothChallenge.objects.filter(pk=self.challenge.pk).update(status="ACTIVE")
+            self.assertTrue(self.verify(raw)["valid"])
+            foreign = APIClient().post("/internal/koth/team_tokens/verify", {
+                "koth_challenge_id": str(other.pk), "team_token": raw}, format="json", HTTP_X_INTERNAL_TOKEN="preview-token-internal")
+            self.assertFalse(foreign.data["data"]["valid"])
+            self.admin.role = "PARTICIPANT"
+            self.admin.save(update_fields=["role"])
+            self.assertFalse(self.verify(raw)["valid"])
+
+    def test_invalid_qa_configuration_closed_status_and_unlisted_origin_remain_blocked(self):
+        from datetime import timedelta
+        from django.utils import timezone
+
+        raw = self.issue().data["data"]["team_token"]
+        KothChallenge.objects.filter(pk=self.challenge.pk).update(status="ACTIVE")
+        for value in ("", "invalid", "2026-11-06T10:00:00", (timezone.now()-timedelta(seconds=1)).isoformat()):
+            with self.subTest(value=value), override_settings(KOTH_OPERATOR_QA_UNTIL=value):
+                self.assertEqual(self.issue().status_code, 409)
+                self.assertFalse(self.verify(raw)["valid"])
+        with override_settings(KOTH_OPERATOR_QA_UNTIL=(timezone.now()+timedelta(hours=2)).isoformat()):
+            with override_settings(KOTH_ADMIN_PREVIEW_ORIGINS=[]):
+                self.assertEqual(self.issue().status_code, 409)
+                self.assertFalse(self.verify(raw)["valid"])
+            KothChallenge.objects.filter(pk=self.challenge.pk).update(status="CLOSED")
+            self.assertEqual(self.issue().status_code, 409)
+            self.assertFalse(self.verify(raw)["valid"])
