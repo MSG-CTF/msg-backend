@@ -9,6 +9,7 @@ from apps.instances.poller import register_bundle
 from apps.instances.published_challenges import _same_release
 from apps.instances.releases import ReleaseValidationError, serialize_release, validate_release_payload
 from apps.instances.repository_source import RepositorySourceUnavailable
+from apps.instances.bundle_environment import environment_counts, read_bundle_environment
 from apps.instances.runtime_secrets import create_runtime_secret, decrypt_runtime_secret
 from apps.instances.tests_releases import ReleaseTestBase, artifact_payload
 from apps.instances.tests_repository_environment import MemorySnapshot
@@ -98,12 +99,16 @@ class BundleEnvironmentTests(ReleaseTestBase):
         self.assertEqual({row["name"] for row in release.repository_env["missing"]}, {"FLAG", "DB_PASS"})
         self.assertEqual(self.activate(release.pk).data["code"], "RELEASE_ENV_INCOMPLETE")
 
-    def test_uploaded_explicit_environment_does_not_read_repository(self):
+    def test_uploaded_explicit_environment_keeps_canonical_required_bindings(self):
         self.auth("root")
         response = self.client.post(self.base_url, {"artifact": self.bundle(env={"PORT": "9090"})}, format="json")
         self.assertEqual(response.status_code, 200, response.data)
-        self.assertEqual(self.reads, [])
-        self.assertEqual(ChallengeRelease.objects.get(pk=response.data["data"]["release_id"]).containers.get().env, {"PORT": "9090"})
+        self.assertEqual(self.reads, [("web-basic", SHA)])
+        release = ChallengeRelease.objects.get(pk=response.data["data"]["release_id"])
+        container = release.containers.get()
+        self.assertEqual(container.env, {"PORT": "9090"})
+        self.assertEqual(set(container.secret_env), {"FLAG", "REDIS_URL", "API_TOKEN"})
+        self.assertEqual(release.repository_env["overrides"], {"app": {"env": ["PORT"], "secret_env": []}})
 
     def test_uploaded_duplicate_does_not_depend_on_repository_availability(self):
         self.register()
@@ -120,6 +125,75 @@ class BundleEnvironmentTests(ReleaseTestBase):
         self.assertEqual(response.status_code, 400)
         self.assertFalse(ChallengeRelease.objects.filter(challenge=self.challenge).exists())
         self.assertFalse(RuntimeSecret.objects.filter(challenge=self.challenge).exists())
+
+    def test_partial_override_retains_canonical_flag_and_reports_identity_changes(self):
+        release = self.register(env={"PORT": "9090"})
+        self.assertEqual(release.containers.get().env, {"PORT": "9090"})
+        self.assertIn("FLAG", release.containers.get().secret_env)
+        self.assertTrue(_same_release(release, validate_release_payload({"artifact": self.bundle(env={"PORT": "9090"})})))
+        self.assertFalse(_same_release(release, validate_release_payload({"artifact": self.bundle(env={"PORT": "7070"})})))
+        self.assertFalse(_same_release(release, validate_release_payload({"artifact": self.bundle()})))
+
+    def test_explicit_secret_alias_is_pinned_without_using_the_repository_value(self):
+        selected = create_runtime_secret(self.challenge, "selected_redis", "redis://selected:6379/0", "root")
+        release = self.register(secret_env={"REDIS_URL": "selected_redis"})
+        container = release.containers.get()
+        self.assertEqual(container.secret_env["REDIS_URL"], str(selected.pk))
+        self.assertEqual(decrypt_runtime_secret(RuntimeSecret.objects.get(pk=container.secret_env["REDIS_URL"])), "redis://selected:6379/0")
+        self.assertIn("FLAG", container.secret_env)
+        self.assertTrue(_same_release(release, validate_release_payload({"artifact": self.bundle(secret_env={"REDIS_URL": "selected_redis"})})))
+
+    def test_explicit_values_do_not_disable_another_containers_environment(self):
+        self.files["info.yaml"] = INFO + "    - name: db\n      build: ./db\n"
+        self.files["env/db.env"] = "DB_PASS=database-fixture-only\n"
+        artifact = self.bundle(env={"PORT": "9090"})
+        artifact["workload"]["containers"].append({
+            "name": "db", "image": "ghcr.io/msg-ctf/challenges/web-basic/db@sha256:" + "a" * 64,
+            "ports": [{"port": 5432, "public": False}],
+        })
+        status, release = register_bundle(artifact)
+        self.assertEqual(status, "registered", release)
+        self.assertIn("FLAG", release.containers.get(name="app").secret_env)
+        self.assertEqual(set(release.containers.get(name="db").secret_env), {"DB_PASS"})
+        self.assertCountEqual(release.repository_env["files"], ["env/app.env", "env/db.env"])
+
+    def test_partial_override_does_not_hide_invalid_required_values(self):
+        self.files["env/app.env"] = "PORT=8080\nFLAG=MSG{other}\nDB_PASS=\n"
+        release = self.register(env={"PORT": "9090"})
+        self.assertEqual({row["name"] for row in release.repository_env["missing"]}, {"FLAG", "DB_PASS"})
+        self.auth("root")
+        self.assertEqual(self.activate(release.pk).data["code"], "RELEASE_ENV_INCOMPLETE")
+
+    def test_unregistered_explicit_secret_is_rejected_without_importing_other_secrets(self):
+        self.auth("root")
+        response = self.client.post(self.base_url, {"artifact": self.bundle(secret_env={"API_TOKEN": "not_registered"})}, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["code"], "RELEASE_INVALID")
+        self.assertFalse(ChallengeRelease.objects.filter(challenge=self.challenge).exists())
+        self.assertFalse(RuntimeSecret.objects.filter(challenge=self.challenge).exists())
+
+    def test_explicit_plain_value_cannot_downgrade_a_secret_selected_by_the_admin(self):
+        first = self.register()
+        container = first.containers.get()
+        selected = create_runtime_secret(self.challenge, "selected_port", "8080", "root")
+        container.env = {}
+        container.secret_env = {**container.secret_env, "PORT": str(selected.pk)}
+        container.env_rules = {**container.env_rules, "PORT": {"kind": "secret", "required": True}}
+        container.save()
+        ChallengeRuntimeConfig.objects.update_or_create(challenge=self.challenge, defaults={"current_release": first})
+        self.auth("root")
+        response = self.client.post(self.base_url, {"artifact": self.bundle(revision=2, env={"PORT": "9090"})}, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["code"], "RELEASE_INVALID")
+        self.assertEqual(ChallengeRelease.objects.filter(challenge=self.challenge).count(), 1)
+        self.assertEqual(ChallengeRuntimeConfig.objects.get(challenge=self.challenge).current_release_id, first.pk)
+
+    def test_preview_counts_include_declared_values_and_canonical_defaults(self):
+        artifact = self.bundle(env={"PORT": "9090", "MODE": "ctf"})
+        found = read_bundle_environment(validate_release_payload({"artifact": artifact}), SHA)
+        self.assertEqual(environment_counts(found, "app", artifact["workload"]["containers"][0]), {
+            "env_file": "env/app.env", "env_count": 2, "secret_count": 3,
+        })
 
     def test_next_version_reuses_stored_secrets_and_the_admin_kind(self):
         first = self.register()
@@ -201,11 +275,10 @@ class BundleEnvironmentTests(ReleaseTestBase):
         self.assertEqual(release.containers.get().secret_env, {"FLAG": str(flag.pk), "DB_PASS": str(stored.pk)})
         self.assertEqual(release.repository_env["missing"], [])
 
-    def test_bundle_env_missing_env_file_and_unreadable_setup_are_left_alone(self):
-        own = self.register(env={"MODE": "bundle"})
-        self.assertEqual((own.containers.get().env, own.repository_env, self.reads), ({"MODE": "bundle"}, {}, []))
+    def test_missing_env_file_and_unreadable_setup_leave_declared_values_alone(self):
         del self.files["env/app.env"]
-        self.assertEqual(self.register(revision=2).repository_env, {})
+        own = self.register(env={"MODE": "bundle"})
+        self.assertEqual((own.containers.get().env, own.repository_env), ({"MODE": "bundle"}, {}))
         self.reads.clear()
         with override_settings(RELEASE_POLL_GITHUB_TOKEN="", REPOSITORY_ENV_GIT_DIR=""):
             self.assertEqual(self.register(revision=3).repository_env, {})

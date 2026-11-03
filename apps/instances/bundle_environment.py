@@ -16,7 +16,7 @@ from apps.instances.models import ChallengeRuntimeConfig, RuntimeSecret
 from apps.instances.releases import ReleaseValidationError
 from apps.instances.repository_environment import discover_environment
 from apps.instances.repository_source import SHA, RepositorySnapshot
-from apps.instances.runtime_secrets import create_runtime_secret, decrypt_runtime_secret
+from apps.instances.runtime_secrets import bind_secret_env, create_runtime_secret, decrypt_runtime_secret
 
 
 def repository_readable():
@@ -31,9 +31,6 @@ def read_bundle_environment(validated, revision):
     저장소를 읽지 못하면 RepositorySourceUnavailable 을 그대로 올려 호출한 쪽이 다시 시도하게 한다
     """
     if not repository_readable() or not isinstance(revision, str) or not SHA.fullmatch(revision):
-        return None
-    # schema 2.1 발행본은 묶음에 든 환경변수를 그대로 쓴다
-    if any(container.get("env") or container.get("secret_env") for container in validated["containers"]):
         return None
     if validated["challenge_slug"] in settings.REPOSITORY_ENV_EXCLUDED_SLUGS:
         return None
@@ -55,13 +52,16 @@ def read_bundle_environment(validated, revision):
     return {"revision": snapshot.revision, "containers": containers} if containers else None
 
 
-def environment_counts(found, container_name):
+def environment_counts(found, container_name, declared=None):
     # 미리보기용: 저장소 파일에서 일반 값과 비밀값이 몇 개씩 들어갈지 센다
     entry = (found or {}).get("containers", {}).get(container_name)
     if entry is None:
         return None
-    secrets = sum(1 for item in entry["candidates"] if item["sensitive"] or item["kind"] == "secret")
-    return {"env_file": entry["path"], "env_count": len(entry["candidates"]) - secrets, "secret_count": secrets}
+    kinds = {item["name"]: item["sensitive"] or item["kind"] == "secret" for item in entry["candidates"]}
+    kinds.update({name: False for name in (declared or {}).get("env", {})})
+    kinds.update({name: True for name in (declared or {}).get("secret_env", {})})
+    secrets = sum(kinds.values())
+    return {"env_file": entry["path"], "env_count": len(kinds) - secrets, "secret_count": secrets}
 
 
 @sensitive_variables()
@@ -83,6 +83,9 @@ def fill_bundle_environment(challenge, validated, found, created_by):
         latest.setdefault(record.name, record)
         records[str(record.pk)] = record
     files, missing = [], []
+    overrides = {container["name"]: {
+        "env": sorted(container.get("env", {})), "secret_env": sorted(container.get("secret_env", {})),
+    } for container in validated["containers"] if container.get("env") or container.get("secret_env")}
     for container in validated["containers"]:
         entry = found["containers"].get(container["name"])
         if entry is None:
@@ -92,11 +95,23 @@ def fill_bundle_environment(challenge, validated, found, created_by):
             missing.append({"container": container["name"], "name": None, "reason": "invalid", "message": entry["error"]})
             continue
         rules_before = current_rules.get(container["name"], {})
-        env, secrets, skipped, unset_rules = {}, {}, [], {}
+        env = dict(container.get("env", {}))
+        aliases = container.get("secret_env", {})
+        for kind, names in (("env", env), ("secret", aliases)):
+            if any(name in rules_before and rules_before[name]["kind"] != kind for name in names):
+                raise ReleaseValidationError("발행본의 환경변수 저장 종류가 관리자 설정과 다릅니다")
+        try:
+            explicit_bindings = bind_secret_env(challenge, aliases, env, pinned=container.get("secret_versions"))
+        except ValueError as error:
+            raise ReleaseValidationError(str(error)) from None
+        secrets, skipped, unset_rules = {}, [], {}
+        for name, reference in explicit_bindings.items():
+            record = records.get(reference) or RuntimeSecret.objects.get(pk=reference, challenge=challenge)
+            secrets[name] = (record.name, decrypt_runtime_secret(record), record)
         # The backend owns the selected grading flag. File-based challenges do
         # not declare FLAG in .env, but still need the selected secret next time.
         reference = current_bindings.get(container["name"], {}).get("FLAG")
-        if reference and rules_before.get("FLAG", {}).get("required") is True:
+        if "FLAG" not in secrets and reference and rules_before.get("FLAG", {}).get("required") is True:
             pinned = records.get(str(reference))
             for record in (pinned, latest.get("flag")):
                 if record is None or record.name != "flag":
@@ -107,7 +122,7 @@ def fill_bundle_environment(challenge, validated, found, created_by):
                     break
         for item in entry["candidates"]:
             name, value = item["name"], item["value"]
-            if name == "FLAG" and name in secrets:
+            if name in env or name in secrets:
                 continue
             previous_rule = rules_before.get(name, {})
             if (name != "FLAG" and value is None and item.get("resolution") == "unset"
@@ -182,4 +197,7 @@ def fill_bundle_environment(challenge, validated, found, created_by):
             if reason == "no_value" and name in bare_names:
                 row["resolution"] = "unset"
             missing.append(row)
-    return {"revision": found["revision"], "files": files, "missing": missing}
+    metadata = {"revision": found["revision"], "files": files, "missing": missing}
+    if overrides:
+        metadata["overrides"] = overrides
+    return metadata

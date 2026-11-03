@@ -307,7 +307,7 @@ def preview_publication(prepared, user):
         "flag_status": "mismatch" if challenge and not is_correct_flag(prepared["metadata"]["flag"], challenge.flag_hash) else "match" if challenge else "from_repository",
         "runtime_type": release["runtime_type"] if release else None,
         "containers": [{"name": item["name"], "image_ref": item["image"], "ports": item["ports"],
-                        **(environment_counts(prepared.get("environment"), item["name"])
+                        **(environment_counts(prepared.get("environment"), item["name"], item)
                            or {"env_count": len(item.get("env", {})), "secret_count": len(item.get("secret_env", {}))})}
                        for item in release["workload"]["containers"]] if release else [],
         "files": {"status": "available" if file_data and file_data["present"] else "none" if file_data else "pending",
@@ -332,13 +332,17 @@ def _same_release(release, validated):
         container = stored[item["name"]]
         if container.image_ref != item["image_ref"] or container.ports != item["ports"]:
             return False
-        # 저장소에서 채운 환경변수는 발행 묶음에 없으니 비교하지 않는다
+        # Compare declared overrides, while ignoring defaults imported from .env.
+        declared = release.repository_env.get("overrides", {}).get(item["name"], {})
+        env = container.env
+        bindings = container.secret_env
         if release.repository_env:
-            continue
+            env = {name: value for name, value in env.items() if name in declared.get("env", [])}
+            bindings = {name: value for name, value in bindings.items() if name in declared.get("secret_env", [])}
         aliases = {str(secret.pk): secret.name for secret in RuntimeSecret.objects.filter(
-            challenge=release.challenge, pk__in=container.secret_env.values())}
-        if (container.env != item.get("env", {})
-                or {key: aliases.get(value) for key, value in container.secret_env.items()} != item.get("secret_env", {})):
+            challenge=release.challenge, pk__in=bindings.values())}
+        if (env != item.get("env", {})
+                or {key: aliases.get(value) for key, value in bindings.items()} != item.get("secret_env", {})):
             return False
     return True
 
