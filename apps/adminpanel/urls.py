@@ -43,6 +43,7 @@ urlpatterns = [
     path("admin/challenges/<uuid:challenge_id>/flag/reveal", challenge_settings.challenge_flag_reveal),
     path("admin/challenges/<uuid:challenge_id>/repository-files", challenge_settings.challenge_repository_files),
     path("admin/challenges/<uuid:challenge_id>/files", challenge_files.challenge_files),
+    path("admin/challenges/<uuid:challenge_id>/files/selection", challenge_files.challenge_file_selection),
     path("admin/challenges/<uuid:challenge_id>/files/<uuid:file_id>/download", challenge_files.challenge_file_download),
     path("admin/payment/checkout", views.payment_checkout),
     path("admin/payment/history", views.payment_history),

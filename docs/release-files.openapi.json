@@ -46,6 +46,32 @@
           "409": {"description": "Same key used for a different request"}
         }
       }
+    },
+    "/api/v1/admin/challenges/{challenge_id}/files/selection": {
+      "post": {
+        "operationId": "select_static_challenge_file",
+        "description": "Pin the ZIP served by a file-only challenge, or go back to the highest collected revision",
+        "parameters": [
+          {"name": "challenge_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+          {"name": "Idempotency-Key", "in": "header", "required": true, "schema": {"type": "string", "minLength": 1, "maxLength": 200}}
+        ],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"oneOf": [
+          {"type": "object", "required": ["mode"], "additionalProperties": false, "properties": {"mode": {"const": "LATEST"}, "reason": {"type": "string", "minLength": 1, "maxLength": 500}}},
+          {"type": "object", "required": ["mode", "file_id"], "additionalProperties": false, "properties": {"mode": {"const": "SELECTED"}, "file_id": {"type": "string", "format": "uuid"}, "reason": {"type": "string", "minLength": 1, "maxLength": 500}}}
+        ]}}}},
+        "responses": {
+          "200": {"description": "File now served to participants; same response on retry", "content": {"application/json": {"schema": {"type": "object", "required": ["code", "message", "data"], "properties": {
+            "code": {"type": "string"}, "message": {"type": "string"}, "data": {"type": "object", "required": ["mode", "current_file"], "properties": {
+              "mode": {"enum": ["LATEST", "SELECTED"]}, "current_file": {"$ref": "#/components/schemas/FileMetadata"}
+            }}
+          }}}}},
+          "400": {"description": "Invalid mode, file_id or reason, or missing idempotency key"},
+          "401": {"description": "Login required"},
+          "403": {"description": "Admin role required"},
+          "404": {"description": "Challenge or a collected ZIP with an attachment not found"},
+          "409": {"description": "Challenge has a runtime config, or same key used for a different request"}
+        }
+      }
     }
   },
   "components": {
@@ -78,7 +104,9 @@
             "mode": {"enum": ["MATCH_REVISION", "SELECTED", "NONE", "LATEST"]},
             "release_id": {"type": ["string", "null"], "format": "uuid"}, "release_version": {"type": ["integer", "null"]},
             "registry_revision": {"type": ["integer", "null"]}, "is_current": {"type": "boolean"},
-            "current_file": {"$ref": "#/components/schemas/FileMetadata"}, "matching_file": {"$ref": "#/components/schemas/FileMetadata"},
+            "selected_by": {"type": ["string", "null"]}, "selected_at": {"type": ["string", "null"], "format": "date-time"},
+            "current_file": {"$ref": "#/components/schemas/FileMetadata"}, "latest_file": {"$ref": "#/components/schemas/FileMetadata"},
+            "matching_file": {"$ref": "#/components/schemas/FileMetadata"},
             "history": {"type": "array", "items": {"$ref": "#/components/schemas/FileMetadata"}, "maxItems": 20},
             "history_has_more": {"type": "boolean"}, "history_next_page": {"type": ["integer", "null"]},
             "storage": {"type": "object", "properties": {"provider": {"enum": ["local", "gcs"]}, "bucket": {"type": ["string", "null"]}}}

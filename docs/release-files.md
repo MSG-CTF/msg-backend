@@ -22,19 +22,34 @@ CI에서 새로 발행한 이미지의 릴리스는 같은 발행본 자동 연�
 파일 없음으로 발행된 기록과 아직 수집되지 않은 상태를 구분하며, 다른 발행번호의 최신 ZIP으로 대체하지 않습니다
 기존 릴리스는 마이그레이션 후에도 같은 발행본 자동 연결을 사용합니다
 
+## 파일 풀이 문제
+
+실행 이미지 없이 파일만 주는 문제는 배포 버전이 없어서 문제 단위로 ZIP을 고릅니다
+기본은 최신 자동이며 수집된 ZIP 중 가장 높은 발행번호를 참가자에게 줍니다
+ZIP 하나를 고정하면 새 발행본이 수집돼도 고정한 ZIP을 계속 주고, 최신 자동으로 돌리면 다시 가장 높은 발행번호를 줍니다
+고정할 수 있는 ZIP은 같은 문제에 수집된 기록 중 첨부파일이 있는 것만입니다
+고정과 해제는 관리자 이벤트에 남고, 가장 높은 발행번호보다 낮은 ZIP으로 고정하면 경고로 남습니다
+문제에 실행 설정이 생기면 고정 기록은 쓰지 않고 배포 버전의 파일 연결을 따릅니다
+
 ## API
 
 | API | 용도 |
 | --- | --- |
 | GET /api/v1/admin/challenges/{challenge_id}/files?release_id={release_id} | 선택한 배포 버전의 ZIP, 같은 발행본, 다른 파일 목록 확인 |
 | POST /api/v1/admin/challenges/{challenge_id}/releases/{release_id}/files | 원본 릴리스에서 파일 선택만 바꾼 새 버전 저장 |
+| POST /api/v1/admin/challenges/{challenge_id}/files/selection | 파일 풀이 문제의 ZIP 고정 또는 최신 자동 |
 
-두 API는 관리자만 사용할 수 있고 응답을 캐시하지 않습니다
+세 API는 관리자만 사용할 수 있고 응답을 캐시하지 않습니다
 조회에서 release_id를 생략하면 현재 적용 버전을 반환합니다
 다른 파일 목록은 page로 20건씩 조회하며 history_next_page가 없으면 마지막 페이지입니다
 저장 요청은 mode와 선택 시 file_id만 받습니다
 이미지나 환경변수를 함께 바꿀 수는 없습니다
 같은 Idempotency-Key와 같은 내용으로 재시도하면 처음 생성한 버전을 반환하며, 내용이 다르면 409를 반환합니다
+
+파일 풀이 문제의 조회 응답에서 mode는 LATEST 또는 SELECTED이고 latest_file은 가장 높은 발행번호의 수집 기록입니다
+고정 중이면 selected_by와 selected_at이 함께 옵니다
+고정 요청은 mode, SELECTED일 때 file_id, 선택 사항인 reason(1~500자)만 받고 Idempotency-Key가 필요합니다
+실행 설정이 있는 문제에는 409 RUNTIME_CHALLENGE_FILES를 반환합니다
 
 릴리스 응답의 user_files에는 mode, status, file, matches_image_revision이 포함됩니다
 status는 available, pending, none, disabled, unavailable을 구분합니다

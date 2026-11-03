@@ -433,6 +433,31 @@ class ChallengeUserFileBundle(models.Model):
         return f"{self.challenge_id} revision {self.registry_revision}"
 
 
+class ChallengeUserFileSelection(models.Model):
+    # 실행 이미지 없이 파일만 주는 문제에서 관리자가 고정한 ZIP이다. 행이 없으면 가장 높은 발행번호의 ZIP을 준다
+    challenge = models.OneToOneField(
+        "challenge.Challenge",
+        on_delete=models.CASCADE,
+        db_column="challenge_id",
+        primary_key=True,
+        related_name="user_file_selection",
+    )
+    bundle = models.ForeignKey(
+        ChallengeUserFileBundle,
+        on_delete=models.RESTRICT,
+        db_column="bundle_id",
+        related_name="+",
+    )
+    selected_by = models.CharField(max_length=50)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "challenge_user_file_selections"
+
+    def __str__(self):
+        return f"{self.challenge_id} file {self.bundle_id}"
+
+
 class ChallengeRuntimeConfig(models.Model):
     challenge = models.OneToOneField(
         "challenge.Challenge",

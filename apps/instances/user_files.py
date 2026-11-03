@@ -19,6 +19,7 @@ from apps.instances.models import (
     ChallengeRelease,
     ChallengeRuntimeConfig,
     ChallengeUserFileBundle,
+    ChallengeUserFileSelection,
     PollerArtifact,
 )
 from apps.instances.poller import (
@@ -359,6 +360,15 @@ def poll_user_files_once(token=None, full_scan=False):
     return summary
 
 
+def static_user_file_choice(challenge):
+    """실행 설정이 없는 파일 풀이 문제의 (참가자에게 줄 수집 결과, 고정 기록). 고정이 없으면 가장 높은 발행번호를 준다."""
+    selection = ChallengeUserFileSelection.objects.filter(challenge=challenge).select_related("bundle").first()
+    if selection is not None:
+        return selection.bundle, selection
+    latest = ChallengeUserFileBundle.objects.filter(challenge=challenge).order_by("-registry_revision", "-created_at").first()
+    return latest, None
+
+
 def selected_user_file_bundle(challenge):
     """현재 배포에 대응하는 수집 결과. 파일이 없는 revision도 그대로 반환한다."""
     try:
@@ -366,14 +376,11 @@ def selected_user_file_bundle(challenge):
     except ChallengeRuntimeConfig.DoesNotExist:
         runtime_config = None
 
-    bundles = ChallengeUserFileBundle.objects.filter(challenge=challenge)
     if runtime_config is None:
-        bundle = bundles.order_by("-registry_revision", "-created_at").first()
-    elif runtime_config.current_release is None:
+        return static_user_file_choice(challenge)[0]
+    if runtime_config.current_release is None:
         return None
-    else:
-        bundle = file_bundle_for_release(runtime_config.current_release)
-    return bundle
+    return file_bundle_for_release(runtime_config.current_release)
 
 
 def current_user_file_bundle(challenge, *, release=None):

@@ -21,6 +21,7 @@ from apps.instances.models import (
     ChallengeRelease,
     ChallengeRuntimeConfig,
     ChallengeUserFileBundle,
+    ChallengeUserFileSelection,
     IsolationProfile,
     PollerArtifact,
 )
@@ -211,6 +212,19 @@ class RegisterUserFilesBundleTests(UserFilesTestBase):
         self.assertFalse(latest.present)
         self.assertIsNone(current_user_file_bundle(self.challenge))
         self.assertTrue(default_storage.exists(previous.object_key))
+
+    def test_pinned_static_file_wins_over_latest_until_a_release_takes_over(self):
+        archive_bytes = user_archive()
+        _, first = register_user_files_bundle(user_manifest(archive_bytes), archive_bytes, user_artifact())
+        _, second = register_user_files_bundle(
+            user_manifest(archive_bytes, revision=2, source_sha=SHA_B), archive_bytes, user_artifact(artifact_id=2, sha=SHA_B)
+        )
+        ChallengeUserFileSelection.objects.create(challenge=self.challenge, bundle=first, selected_by="root")
+        self.assertEqual(current_user_file_bundle(self.challenge), first)
+
+        # 실행 문제가 되면 고정 기록은 남아도 배포 버전의 파일 연결을 따른다
+        ChallengeRuntimeConfig.objects.create(challenge=self.challenge, current_release=self.create_release(2))
+        self.assertEqual(current_user_file_bundle(Challenge.objects.get(pk=self.challenge.pk)), second)
 
     def test_rejects_checksum_mismatch_and_unsafe_zip_path(self):
         archive_bytes = user_archive()
@@ -543,6 +557,23 @@ class ChallengeUserFilesApiTests(UserFilesTestBase):
         self.assertEqual(download.status_code, 200)
         self.assertEqual(download["Cache-Control"], "private, no-store")
         self.assertEqual(b"".join(download.streaming_content), archive_bytes)
+
+    def test_detail_and_download_follow_pinned_static_file(self):
+        archive_bytes = user_archive()
+        _, first = register_user_files_bundle(user_manifest(archive_bytes), archive_bytes, user_artifact())
+        newer = user_archive({"readme.txt": b"newer"})
+        _, second = register_user_files_bundle(
+            user_manifest(newer, revision=2, source_sha=SHA_B), newer, user_artifact(artifact_id=2, sha=SHA_B)
+        )
+        selection = ChallengeUserFileSelection.objects.create(challenge=self.challenge, bundle=first, selected_by="root")
+        newer_path = f"/api/v1/challenges/{self.challenge.challenge_id}/files/{second.bundle_id}/download"
+
+        detail = self.client.get(f"/api/v1/challenges/{self.challenge.challenge_id}")
+        self.assertEqual(detail.data["data"]["files"][0]["file_id"], str(first.bundle_id))
+        self.assertEqual(self.client.get(newer_path).status_code, 404)
+
+        selection.delete()
+        self.assertEqual(b"".join(self.client.get(newer_path).streaming_content), newer)
 
     def test_download_requires_access_and_rejects_hidden_revision(self):
         archive_bytes = user_archive()
