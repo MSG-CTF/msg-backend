@@ -8,11 +8,12 @@ from google.api_core.exceptions import Forbidden
 from rest_framework.test import APIClient
 
 from apps.adminpanel.challenge_deployment import deployment_summaries
+from apps.adminpanel.models import AdminEvent
 from apps.challenge.models import Challenge
-from apps.instances.models import ChallengeRelease, ChallengeRuntimeConfig
+from apps.instances.models import ChallengeRelease, ChallengeRuntimeConfig, ChallengeUserFileSelection
 from apps.instances.tests_releases import ReleaseTestBase
 from apps.instances.tests_user_files import user_archive, user_artifact, user_manifest
-from apps.instances.user_files import register_user_files_bundle
+from apps.instances.user_files import current_user_file_bundle, register_user_files_bundle
 
 
 class AdminChallengeFilesTests(ReleaseTestBase):
@@ -86,6 +87,76 @@ class AdminChallengeFilesTests(ReleaseTestBase):
         result = self.client.get(self.url).data["data"]
         self.assertEqual(result["status"], "no_release")
         self.assertIsNone(result["current_file"])
+
+    def choose(self, body, key="static-file-choice"):
+        return self.client.post(f"{self.url}/selection", body, format="json", HTTP_IDEMPOTENCY_KEY=key)
+
+    def test_static_file_can_be_pinned_then_returned_to_latest(self):
+        old, newer = self.bundle(1), self.bundle(2)
+        result = self.client.get(self.url).data["data"]
+        self.assertEqual((result["mode"], result["current_file"]["file_id"]), ("LATEST", str(newer.pk)))
+        self.assertEqual(result["latest_file"]["file_id"], str(newer.pk))
+        self.assertIsNone(result["selected_by"])
+
+        pinned = self.choose({"mode": "SELECTED", "file_id": str(old.pk), "reason": "발행 2 ZIP 누락"})
+        self.assertEqual(pinned.status_code, 200)
+        self.assertEqual(pinned.data["data"]["current_file"]["file_id"], str(old.pk))
+        # 고정한 뒤 들어온 새 발행본은 참가자에게 바로 나가지 않는다
+        newest = self.bundle(3)
+        result = self.client.get(self.url).data["data"]
+        self.assertEqual((result["mode"], result["current_file"]["file_id"]), ("SELECTED", str(old.pk)))
+        self.assertEqual(result["latest_file"]["file_id"], str(newest.pk))
+        self.assertEqual(result["selected_by"], "root")
+        self.assertEqual({file["file_id"] for file in result["history"]}, {str(newer.pk), str(newest.pk)})
+        self.assertEqual(current_user_file_bundle(self.challenge), old)
+
+        latest = self.choose({"mode": "LATEST"}, key="static-file-latest")
+        self.assertEqual(latest.data["data"]["current_file"]["file_id"], str(newest.pk))
+        self.assertEqual(current_user_file_bundle(self.challenge), newest)
+        self.assertFalse(ChallengeUserFileSelection.objects.exists())
+        events = list(AdminEvent.objects.filter(challenge=self.challenge).order_by("created_at"))
+        self.assertEqual([event.severity for event in events], ["WARNING", "INFO"])
+        self.assertEqual(events[0].message, "참가자 파일 고정: 최신 자동 발행 #2 → 발행 #1 고정: 발행 2 ZIP 누락")
+        self.assertEqual(events[1].message, "참가자 파일 최신 자동: 발행 #1 고정 → 최신 자동 발행 #3")
+        self.assertEqual({event.actor for event in events}, {"root"})
+
+    def test_static_file_choice_replays_by_key_and_logs_only_changes(self):
+        old, _ = self.bundle(1), self.bundle(2)
+        body = {"mode": "SELECTED", "file_id": str(old.pk)}
+        first = self.choose(body)
+        self.assertEqual(self.choose(body).data, first.data)
+        self.assertEqual(self.choose({"mode": "LATEST"}).status_code, 409)
+        self.assertEqual(self.choose(body, key="same-file-again").status_code, 200)
+        self.assertEqual(self.choose({"mode": "LATEST"}, key="latest-1").status_code, 200)
+        self.assertEqual(self.choose({"mode": "LATEST"}, key="latest-2").status_code, 200)
+        self.assertEqual(AdminEvent.objects.filter(challenge=self.challenge).count(), 2)
+
+    def test_static_file_choice_rejects_invalid_and_runtime_requests(self):
+        bundle, hidden = self.bundle(1), self.bundle(2, present=False)
+        for index, (body, status) in enumerate([
+            ({"mode": "SELECTED"}, 400),
+            ({"mode": "SELECTED", "file_id": "not-a-uuid"}, 400),
+            ({"mode": "LATEST", "file_id": str(bundle.pk)}, 400),
+            ({"mode": "NONE"}, 400),
+            ({"mode": "LATEST", "note": "x"}, 400),
+            ({"mode": "LATEST", "reason": " "}, 400),
+            ({"mode": "LATEST", "reason": "가" * 501}, 400),
+            ({"mode": "SELECTED", "file_id": str(hidden.pk)}, 404),
+        ]):
+            self.assertEqual(self.choose(body, key=f"invalid-{index}").status_code, status, body)
+        other = Challenge.objects.create(title="Other", category="WEB", difficulty="EASY", score=100, flag_hash="unused")
+        foreign = self.client.post(f"/api/v1/admin/challenges/{other.pk}/files/selection",
+                                   {"mode": "SELECTED", "file_id": str(bundle.pk)}, format="json", HTTP_IDEMPOTENCY_KEY="foreign")
+        self.assertEqual(foreign.data["code"], "FILE_NOT_FOUND")
+        self.assertEqual(self.client.post(f"{self.url}/selection", {"mode": "LATEST"}, format="json").status_code, 400)
+        self.select(1)
+        runtime = self.choose({"mode": "SELECTED", "file_id": str(bundle.pk)}, key="runtime")
+        self.assertEqual((runtime.status_code, runtime.data["code"]), (409, "RUNTIME_CHALLENGE_FILES"))
+        self.auth("player")
+        self.assertEqual(self.choose({"mode": "LATEST"}, key="player").status_code, 403)
+        self.assertEqual(APIClient().post(f"{self.url}/selection", {"mode": "LATEST"}, format="json").status_code, 401)
+        self.assertFalse(ChallengeUserFileSelection.objects.exists())
+        self.assertFalse(AdminEvent.objects.filter(challenge=self.challenge).exists())
 
     def test_other_challenge_file_is_not_returned(self):
         bundle = self.bundle()
