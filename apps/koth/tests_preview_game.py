@@ -364,12 +364,12 @@ class AdminPreviewTokenTests(TestCase):
         raw = self.issue().data["data"]["team_token"]
         other = KothChallenge.objects.create(
             club=self.challenge.club, title="Other QA", open_group=2,
-            challenge_url="https://game.example", status="ACTIVE", inbound_internal_token_hash=hash_token("preview-token-internal"))
+            challenge_url="https://game.example", status="ACTIVE", inbound_internal_token_hash=hash_token("other-qa-internal"))
         with override_settings(KOTH_OPERATOR_QA_UNTIL=(timezone.now()+timedelta(hours=2)).isoformat()):
             KothChallenge.objects.filter(pk=self.challenge.pk).update(status="ACTIVE")
             self.assertTrue(self.verify(raw)["valid"])
             foreign = APIClient().post("/internal/koth/team_tokens/verify", {
-                "koth_challenge_id": str(other.pk), "team_token": raw}, format="json", HTTP_X_INTERNAL_TOKEN="preview-token-internal")
+                "koth_challenge_id": str(other.pk), "team_token": raw}, format="json", HTTP_X_INTERNAL_TOKEN="other-qa-internal")
             self.assertFalse(foreign.data["data"]["valid"])
             self.admin.role = "PARTICIPANT"
             self.admin.save(update_fields=["role"])
