@@ -363,7 +363,7 @@ class AdminPreviewTokenTests(TestCase):
 
         raw = self.issue().data["data"]["team_token"]
         other = KothChallenge.objects.create(
-            club=self.challenge.club, title="Other QA", open_group=2,
+            club=KothClub.objects.create(name="Other operator QA"), title="Other QA", open_group=2,
             challenge_url="https://game.example", status="ACTIVE", inbound_internal_token_hash=hash_token("other-qa-internal"))
         with override_settings(KOTH_OPERATOR_QA_UNTIL=(timezone.now()+timedelta(hours=2)).isoformat()):
             KothChallenge.objects.filter(pk=self.challenge.pk).update(status="ACTIVE")
