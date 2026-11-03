@@ -100,6 +100,12 @@ class KothChallengeNotFound(APIError):
     message = "KOTH 문제를 찾을 수 없습니다."
 
 
+class KothPreviewTokenUnavailable(APIError):
+    status_code = status.HTTP_409_CONFLICT
+    code = "KOTH_PREVIEW_TOKEN_UNAVAILABLE"
+    message = "운영 테스트 토큰은 공개 전 문제의 게임 테스트에서만 받을 수 있습니다"
+
+
 class InvalidRequest(APIError):
     pass
 

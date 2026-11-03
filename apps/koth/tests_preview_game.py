@@ -11,8 +11,9 @@ from rest_framework.test import APIClient
 from apps.accounts.models import Team, User
 from apps.common.jwt import hash_token, issue_access_token
 from .admin_preview import COOKIE_NAME
-from .models import KothChallenge, KothClub, KothTeamToken
+from .models import KothChallenge, KothClub, KothPreviewToken, KothTeamToken
 from .preview_game import GAME_COOKIE, KEY_PREFIX, _session_key, permits_token_verification
+from .tokens import preview_team_id
 
 
 @override_settings(KOTH_ADMIN_PREVIEW_ORIGINS=["https://game.example"])
@@ -202,3 +203,108 @@ class PreviewGameTests(TestCase):
         self.login()
         KothTeamToken.objects.filter(pk=self.token.pk).update(issued_at=timezone.now())
         self.assertEqual(self.authorize_session().status_code, 401)
+
+
+@override_settings(KOTH_ADMIN_PREVIEW_ORIGINS=["https://game.example"])
+class AdminPreviewTokenTests(TestCase):
+    """팀이 없는 관리자는 공개 전 게임 테스트에서만 쓰는 운영 테스트 토큰을 받는다."""
+
+    def setUp(self):
+        self.admin = User.objects.create_user(login_id="preview-token-admin", nickname="admin", role="ADMIN")
+        self.challenge = KothChallenge.objects.create(
+            club=KothClub.objects.create(name="Preview token QA"), title="Token QA",
+            repository_slug="koth-jenga", challenge_url="https://game.example", status="SCHEDULED",
+            open_group=1, inbound_internal_token_hash=hash_token("preview-token-internal"))
+        self.api = self.bearer(self.admin)
+        result = self.api.post(f"/api/v1/admin/koth/challenges/{self.challenge.pk}/preview_sessions", {}, format="json")
+        self.assertEqual(result.status_code, 200)
+        self.client = APIClient()
+        self.client.cookies[COOKIE_NAME] = parse_qs(urlsplit(result.data["data"]["preview_url"]).fragment)["ticket"][0]
+        self.proxy = "/api/v1/koth/preview_sessions/game_proxy"
+        self.headers = {"HTTP_X_KOTH_PREVIEW_CHALLENGE": str(self.challenge.pk),
+                        "HTTP_X_KOTH_PREVIEW_ORIGIN": "https://game.example", "HTTP_X_KOTH_PREVIEW_URI": "/auth",
+                        "HTTP_X_KOTH_PREVIEW_METHOD": "GET", "HTTP_ORIGIN": "https://game.example"}
+
+    def bearer(self, user):
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION="Bearer " + issue_access_token(user))
+        return client
+
+    def issue(self, client=None):
+        return (client or self.api).get("/api/v1/koth/team_token", {"koth_challenge_id": str(self.challenge.pk)})
+
+    def verify(self, raw):
+        return APIClient().post("/internal/koth/team_tokens/verify", {
+            "koth_challenge_id": str(self.challenge.pk), "team_token": raw},
+            format="json", HTTP_X_INTERNAL_TOKEN="preview-token-internal").data["data"]
+
+    def login(self, raw, seen=None):
+        def native(request, challenge, uri, body):
+            if seen is not None:
+                seen.append(self.verify(raw))
+            response = HttpResponse(json.dumps({"data": {}}), content_type="application/json")
+            response.set_cookie("session", "preview-native-credential", httponly=True)
+            return response
+        with patch("apps.koth.preview_game._native_request", side_effect=native) as called:
+            response = self.client.post(self.proxy, {"team_token": raw}, format="json", **self.headers)
+        return response, called
+
+    def test_admin_without_team_gets_a_preview_token_only_before_release(self):
+        response = self.issue()
+        self.assertEqual(response.status_code, 200)
+        data = response.data["data"]
+        self.assertIs(data["preview"], True)
+        self.assertEqual(data["team_name"], "운영 테스트")
+        self.assertEqual(data["team_id"], str(preview_team_id(self.admin.pk)))
+        self.assertTrue(data["team_token"].startswith("koth_"))
+        self.assertIn("no-store", response["Cache-Control"])
+        self.assertEqual(self.issue().data["data"]["team_token"], data["team_token"])
+        # 실제 팀을 만들지 않아 순위표에 들어갈 팀이 생기지 않는다
+        self.assertFalse(Team.objects.exists())
+        self.assertEqual(KothPreviewToken.objects.get().token_hash, hash_token(data["team_token"]))
+
+        for status in ["ACTIVE", "CLOSED"]:
+            with self.subTest(status=status):
+                KothChallenge.objects.filter(pk=self.challenge.pk).update(status=status)
+                blocked = self.issue()
+                self.assertEqual((blocked.status_code, blocked.data["code"]), (409, "KOTH_PREVIEW_TOKEN_UNAVAILABLE"))
+        participant = User.objects.create_user(login_id="preview-token-player", nickname="player")
+        self.assertEqual(self.issue(self.bearer(participant)).data["code"], "USER_HAS_NO_TEAM")
+
+    def test_preview_token_passes_only_inside_the_game_test_login(self):
+        raw = self.issue().data["data"]["team_token"]
+        self.assertIs(self.verify(raw)["valid"], False)
+        seen = []
+        response, _ = self.login(raw, seen)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(seen, [{"valid": True, "team_id": str(preview_team_id(self.admin.pk)), "team_name": "운영 테스트",
+                                 "koth_division": "EXTERNAL", "koth_challenge_id": str(self.challenge.pk)}])
+        gate = {**self.headers, "HTTP_X_KOTH_PREVIEW_URI": "/state"}
+        self.assertEqual(self.client.get("/api/v1/koth/preview_sessions/game_authorize", **gate).status_code, 204)
+        self.assertIs(self.verify(raw)["valid"], False)
+
+        # 진행 중에는 로그인 허가가 남아 있어도 운영 테스트 토큰을 받아 주지 않는다
+        token = KothPreviewToken.objects.get()
+        key = KEY_PREFIX + "permit:" + str(self.challenge.pk) + ":" + token.token_hash
+        cache.set(key, {"challenge_id": str(self.challenge.pk), "token_hash": token.token_hash,
+                        "admin_id": str(self.admin.pk), "expires_at": time.time() + 10}, 12)
+        try:
+            KothChallenge.objects.filter(pk=self.challenge.pk).update(status="ACTIVE")
+            self.assertIs(self.verify(raw)["valid"], False)
+        finally:
+            cache.delete(key)
+
+    def test_other_admin_preview_token_and_reissue_cannot_open_my_game_session(self):
+        other = User.objects.create_user(login_id="preview-token-other", nickname="other", role="ADMIN")
+        foreign = self.issue(self.bearer(other)).data["data"]["team_token"]
+        response, called = self.login(foreign)
+        self.assertEqual(response.status_code, 401)
+        called.assert_not_called()
+
+        response, _ = self.login(self.issue().data["data"]["team_token"])
+        self.assertEqual(response.status_code, 200)
+        gate = {**self.headers, "HTTP_X_KOTH_PREVIEW_URI": "/state"}
+        self.assertEqual(self.client.get("/api/v1/koth/preview_sessions/game_authorize", **gate).status_code, 204)
+        from django.utils import timezone
+        KothPreviewToken.objects.filter(admin=self.admin).update(issued_at=timezone.now())
+        self.assertEqual(self.client.get("/api/v1/koth/preview_sessions/game_authorize", **gate).status_code, 401)

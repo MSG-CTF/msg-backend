@@ -257,6 +257,37 @@ class KothTeamToken(models.Model):
         ]
 
 
+class KothPreviewToken(models.Model):
+    # 팀이 없는 관리자가 공개 전 문제를 게임 테스트할 때만 쓰는 토큰이다.
+    # 실제 팀을 만들지 않아 순위표·점수에 들어가지 않고, 점수 응답에 이 팀 ID가 섞이면 뺀다.
+    # 관리자 계정이 지워져도 게임 기록에 남은 팀 ID를 계속 걸러야 해서 행은 남긴다
+    admin = models.ForeignKey(
+        "accounts.User",
+        on_delete=models.SET_NULL,
+        null=True,
+        db_column="admin_id",
+        related_name="koth_preview_tokens",
+    )
+    challenge = models.ForeignKey(
+        KothChallenge,
+        on_delete=models.CASCADE,
+        db_column="koth_challenge_id",
+        related_name="preview_tokens",
+    )
+    preview_team_id = models.UUIDField()
+    token_hash = models.CharField(max_length=64, unique=True)
+    issued_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "koth_preview_tokens"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["admin", "challenge"], name="uq_koth_preview_admin_challenge"
+            ),
+        ]
+        indexes = [models.Index(fields=["preview_team_id"])]
+
+
 class KothSolve(models.Model):
     solve_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     team = models.ForeignKey(
