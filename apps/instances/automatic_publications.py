@@ -54,8 +54,14 @@ def record_verified(artifact, workflow, payload):
 
 
 def execution_profile(release):
-    return (release.runtime_type, release.architecture, release.isolation_profile, release.healthcheck,
-            sorted((c.name, sorted((p["port"], p.get("public", False)) for p in c.ports)) for c in release.containers.all()))
+    # Legacy WEB/PWN DOCKER releases use the same Scheduler Kubernetes path.
+    runtime_type = release.runtime_type
+    if runtime_type == RuntimeType.DOCKER and release.isolation_profile in {"WEB", "PWN"}:
+        runtime_type = RuntimeType.KUBERNETES
+    # Runtime's reviewed per-image policy overrides exposed_ports on every create.
+    # Preserve the CI manifest; public-flag defaults cannot widen that policy.
+    return (runtime_type, release.architecture, release.isolation_profile, release.healthcheck or None,
+            sorted((c.name, sorted(p["port"] for p in c.ports)) for c in release.containers.all()))
 
 
 def carry_pending_intents(challenge, previous_release_id, current_release_id, previous_generation, generation, exclude=None):

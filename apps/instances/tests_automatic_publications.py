@@ -103,10 +103,18 @@ class AutomaticPublicationTests(TransactionTestCase):
         self.assertEqual(AutomaticPublication.objects.get().state, "HELD")
         self.config.refresh_from_db(); self.assertEqual(self.config.current_release_id, self.old.pk)
 
-    def test_changed_public_port_is_held(self):
-        self.new.containers.update(ports=[{"port": 8080, "public": False}])
+    def test_changed_port_number_is_held(self):
+        self.new.containers.update(ports=[{"port": 9090, "public": True}])
         record_verified(*self.evidence()); self.files(); process_automatic_publications()
         self.assertEqual(AutomaticPublication.objects.get().error_code, "EXECUTION_PROFILE_CHANGED")
+
+    def test_legacy_docker_and_runtime_owned_exposure_defaults_allow_same_execution_contract(self):
+        self.old.runtime_type="DOCKER";self.old.save()
+        self.old.containers.update(ports=[{"port":8080,"public":True},{"port":9090,"public":False}])
+        self.new.containers.update(ports=[{"port":8080,"public":True},{"port":9090,"public":True}])
+        self.files();record_verified(*self.evidence());process_automatic_publications()
+        self.assertEqual(AutomaticPublication.objects.get().state,"PREPARING")
+        self.new.refresh_from_db();self.assertTrue(self.new.containers.get().ports[1]["public"])
 
     def test_configuration_failure_rolls_back_approval_then_recovers_without_manual_approval(self):
         record_verified(*self.evidence()); self.files()

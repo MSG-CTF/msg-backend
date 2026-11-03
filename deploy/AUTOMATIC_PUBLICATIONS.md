@@ -14,6 +14,11 @@ request is not needed to move the pipeline forward. The same revision's
 participant-file record and repository environment must be complete. Empty
 participant-file publications are valid; present files need a stored object key.
 
+Legacy WEB/PWN DOCKER is the existing Scheduler Kubernetes alias. CI public-port
+defaults are not an operator privilege change: Runtime always replaces exposed
+ports with the reviewed image policy. The CI manifest remains unchanged. Actual
+port-number, isolation-profile, architecture or probe changes are still held.
+
 An existing reviewed Kubernetes execution profile is required. Port/profile or
 probe changes and missing environment are held for correction. The existing
 preparation outbox downloads the exact images onto every configured target.
