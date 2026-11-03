@@ -1,5 +1,6 @@
-"""Short-lived administrator access to scheduled games, verified by their gateway."""
+"""Time-bounded administrator access to scheduled games, verified by their gateway."""
 import logging
+import math
 import time
 from urllib.parse import urlencode, urlsplit
 from uuid import UUID, uuid4
@@ -22,6 +23,15 @@ logger = logging.getLogger(__name__)
 COOKIE_NAME = "__Host-msg_koth_preview"
 SALT = "msg-koth-admin-preview-v1"
 MAX_AGE = 300
+MAX_SESSION_AGE = 86400
+
+
+def preview_max_age():
+    return max(60, min(MAX_SESSION_AGE, settings.KOTH_ADMIN_PREVIEW_SECONDS))
+
+
+def preview_seconds_left(grant):
+    return max(0, math.ceil(grant["expires_at"] - time.time()))
 
 
 class PreviewAuthorizeThrottle(SimpleRateThrottle):
@@ -41,7 +51,7 @@ class PreviewAuthorizeThrottle(SimpleRateThrottle):
 def load_preview_ticket(token, challenge_id, origin):
     if not token or not isinstance(token, str) or len(token) > 2048:
         raise ValueError()
-    grant = signing.loads(token, salt=SALT, max_age=MAX_AGE)
+    grant = signing.loads(token, salt=SALT, max_age=preview_max_age())
     if not isinstance(grant, dict) or grant.get("v") != 1:
         raise ValueError()
     parsed_challenge = str(UUID(str(grant["challenge_id"])))
@@ -52,7 +62,11 @@ def load_preview_ticket(token, challenge_id, origin):
     if (challenge is None or preview_origin(challenge) != origin
             or not User.objects.filter(pk=user_id, role="ADMIN").exists()):
         raise ValueError()
-    expires_at = signing.b62_decode(token.rsplit(":", 2)[1]) + MAX_AGE
+    # A later configuration increase must not extend previously issued tickets.
+    max_age = grant.get("max_age", MAX_AGE)
+    if type(max_age) is not int or not 60 <= max_age <= MAX_SESSION_AGE:
+        raise ValueError()
+    expires_at = signing.b62_decode(token.rsplit(":", 2)[1]) + min(max_age, preview_max_age())
     if expires_at <= time.time():
         raise ValueError()
     return challenge, {**grant, "expires_at": expires_at}
@@ -86,15 +100,16 @@ def issue_preview(request, challenge_id):
     origin = preview_origin(challenge)
     if origin is None:
         return fail("KOTH_PREVIEW_UNAVAILABLE", "이 문제의 관리자 테스트 연결이 준비되지 않았습니다", 409)
+    max_age = preview_max_age()
     grant = signing.dumps({
         "v": 1, "user_id": str(request.user.pk), "challenge_id": str(challenge.pk),
-        "origin": origin, "nonce": uuid4().hex,
+        "origin": origin, "nonce": uuid4().hex, "max_age": max_age,
     }, salt=SALT, compress=True)
     logger.info("KOTH administrator preview issued", extra={
         "actor_id": str(request.user.pk), "koth_challenge_id": str(challenge.pk),
     })
     response = ok({"preview_url": origin + "/__operator/preview#" + urlencode({"ticket": grant}),
-                   "expires_in_seconds": MAX_AGE})
+                   "expires_in_seconds": max_age})
     response["Cache-Control"] = "no-store, private"
     response["Referrer-Policy"] = "no-referrer"
     return response
@@ -118,7 +133,7 @@ def authorize_preview(request):
         supplied = ""
     token = supplied or request.COOKIES.get(COOKIE_NAME, "")
     try:
-        challenge, _grant = load_preview_ticket(
+        challenge, grant = load_preview_ticket(
             token, request.headers.get("X-KOTH-Preview-Challenge"),
             request.headers.get("X-KOTH-Preview-Origin"))
     except (signing.BadSignature, KeyError, TypeError, ValueError):
@@ -126,7 +141,7 @@ def authorize_preview(request):
     response = HttpResponse(status=204)
     response["Cache-Control"] = "no-store, private"
     if supplied:
-        response.set_cookie(COOKIE_NAME, token, max_age=MAX_AGE, secure=True,
+        response.set_cookie(COOKIE_NAME, token, max_age=preview_seconds_left(grant), secure=True,
                             httponly=True, samesite="Lax", path="/")
         # A previous native login can redirect '/' to a protected page before
         # the player gets a chance to log in under the new preview grant.

@@ -1,3 +1,4 @@
+import time
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
@@ -7,7 +8,7 @@ from rest_framework.test import APIClient
 
 from apps.accounts.models import User
 from apps.common.jwt import issue_access_token
-from apps.koth.admin_preview import COOKIE_NAME, MAX_AGE, SALT
+from apps.koth.admin_preview import COOKIE_NAME, MAX_AGE, SALT, preview_max_age
 from apps.koth.models import KothChallenge, KothClub, KothScorePeriod, KothSolve
 
 
@@ -27,7 +28,7 @@ class AdminPreviewTests(TestCase):
     def grant(self):
         response = self.client.post(self.path, {}, format="json")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["data"]["expires_in_seconds"], 300)
+        self.assertEqual(response.data["data"]["expires_in_seconds"], preview_max_age())
         self.assertIn("no-store", response["Cache-Control"])
         url = urlsplit(response.data["data"]["preview_url"])
         self.assertEqual(url.query, "")
@@ -152,6 +153,56 @@ class AdminPreviewTests(TestCase):
         self.assertEqual(self.check(token+'x').status_code, 401)
         with patch("django.core.signing.time.time", return_value=__import__('time').time()+MAX_AGE+2):
             self.assertEqual(self.check(token).status_code, 401)
+
+    @override_settings(KOTH_ADMIN_PREVIEW_SECONDS=43200)
+    def test_long_test_session_survives_five_minutes_and_expires_at_its_deadline(self):
+        token = self.grant()
+        issued_at = signing.b62_decode(token.rsplit(":", 2)[1])
+        with patch("apps.koth.admin_preview.time.time", return_value=issued_at + 600):
+            response = self.check(token)
+            self.assertEqual(response.status_code, 204)
+            self.assertEqual(response.cookies[COOKIE_NAME]["max-age"], 42600)
+        with patch("apps.koth.admin_preview.time.time", return_value=issued_at + 43201):
+            self.assertEqual(self.check(token).status_code, 401)
+
+    def test_increasing_configuration_does_not_extend_an_existing_ticket(self):
+        token = self.grant()
+        issued_at = signing.b62_decode(token.rsplit(":", 2)[1])
+        with override_settings(KOTH_ADMIN_PREVIEW_SECONDS=43200):
+            with patch("apps.koth.admin_preview.time.time", return_value=issued_at + 301):
+                self.assertEqual(self.check(token).status_code, 401)
+
+    @override_settings(KOTH_ADMIN_PREVIEW_SECONDS=43200)
+    def test_lower_configuration_and_admin_removal_still_revoke_long_sessions(self):
+        token = self.grant()
+        issued_at = signing.b62_decode(token.rsplit(":", 2)[1])
+        with override_settings(KOTH_ADMIN_PREVIEW_SECONDS=300):
+            with patch("apps.koth.admin_preview.time.time", return_value=issued_at + 301):
+                self.assertEqual(self.check(token).status_code, 401)
+        self.admin.role = "PARTICIPANT"
+        self.admin.save(update_fields=["role"])
+        self.assertEqual(self.check(token).status_code, 401)
+
+    def test_legacy_ticket_keeps_its_original_five_minute_deadline(self):
+        grant = signing.loads(self.grant(), salt=SALT)
+        grant.pop("max_age")
+        token = signing.dumps(grant, salt=SALT, compress=True)
+        issued_at = signing.b62_decode(token.rsplit(":", 2)[1])
+        with override_settings(KOTH_ADMIN_PREVIEW_SECONDS=43200):
+            self.assertEqual(self.check(token).status_code, 204)
+            with patch("apps.koth.admin_preview.time.time", return_value=issued_at + 301):
+                self.assertEqual(self.check(token).status_code, 401)
+
+    def test_operator_duration_is_bounded_and_invalid_signed_lifetimes_are_rejected(self):
+        for configured, expected in ((0, 60), (-1, 60), (300, 300), (43200, 43200), (999999, 86400)):
+            with self.subTest(configured=configured), override_settings(KOTH_ADMIN_PREVIEW_SECONDS=configured):
+                response = self.client.post(self.path, {}, format="json")
+                self.assertEqual(response.data["data"]["expires_in_seconds"], expected)
+        grant = signing.loads(self.grant(), salt=SALT)
+        for value in (True, 0, 86401, "43200", None):
+            with self.subTest(value=value):
+                token = signing.dumps({**grant, "max_age": value}, salt=SALT)
+                self.assertEqual(self.check(token).status_code, 401)
 
     def test_new_status_new_origin_removed_admin_and_disabled_feature_revoke_grants(self):
         token=self.grant()

@@ -204,6 +204,36 @@ class PreviewGameTests(TestCase):
         KothTeamToken.objects.filter(pk=self.token.pk).update(issued_at=timezone.now())
         self.assertEqual(self.authorize_session().status_code, 401)
 
+    @override_settings(KOTH_ADMIN_PREVIEW_SECONDS=43200)
+    def test_long_native_session_keeps_the_ticket_deadline_and_checks_current_admin(self):
+        self.client.credentials(HTTP_AUTHORIZATION="Bearer " + issue_access_token(self.admin))
+        issued = self.client.post(f"/api/v1/admin/koth/challenges/{self.challenge.pk}/preview_sessions", {}, format="json")
+        ticket = parse_qs(urlsplit(issued.data["data"]["preview_url"]).fragment)["ticket"][0]
+        self.client.credentials()
+        self.client.cookies[COOKIE_NAME] = ticket
+        from django.core import signing
+
+        issued_at = signing.b62_decode(ticket.rsplit(":", 2)[1])
+        with patch("apps.koth.admin_preview.time.time", return_value=issued_at + 600):
+            response = self.login()
+            self.assertEqual(response.cookies[GAME_COOKIE]["max-age"], 42600)
+            self.assertEqual(self.authorize_session().status_code, 204)
+            self.admin.role = "PARTICIPANT"
+            self.admin.save(update_fields=["role"])
+            self.assertEqual(self.authorize_session().status_code, 401)
+
+    @override_settings(KOTH_ADMIN_PREVIEW_SECONDS=43200)
+    def test_native_login_does_not_extend_the_signed_ticket(self):
+        # setUp issued a five-minute ticket before this method's longer configuration.
+        from django.core import signing
+
+        issued_at = signing.b62_decode(self.client.cookies[COOKIE_NAME].value.rsplit(":", 2)[1])
+        with patch("apps.koth.admin_preview.time.time", return_value=issued_at + 250):
+            response = self.login()
+            self.assertEqual(response.cookies[GAME_COOKIE]["max-age"], 50)
+        with patch("apps.koth.admin_preview.time.time", return_value=issued_at + 301):
+            self.assertEqual(self.authorize_session().status_code, 401)
+
 
 @override_settings(KOTH_ADMIN_PREVIEW_ORIGINS=["https://game.example"])
 class AdminPreviewTokenTests(TestCase):
