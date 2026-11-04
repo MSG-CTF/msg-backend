@@ -10,7 +10,7 @@ import stat
 import subprocess
 import sys
 
-CENTRAL_REVISION = "bc0e58c40d7796c36e9856278f5a18789f6a92fd"
+CENTRAL_REVISION = "f0986f7e896235c58d54e967604740b7f7a2c5bd"
 ROOT = Path("/usr/local/lib/msgctf-backend-deploy")
 STATE = Path("/opt/msg-dev/deploy-state")
 PREFIX = "BACKEND_DEPLOYMENT_RESULT="

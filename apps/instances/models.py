@@ -122,6 +122,32 @@ class Instance(models.Model):
         return f"{self.instance_id} {self.status}"
 
 
+class ServiceKeyState(models.Model):
+    purpose = models.CharField(max_length=32, primary_key=True)
+    active_key_id = models.CharField(max_length=64)
+    generation = models.PositiveIntegerField(default=1)
+    activated_at = models.DateTimeField()
+
+    class Meta:
+        db_table = "service_key_states"
+
+
+class ServiceKeyRotation(models.Model):
+    rotation_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    purpose = models.CharField(max_length=32)
+    previous_key_id = models.CharField(max_length=64, blank=True)
+    active_key_id = models.CharField(max_length=64)
+    generation = models.PositiveIntegerField()
+    reencrypted_rows = models.PositiveIntegerField(default=0)
+    actor = models.CharField(max_length=100)
+    reason = models.CharField(max_length=250)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "service_key_rotations"
+        ordering = ["-created_at"]
+
+
 class InstanceLock(models.Model):
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL,
