@@ -57,6 +57,7 @@ class IdempotencyProcessRestartTests(TransactionTestCase):
             "DJANGO_SETTINGS_MODULE": "config.settings",
             "DJANGO_SECRET_KEY": settings.SECRET_KEY,
             "JWT_SECRET": settings.JWT_SECRET,
+            "KOTH_TEAM_TOKEN_SECRET": settings.KOTH_TEAM_TOKEN_SECRET,
         }
         result = subprocess.run(
             [sys.executable, "-m", "apps.board._idempotency_test_worker"],

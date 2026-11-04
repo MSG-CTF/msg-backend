@@ -1,0 +1,4 @@
+# Linux x86-64 example, loaded by an operator after checking the actual key path
+# Recheck/reload the rule after atomic replacement because path watches track inodes
+# Keep centralized audit retention separate from the application's rotation receipts
+-a always,exit -F arch=b64 -F path=/opt/msg-dev/.env -F perm=rwa -F key=msgctf_service_key_access

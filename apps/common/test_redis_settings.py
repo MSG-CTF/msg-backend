@@ -13,6 +13,7 @@ class RedisSettingsTests(TestCase):
         base = {
             "DJANGO_SECRET_KEY": "redis-settings-test-only",
             "JWT_SECRET": "redis-settings-test-only-separate-key",
+            "KOTH_TEAM_TOKEN_SECRET": "redis-settings-koth-independent-test-key",
         }
         with patch.dict(os.environ, base | environment, clear=True):
             with patch("dotenv.load_dotenv"), patch(

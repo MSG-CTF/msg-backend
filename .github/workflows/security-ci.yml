@@ -1,0 +1,435 @@
+# Based on MSG-CTF/jm_devsecops reusable-ci.yml at 71851553f5727d1c9d183d9680cbd52e25365417 (v3.3.1)
+# Local copy supplies the newly required independent key; scan gates and action pins are retained
+name: Reusable Django CI
+
+on:
+  workflow_call:
+    inputs:
+      python_version:
+        description: 테스트에 사용할 Python 버전
+        required: false
+        default: "3.12.14"
+        type: string
+      smoke_test_path:
+        description: 컨테이너가 시작됐는지 한 번 확인할 기존 Django HTTP 경로
+        required: false
+        default: /admin/login/
+        type: string
+      enforce_black:
+        description: Black 포맷 오류로 CI를 실패시킬지 여부
+        required: false
+        default: false
+        type: boolean
+
+env:
+  # msg-backend가 사용하는 이름과 기존 예제 프로젝트가 사용하는 이름을 함께 제공한다.
+  DJANGO_DEBUG: "False"
+  DJANGO_ALLOWED_HOSTS: example.com
+  DEBUG: "False"
+  ALLOWED_HOSTS: example.com
+  POSTGRES_DB: ctf_db_test
+  POSTGRES_USER: ctf_user
+  POSTGRES_PASSWORD: ctf_password_secure_123
+  POSTGRES_HOST: localhost
+  POSTGRES_PORT: "5432"
+  DATABASE_HOST: localhost
+  DATABASE_PORT: "5432"
+  REDIS_URL: redis://localhost:6379/0
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        fetch-depth: 0
+
+    - name: Gitleaks 시크릿 스캔
+      run: |
+        docker run --rm \
+          -v "${GITHUB_WORKSPACE}:/repo" \
+          ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
+          git \
+          --log-opts="--full-history --all --diff-filter=tuxdb -m" \
+          --redact \
+          --verbose \
+          /repo
+
+    - name: Trivy 파일시스템 취약점 차단 검사 (Critical, High)
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      with:
+        version: v0.74.0
+        scan-type: fs
+        scan-ref: .
+        scanners: vuln
+        severity: CRITICAL,HIGH
+        ignore-unfixed: false
+        exit-code: "1"
+
+    - name: Trivy 파일시스템 SARIF 생성 (수정본 없는 취약점 포함)
+      if: always()
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      with:
+        version: v0.74.0
+        scan-type: fs
+        scan-ref: .
+        scanners: vuln
+        severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+        ignore-unfixed: false
+        format: sarif
+        output: trivy-fs-results.sarif
+        exit-code: "0"
+
+    - name: Trivy SARIF 업로드
+      if: always()
+      continue-on-error: true
+      uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4
+      with:
+        sarif_file: trivy-fs-results.sarif
+        category: trivy-filesystem
+
+  sast-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Semgrep SAST 검사 및 SARIF 생성
+      id: semgrep
+      continue-on-error: true
+      run: |
+        docker run --rm \
+          --volume "${GITHUB_WORKSPACE}:/src:ro" \
+          --workdir /src \
+          semgrep/semgrep:1.173.0-nonroot@sha256:ae85c429145ef6b29c7a47b4cdec78304f9b325f75ce0ee4a797e841206e3e68 \
+          semgrep scan \
+          --config p/default \
+          --oss-only \
+          --metrics=off \
+          --disable-version-check \
+          --sarif . > semgrep-results.sarif
+
+        error_findings="$(
+          jq '[
+            .runs[] as $run
+            | $run.results[]?
+            | .ruleId as $rule_id
+            | $run.tool.driver.rules[]?
+            | select(
+                .id == $rule_id
+                and .defaultConfiguration.level == "error"
+              )
+          ] | length' semgrep-results.sarif
+        )"
+
+        if [ "$error_findings" -gt 0 ]; then
+          echo "Semgrep ERROR 심각도 발견 ${error_findings}건으로 CI를 실패시킵니다."
+          jq -r '
+            .runs[] as $run
+            | $run.results[]?
+            | . as $result
+            | .ruleId as $rule_id
+            | $run.tool.driver.rules[]?
+            | select(
+                .id == $rule_id
+                and .defaultConfiguration.level == "error"
+              )
+            | "- \($rule_id): \($result.locations[0].physicalLocation.artifactLocation.uri):\($result.locations[0].physicalLocation.region.startLine)"
+          ' semgrep-results.sarif
+          exit 1
+        fi
+
+        echo "Semgrep ERROR 심각도 발견이 없습니다."
+
+    - name: Semgrep SARIF 업로드
+      if: always()
+      continue-on-error: true
+      uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4
+      with:
+        sarif_file: semgrep-results.sarif
+        category: semgrep-sast
+
+    - name: Bandit용 Python 설정
+      if: always()
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      with:
+        python-version: ${{ inputs.python_version }}
+
+    - name: Bandit 설치
+      if: always()
+      run: |
+        python -m pip install --upgrade pip==26.2.1
+        python -m pip install bandit==1.9.4
+
+    - name: Bandit Python SAST 검사
+      id: bandit
+      if: always()
+      continue-on-error: true
+      run: |
+        bandit_exit=0
+        bandit -r . --format json --output bandit-results.json || bandit_exit="$?"
+
+        if [ "$bandit_exit" -gt 1 ]; then
+          echo "Bandit 실행 자체가 실패했습니다. exit=${bandit_exit}"
+          exit "$bandit_exit"
+        fi
+
+        total_findings="$(jq '.results | length' bandit-results.json)"
+        blocking_findings="$(
+          jq '[
+            .results[]
+            | select(
+                (.issue_severity == "MEDIUM" or .issue_severity == "HIGH")
+                and (.issue_confidence == "MEDIUM" or .issue_confidence == "HIGH")
+              )
+          ] | length' bandit-results.json
+        )"
+
+        echo "Bandit 전체 발견: ${total_findings}건"
+        echo "Bandit 차단 대상(MEDIUM/HIGH severity + MEDIUM/HIGH confidence): ${blocking_findings}건"
+
+        jq -r '
+          .results[]
+          | "- [\(.issue_severity)/\(.issue_confidence)] \(.test_id) \(.filename):\(.line_number) - \(.issue_text)"
+        ' bandit-results.json
+
+        if [ "$blocking_findings" -gt 0 ]; then
+          exit 1
+        fi
+
+    - name: SAST 최종 차단 결과
+      if: always()
+      env:
+        SEMGREP_OUTCOME: ${{ steps.semgrep.outcome }}
+        BANDIT_OUTCOME: ${{ steps.bandit.outcome }}
+      run: |
+        test "$SEMGREP_OUTCOME" = "success" || { echo "Semgrep 검사가 실패했습니다."; exit 1; }
+        test "$BANDIT_OUTCOME" = "success" || { echo "Bandit 검사가 실패했습니다."; exit 1; }
+
+  lint-and-test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        env:
+          POSTGRES_DB: ctf_db_test
+          POSTGRES_USER: ctf_user
+          POSTGRES_PASSWORD: ctf_password_secure_123
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7.2@sha256:cbbf906f1c3abe4959f4c2bed45706eae7f89802a8a9fe105f252032f4eb864a
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Generate independent service test keys
+      run: |
+        python3 - <<'PY'
+        import os
+        import secrets
+        with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as stream:
+            for name in ["DJANGO_SECRET_KEY", "JWT_SECRET", "KOTH_TEAM_TOKEN_SECRET"]:
+                value = secrets.token_urlsafe(48)
+                print("::add-mask::" + value)
+                stream.write(name + "=" + value + "\n")
+        PY
+
+    - name: 필수 Django 파일 확인
+      run: |
+        test -f manage.py || { echo "manage.py가 없습니다."; exit 1; }
+        test -f requirements.txt || { echo "requirements.txt가 없습니다."; exit 1; }
+
+    - name: Set up Python
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      with:
+        python-version: ${{ inputs.python_version }}
+        cache: pip
+
+    - name: 의존성과 CI 검사 도구 설치
+      run: |
+        python -m pip install --upgrade pip==26.2.1
+        python -m pip install -r requirements.txt
+        python -m pip install black==25.1.0 flake8==7.2.0 redis==8.0.1
+
+    - name: Black 포맷 보고서 (전환 기간에는 경고)
+      if: ${{ !inputs.enforce_black }}
+      continue-on-error: true
+      run: black --check .
+
+    - name: Black 포맷 병합 차단
+      if: ${{ inputs.enforce_black }}
+      run: black --check .
+
+    - name: Flake8 치명적 오류 검사
+      run: flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+
+    - name: PostgreSQL 실제 연결과 쿼리 확인
+      run: >-
+        python manage.py shell -c
+        "from django.db import connection;
+        cursor = connection.cursor();
+        cursor.execute('SELECT 1');
+        assert cursor.fetchone()[0] == 1;
+        cursor.close()"
+
+    - name: 누락된 migration 확인
+      run: python manage.py makemigrations --check --dry-run
+
+    - name: migration 실제 적용
+      run: python manage.py migrate --noinput
+
+    - name: Redis 저장과 조회 확인
+      run: |
+        python -c "import redis; client = redis.Redis.from_url('${REDIS_URL}'); client.set('ci:ping', 'pong', ex=60); assert client.get('ci:ping') == b'pong'; client.delete('ci:ping')"
+        if grep -Eq '^django-redis([=<>~!]|$)' requirements.txt; then
+          python manage.py shell -c "from django.core.cache import cache; cache.set('ci:django-cache', 'pong', 60); assert cache.get('ci:django-cache') == 'pong'; cache.delete('ci:django-cache')"
+        fi
+
+    - name: Django 테스트 실행 및 0개 테스트 방지
+      shell: bash
+      env:
+        # 기존 API 테스트는 HTTP test client를 사용한다. HTTPS 강제 여부는 아래 deploy check에서 별도로 검사한다.
+        DJANGO_DEBUG: "True"
+        DEBUG: "True"
+      run: |
+        set -o pipefail
+        python manage.py test --verbosity 2 2>&1 | tee "${RUNNER_TEMP}/django-tests.log"
+        if ! grep -Eq 'Ran [1-9][0-9]* tests?' "${RUNNER_TEMP}/django-tests.log"; then
+          echo "실행된 테스트가 0개이거나 테스트 수를 확인할 수 없습니다."
+          exit 1
+        fi
+
+    - name: Django 배포 보안 점검
+      env:
+        DJANGO_DEBUG: "False"
+        DEBUG: "False"
+      run: python manage.py check --deploy --fail-level WARNING
+
+  docker-build-check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Dockerfile 필수 확인
+      run: test -f Dockerfile || { echo "루트 Dockerfile이 없습니다."; exit 1; }
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+    - name: 테스트 이미지 빌드
+      run: docker build . --file Dockerfile --tag ctf-backend:test
+
+    - name: 비루트 사용자 확인
+      run: |
+        container_user="$(docker image inspect ctf-backend:test --format '{{.Config.User}}')"
+        if [ -z "$container_user" ] || [ "$container_user" = "0" ] || [ "$container_user" = "root" ]; then
+          echo "컨테이너가 root 사용자로 실행되도록 설정되어 있습니다."
+          exit 1
+        fi
+
+    - name: Generate independent service test keys
+      run: |
+        python3 - <<'PY'
+        import os
+        import secrets
+        with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as stream:
+            for name in ["DJANGO_SECRET_KEY", "JWT_SECRET", "KOTH_TEAM_TOKEN_SECRET"]:
+                value = secrets.token_urlsafe(48)
+                print("::add-mask::" + value)
+                stream.write(name + "=" + value + "\n")
+        PY
+
+    - name: 기존 Django 경로로 컨테이너 시작 확인
+      env:
+        SMOKE_TEST_PATH: ${{ inputs.smoke_test_path }}
+      run: |
+        docker run --detach --name ctf-backend-ci \
+          --publish 127.0.0.1:18080:8080 \
+          --env PORT=8080 \
+          --env DJANGO_SECRET_KEY \
+          --env DJANGO_DEBUG=False \
+          --env DJANGO_ALLOWED_HOSTS=example.com \
+          --env JWT_SECRET \
+          --env KOTH_TEAM_TOKEN_SECRET \
+          --env DEBUG=False \
+          --env ALLOWED_HOSTS=example.com \
+          ctf-backend:test
+
+        for _attempt in {1..20}; do
+          if curl --fail --silent --show-error \
+            --output /dev/null \
+            --header 'Host: example.com' \
+            --header 'X-Forwarded-Proto: https' \
+            "http://127.0.0.1:18080${SMOKE_TEST_PATH}"; then
+            exit 0
+          fi
+          sleep 2
+        done
+
+        docker logs ctf-backend-ci
+        exit 1
+
+    - name: 테스트 컨테이너 정리
+      if: always()
+      run: docker rm --force ctf-backend-ci 2>/dev/null || true
+
+    - name: Trivy 이미지 취약점/시크릿 차단 검사 (Critical, High)
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      with:
+        version: v0.74.0
+        image-ref: ctf-backend:test
+        scanners: vuln,secret
+        severity: CRITICAL,HIGH
+        ignore-unfixed: false
+        exit-code: "1"
+
+    - name: Trivy 이미지 SARIF 생성 (수정본 없는 취약점 포함)
+      if: always()
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      with:
+        version: v0.74.0
+        image-ref: ctf-backend:test
+        scanners: vuln,secret
+        severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+        ignore-unfixed: false
+        format: sarif
+        output: trivy-image-results.sarif
+        exit-code: "0"
+
+    - name: Trivy 이미지 SARIF 업로드
+      if: always()
+      continue-on-error: true
+      uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4
+      with:
+        sarif_file: trivy-image-results.sarif
+        category: trivy-image

@@ -20,6 +20,7 @@ class DatastoreTlsSettingsTests(TestCase):
         self.environment = {
             "DJANGO_SECRET_KEY": "tls-settings-test-only",
             "JWT_SECRET": "tls-settings-test-only-separate-key",
+            "KOTH_TEAM_TOKEN_SECRET": "tls-settings-koth-independent-test-key",
         }
 
     def load_settings(self, **environment):

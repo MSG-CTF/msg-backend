@@ -106,6 +106,12 @@ class KothPreviewTokenUnavailable(APIError):
     message = "운영 테스트 토큰은 공개 전 문제의 게임 테스트에서만 받을 수 있습니다"
 
 
+class KothTokenKeyUnavailable(APIError):
+    status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    code = "KOTH_TOKEN_KEY_UNAVAILABLE"
+    message = "팀 토큰 키의 적용 상태를 확인할 수 없습니다 잠시 후 다시 시도해 주세요"
+
+
 class InvalidRequest(APIError):
     pass
 
