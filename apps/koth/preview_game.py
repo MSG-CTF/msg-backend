@@ -158,6 +158,7 @@ def _authorize(request, challenge, grant, profile, uri, body=b""):
     sid = request.COOKIES.get(GAME_COOKIE)
     key = _session_key(sid)
     stored = _get(key)
+    bound = profile.cookie
     if profile.kind == "cookie" and profile.cookie_aliases:
         # Bind the exact cookie returned by login. Mixed credentials must never
         # authorize one team while the native app reads another cookie name.
@@ -170,11 +171,19 @@ def _authorize(request, challenge, grant, profile, uri, body=b""):
         credential = request.COOKIES[bound]
     else:
         credential = _credential(request, profile, uri, body)
+    credential_hash = ""
+    if isinstance(stored, dict) and credential:
+        try:
+            credential_hash = _native_hash(challenge, profile, bound if profile.cookie_aliases else profile.cookie,
+                                           credential, stored.get("team_id"))
+        except ValueError:
+            _delete(key)
+            raise PreviewDenied() from None
     valid = (isinstance(stored, dict) and credential
              and stored.get("challenge_id") == str(challenge.pk)
              and stored.get("admin_id") == grant["user_id"]
              and stored.get("preview_nonce") == grant["nonce"]
-             and secrets.compare_digest(stored.get("native_hash", ""), hash_token(credential)))
+             and secrets.compare_digest(stored.get("native_hash", ""), credential_hash))
     if valid and stored.get("preview"):
         current = KothPreviewToken.objects.filter(
             pk=stored.get("token_id"), challenge=challenge, admin_id=grant["user_id"],
@@ -193,6 +202,13 @@ def _authorize(request, challenge, grant, profile, uri, body=b""):
         _delete(key)
         raise PreviewDenied()
     return stored
+
+
+def _native_hash(challenge, profile, name, credential, team_id):
+    if profile.cookie == "jenga_session" and name == "jenga_session":
+        from .jenga_preview_cookie import credential_hash
+        return credential_hash(challenge, credential, team_id)
+    return hash_token(credential)
 
 
 def permits_token_verification(challenge, token, owner_id=None):
@@ -313,7 +329,8 @@ def _native_login(request, challenge, grant, profile, uri, body):
               "token_issued_at": subject.issued_at.isoformat(),
               "team_version": token.team.updated_at.isoformat() if token else "",
               "preview": preview is not None,
-              "native_hash": hash_token(credential)}
+              "native_hash": _native_hash(challenge, profile, native_cookie_name, credential,
+                                          str(token.team_id) if token else str(preview.preview_team_id))}
     if native_cookie_name:
         stored["native_cookie_name"] = native_cookie_name
     remaining = preview_seconds_left(grant)
