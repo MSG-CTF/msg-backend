@@ -50,8 +50,7 @@ def restore_sql(compressed):
                 name=name[1:-1].replace('""','"')
             if name=='postgres':
                 continue
-            quoted='"'+name.replace('"','""')+'"'
-            execute(['docker','exec',container,'psql','-X','-v','ON_ERROR_STOP=1','-U','postgres','tc622_restore','-c','CREATE ROLE '+quoted+' NOLOGIN'])
+            execute(['docker','exec',container,'createuser','-U','postgres','--no-login','--',name])
         execute(['docker','exec','-i',container,'psql','-X','-v','ON_ERROR_STOP=1','-U','postgres','tc622_restore'],sql,timeout=100)
         count=int(execute(['docker','exec',container,'psql','-X','-A','-t','-U','postgres','tc622_restore','-c','SELECT count(*) FROM challenge_runtime_secrets']).strip())
         ciphertexts=execute(['docker','exec',container,'psql','-X','-A','-t','-U','postgres','tc622_restore','-c','SELECT encrypted_value FROM challenge_runtime_secrets']).splitlines()

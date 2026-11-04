@@ -20,7 +20,8 @@ def hydrate(payload, destination, group_id):
     parent = destination.parent
     parent.mkdir(mode=0o710, parents=True, exist_ok=True)
     os.chown(parent, 0, group_id)
-    os.chmod(parent, 0o710)
+    # Only root can list/write; the application group may traverse to its file.
+    os.chmod(parent, stat.S_IRWXU | stat.S_IXGRP)
     descriptor, temporary = tempfile.mkstemp(prefix=".service-keys-", dir=parent)
     try:
         os.fchmod(descriptor, 0o640)
