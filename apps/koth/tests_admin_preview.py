@@ -72,6 +72,7 @@ class AdminPreviewTests(TestCase):
         for slug, native_cookie in (
             ("koth-swanopoly", "swan_sid"),
             ("koth-jenga", "session"),
+            ("koth-jenga", "jenga_session"),
             ("koth-grand-tour-duel", "koth_duel_session"),
         ):
             with self.subTest(slug=slug):

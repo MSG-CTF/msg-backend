@@ -95,6 +95,36 @@ class PreviewGameTests(TestCase):
         self.login()
         self.assertEqual(self.authorize_session().status_code, 204)
 
+    def test_latest_jenga_cookie_is_bound_and_legacy_cookie_is_cleared(self):
+        def latest_response(*args):
+            response = self.native_response(*args)
+            value = response.cookies.pop("session").value
+            response.set_cookie("jenga_session", value, httponly=True)
+            return response
+        self.client.cookies["session"] = "stale-legacy-cookie"
+        with patch("apps.koth.preview_game._native_request", side_effect=latest_response):
+            response = self.client.post(self.proxy, {"team_token": "native-qa-token"}, format="json", **self.headers())
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.cookies["session"]["max-age"], 0)
+        self.assertEqual(self.authorize_session().status_code, 204)
+
+    def test_mixed_jenga_cookie_names_revoke_the_bound_preview_session(self):
+        self.login()
+        self.client.cookies["jenga_session"] = "another-team-cookie"
+        self.assertEqual(self.authorize_session().status_code, 401)
+        del self.client.cookies["jenga_session"]
+        self.assertEqual(self.authorize_session().status_code, 401)
+
+    def test_ambiguous_jenga_login_response_does_not_issue_a_preview_capability(self):
+        def ambiguous_response(*args):
+            response = self.native_response(*args)
+            response.set_cookie("jenga_session", "another-team-cookie", httponly=True)
+            return response
+        with patch("apps.koth.preview_game._native_request", side_effect=ambiguous_response):
+            response = self.client.post(self.proxy, {"team_token": "native-qa-token"}, format="json", **self.headers())
+        self.assertEqual(response.status_code, 502)
+        self.assertNotIn(GAME_COOKIE, response.cookies)
+
     def test_token_revocation_does_not_revive_old_session_when_hash_is_restored(self):
         self.login()
         self.token.token_hash = hash_token("revoked-qa"); self.token.save(update_fields=["token_hash"])
