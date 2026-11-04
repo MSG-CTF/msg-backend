@@ -1,7 +1,14 @@
 import json
+import hashlib
+import hmac
+import secrets
 import time
+import uuid
 from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch
+
+from cryptography.fernet import Fernet
+from itsdangerous import URLSafeTimedSerializer
 
 from django.core.cache import cache
 from django.http import HttpResponse
@@ -11,12 +18,14 @@ from rest_framework.test import APIClient
 from apps.accounts.models import Team, User
 from apps.common.jwt import hash_token, issue_access_token
 from .admin_preview import COOKIE_NAME
-from .models import KothChallenge, KothClub, KothPreviewToken, KothTeamToken
+from .models import KothChallenge, KothClub, KothPreviewToken, KothTeamToken, KothEnvironmentConfig
+from .environment import create_version
 from .preview_game import GAME_COOKIE, KEY_PREFIX, _session_key, permits_token_verification
 from .tokens import preview_team_id
 
 
-@override_settings(KOTH_ADMIN_PREVIEW_ORIGINS=["https://game.example"])
+@override_settings(KOTH_ADMIN_PREVIEW_ORIGINS=["https://game.example"],
+                   RUNTIME_SECRET_ENCRYPTION_KEYS=[Fernet.generate_key().decode()])
 class PreviewGameTests(TestCase):
     def setUp(self):
         self.team = Team.objects.create(team_name="preview-game-team")
@@ -61,6 +70,39 @@ class PreviewGameTests(TestCase):
     def authorize_session(self):
         return self.client.get(self.authorize, **self.headers("/state"))
 
+    def latest_cookie(self, timestamp=None, secret=None, **changes):
+        if not hasattr(self, "jenga_key"):
+            self.jenga_key = secrets.token_urlsafe(40)
+            self.challenge.source_revision = "e" * 40
+            self.challenge.save(update_fields=["source_revision"])
+            def entry(value, kind):
+                return {"value": value, "kind": kind, "required": True, "locked": True, "operator_override": True}
+            settings = {"containers": [{"name": "jenga", "image": "ghcr.io/msg-ctf/challenges/koth-jenga/jenga@sha256:" + "a" * 64,
+                "entries": {"SESSION_SECRET": entry(self.jenga_key, "secret"),
+                            "KOTH_MATCH_ID": entry("preview-match", "env"),
+                            "SESSION_EPOCH": entry("preview-epoch", "env")}}]}
+            self.jenga_version = create_version(self.challenge, settings, self.challenge.source_revision,
+                                                 "test", uuid.uuid4(), "a" * 64)
+            KothEnvironmentConfig.objects.create(challenge=self.challenge, target_id="test", state="READY", applied_version=self.jenga_version)
+        payload = {"team_id": str(self.team.pk), "team_name": self.team.team_name, "match_id": "preview-match", "generation": 1,
+                   "_permanent": True, "marker": hmac.new(self.jenga_key.encode(), b"preview-match:preview-epoch", hashlib.sha256).hexdigest()}
+        payload.update(changes)
+        serializer = URLSafeTimedSerializer(secret or self.jenga_key, salt="cookie-session", serializer=json,
+            signer_kwargs={"key_derivation": "hmac"})
+        with patch("itsdangerous.timed.time.time", return_value=timestamp or int(time.time())):
+            return serializer.dumps(payload)
+
+    def login_latest(self, cookie=None):
+        value = cookie or self.latest_cookie(timestamp=int(time.time()) - 2)
+        def response(*args):
+            result = self.native_response(*args)
+            result.cookies.pop("session")
+            result.set_cookie("jenga_session", value, httponly=True)
+            return result
+        with patch("apps.koth.preview_game._native_request", side_effect=response):
+            result = self.client.post(self.proxy, {"team_token": "native-qa-token"}, format="json", **self.headers())
+        return result
+
     def test_native_login_permit_lasts_only_for_the_authorized_call(self):
         self.assertFalse(permits_token_verification(self.challenge, self.token))
         response = self.login()
@@ -96,9 +138,10 @@ class PreviewGameTests(TestCase):
         self.assertEqual(self.authorize_session().status_code, 204)
 
     def test_latest_jenga_cookie_is_bound_and_legacy_cookie_is_cleared(self):
+        value = self.latest_cookie()
         def latest_response(*args):
             response = self.native_response(*args)
-            value = response.cookies.pop("session").value
+            response.cookies.pop("session")
             response.set_cookie("jenga_session", value, httponly=True)
             return response
         self.client.cookies["session"] = "stale-legacy-cookie"
@@ -107,6 +150,65 @@ class PreviewGameTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.cookies["session"]["max-age"], 0)
         self.assertEqual(self.authorize_session().status_code, 204)
+
+    def test_signed_cookie_refresh_and_out_of_order_responses_keep_the_same_authority(self):
+        first = self.latest_cookie(timestamp=int(time.time()) - 2)
+        second = self.latest_cookie()
+        self.assertNotEqual(first, second)
+        self.assertEqual(self.login_latest(first).status_code, 200)
+        for value in [first, second, first, second]:
+            self.client.cookies["jenga_session"] = value
+            self.assertEqual(self.authorize_session().status_code, 204)
+
+    def test_invalid_signature_revokes_the_binding_even_after_valid_cookie_is_restored(self):
+        valid = self.latest_cookie()
+        self.assertEqual(self.login_latest(valid).status_code, 200)
+        self.client.cookies["jenga_session"] = self.latest_cookie(secret=secrets.token_urlsafe(40))
+        self.assertEqual(self.authorize_session().status_code, 401)
+        self.client.cookies["jenga_session"] = valid
+        self.assertEqual(self.authorize_session().status_code, 401)
+
+    def test_validly_signed_wrong_team_match_generation_and_marker_are_rejected(self):
+        changes = [{"team_id": str(uuid.uuid4())}, {"match_id": "other-match"}, {"generation": 2},
+                   {"generation": True}, {"marker": "0" * 64}, {"_permanent": False}]
+        for change in changes:
+            with self.subTest(change=change):
+                self.assertEqual(self.login_latest().status_code, 200)
+                self.client.cookies["jenga_session"] = self.latest_cookie(**change)
+                self.assertEqual(self.authorize_session().status_code, 401)
+
+    def test_expired_native_signature_is_rejected_inside_a_fresh_preview(self):
+        self.assertEqual(self.login_latest().status_code, 200)
+        self.client.cookies["jenga_session"] = self.latest_cookie(timestamp=int(time.time()) - 43201)
+        self.assertEqual(self.authorize_session().status_code, 401)
+
+    def test_an_existing_raw_cookie_hash_binding_requires_a_new_login(self):
+        value = self.latest_cookie()
+        result = self.login_latest(value)
+        self.assertEqual(result.status_code, 200)
+        key = _session_key(result.cookies[GAME_COOKIE].value)
+        stored = cache.get(key);stored["native_hash"] = hash_token(value);cache.set(key, stored, 300)
+        self.assertEqual(self.authorize_session().status_code, 401)
+
+    def test_signed_session_without_a_managed_signing_key_cannot_issue_a_binding(self):
+        self.assertEqual(self.login_latest("untrusted-cookie-value").status_code, 502)
+        self.assertNotIn(GAME_COOKIE, self.client.cookies)
+
+    def test_signed_session_binding_still_checks_administrator_role_after_cookie_refresh(self):
+        self.assertEqual(self.login_latest().status_code, 200)
+        self.client.cookies["jenga_session"] = self.latest_cookie()
+        self.admin.role = "PARTICIPANT";self.admin.save(update_fields=["role"])
+        self.assertEqual(self.authorize_session().status_code, 401)
+        self.admin.role = "ADMIN";self.admin.save(update_fields=["role"])
+        self.assertEqual(self.authorize_session().status_code, 401)
+
+    def test_refreshed_signed_session_cannot_survive_token_revocation(self):
+        self.assertEqual(self.login_latest().status_code, 200)
+        self.client.cookies["jenga_session"] = self.latest_cookie()
+        self.token.token_hash = hash_token("revoked-current-token");self.token.save(update_fields=["token_hash"])
+        self.assertEqual(self.authorize_session().status_code, 401)
+        self.token.token_hash = hash_token("native-qa-token");self.token.save(update_fields=["token_hash"])
+        self.assertEqual(self.authorize_session().status_code, 401)
 
     def test_mixed_jenga_cookie_names_revoke_the_bound_preview_session(self):
         self.login()
