@@ -1,3 +1,4 @@
+from apps.koth._key_test_support import initialize_token_key
 import json
 import hashlib
 import hmac
@@ -22,6 +23,7 @@ from .admin_preview import COOKIE_NAME
 from .models import KothChallenge, KothClub, KothPreviewToken, KothTeamToken, KothEnvironmentConfig
 from .environment import create_version
 from .preview_game import GAME_COOKIE, KEY_PREFIX, _session_key, permits_token_verification
+from .token_keys import activate_key
 from .tokens import build_team_token, preview_team_id
 
 
@@ -29,6 +31,7 @@ from .tokens import build_team_token, preview_team_id
                    RUNTIME_SECRET_ENCRYPTION_KEYS=[Fernet.generate_key().decode()])
 class PreviewGameTests(TestCase):
     def setUp(self):
+        initialize_token_key()
         self.team = Team.objects.create(team_name="preview-game-team")
         self.admin = User.objects.create_user(login_id="preview-game-admin", nickname="admin", role="ADMIN", team=self.team)
         self.challenge = KothChallenge.objects.create(
@@ -36,7 +39,7 @@ class PreviewGameTests(TestCase):
             repository_slug="koth-jenga", challenge_url="https://game.example", status="SCHEDULED",
             open_group=1, inbound_internal_token_hash=hash_token("preview-native-internal"))
         self.raw_token = build_team_token(self.team.pk, self.challenge.pk)
-        self.token = KothTeamToken.objects.create(team=self.team, challenge=self.challenge, token_hash=hash_token(self.raw_token))
+        self.token = KothTeamToken.objects.create(team=self.team, challenge=self.challenge, token_hash=hash_token(self.raw_token), key_version=1)
         self.client = APIClient()
         self.client.credentials(HTTP_AUTHORIZATION="Bearer " + issue_access_token(self.admin))
         result = self.client.post(f"/api/v1/admin/koth/challenges/{self.challenge.pk}/preview_sessions", {}, format="json")
@@ -119,11 +122,12 @@ class PreviewGameTests(TestCase):
             format="json", HTTP_X_INTERNAL_TOKEN="preview-native-internal")
         self.assertIs(verify.data["data"]["valid"], False)
 
-    def test_service_key_rotation_rejects_an_existing_native_session(self):
+    def test_unregistered_service_key_refuses_an_existing_native_session(self):
         self.login()
         self.assertEqual(self.authorize_session().status_code, 204)
         with override_settings(KOTH_TEAM_TOKEN_SECRET=secrets.token_urlsafe(48)):
-            self.assertEqual(self.authorize_session().status_code, 401)
+            response = self.authorize_session()
+            self.assertEqual((response.status_code, response.data["code"]), (503, "KOTH_TOKEN_KEY_UNAVAILABLE"))
 
     def test_native_callback_does_not_hold_service_key_authority_lock(self):
         from apps.common.key_lifecycle import active_service_key
@@ -396,11 +400,31 @@ class PreviewGameTests(TestCase):
             self.assertEqual(self.authorize_session().status_code, 401)
 
 
+    def test_key_rotation_revokes_an_existing_native_preview_binding(self):
+        self.login()
+        with override_settings(KOTH_TEAM_TOKEN_SECRET=secrets.token_urlsafe(48)):
+            activate_key(actor="operator", reason="revoke native preview", expected_version=1, operation_id=uuid.uuid4())
+            response = self.authorize_session()
+        self.assertEqual(response.status_code, 401)
+
+    def test_rotation_during_native_login_cannot_issue_a_proxy_binding(self):
+        def native(request, challenge, uri, body):
+            response = self.native_response(request, challenge, uri, body)
+            with override_settings(KOTH_TEAM_TOKEN_SECRET=secrets.token_urlsafe(48)):
+                activate_key(actor="operator", reason="in-flight login rotation", expected_version=1, operation_id=uuid.uuid4())
+            return response
+        with patch("apps.koth.preview_game._native_request", side_effect=native):
+            response = self.client.post(self.proxy, {"team_token": self.raw_token}, format="json", **self.headers())
+        self.assertEqual((response.status_code, response.data["code"]), (503, "KOTH_TOKEN_KEY_UNAVAILABLE"))
+        self.assertNotIn(GAME_COOKIE, response.cookies)
+
+
 @override_settings(KOTH_ADMIN_PREVIEW_ORIGINS=["https://game.example"])
 class AdminPreviewTokenTests(TestCase):
     """팀이 없는 관리자는 공개 전 게임 테스트에서만 쓰는 운영 테스트 토큰을 받는다."""
 
     def setUp(self):
+        initialize_token_key()
         self.admin = User.objects.create_user(login_id="preview-token-admin", nickname="admin", role="ADMIN")
         self.challenge = KothChallenge.objects.create(
             club=KothClub.objects.create(name="Preview token QA"), title="Token QA",

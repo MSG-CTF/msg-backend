@@ -1,3 +1,4 @@
+from apps.koth._key_test_support import initialize_token_key
 import json
 
 from django.test import TestCase
@@ -17,6 +18,7 @@ from apps.koth.models import (
 
 class VerifyTeamTokenInputTests(TestCase):
     def setUp(self):
+        initialize_token_key()
         self.client = APIClient()
         self.team = Team.objects.create(team_name="verify-input-qa")
         self.challenge = KothChallenge.objects.create(
@@ -32,6 +34,7 @@ class VerifyTeamTokenInputTests(TestCase):
             team=self.team,
             challenge=self.challenge,
             token_hash=hash_token(self.raw_token),
+            key_version=1,
         )
 
     def post_json(self, payload, internal=None):

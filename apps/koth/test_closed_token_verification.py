@@ -1,3 +1,4 @@
+from apps.koth._key_test_support import initialize_token_key
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -8,6 +9,9 @@ from apps.koth.models import KothChallenge, KothClub
 
 
 class ClosedChallengeTokenTests(TestCase):
+    def setUp(self):
+        initialize_token_key()
+
     def test_team_token_is_accepted_only_while_challenge_is_active(self):
         team = Team.objects.create(team_name="qa-closed-token")
         User.objects.create_user(

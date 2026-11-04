@@ -138,7 +138,9 @@ Status Code: 200, 401
 
 ## GET /api/v1/koth/team_token
 
-Authorization: Bearer JWT 필요. 같은 팀의 모든 구성원은 같은 team_token을 받는다.
+Authorization: Bearer JWT 필요. koth_challenge_id UUID query가 필수이며 같은 팀·문제의 모든 구성원은 같은 team_token을 받는다.
+
+서비스 키 등록·교체는 docs/service-key-rotation.md를 따르며 키 상태를 확인할 수 없으면 503 KOTH_TOKEN_KEY_UNAVAILABLE을 반환한다.
 
 ### Response
 
@@ -160,6 +162,8 @@ Status Code: 200, 401, 404
 ## POST /internal/koth/team_tokens/verify
 
 문제 서버 전용 API. Header X-Internal-Token 필요.
+
+이전 키 버전의 토큰은 팀 재조회 전에도 valid false이며 이전 키 작업자는 503 KOTH_TOKEN_KEY_UNAVAILABLE을 반환한다. 현재 키 계약은 docs/koth-team-token-key.openapi.json을 따른다.
 
 ### Request
 

@@ -1,3 +1,5 @@
+import uuid
+from apps.koth.token_keys import activate_key
 from datetime import timedelta
 from unittest.mock import patch
 
@@ -127,6 +129,7 @@ class RemainingKothQA(TestCase):
             issued_at=timezone.now() - timedelta(days=400)
         )
         with override_settings(KOTH_TEAM_TOKEN_SECRET="qa-replacement-secret"):
+            activate_key(actor="qa-operator", reason="rotation regression", expected_version=1, operation_id=uuid.uuid4())
             second = self.client.get(token_path).data["data"]
         self.assertNotEqual(first["team_token"], second["team_token"])
         stored = KothTeamToken.objects.get(team=self.team, challenge=self.challenge)

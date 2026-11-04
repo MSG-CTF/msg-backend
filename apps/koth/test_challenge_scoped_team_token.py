@@ -1,3 +1,4 @@
+from apps.koth._key_test_support import initialize_token_key
 import uuid
 
 from django.test import TestCase
@@ -12,6 +13,7 @@ from apps.koth.tokens import build_team_token
 
 class ChallengeScopedTeamTokenTests(TestCase):
     def setUp(self):
+        initialize_token_key()
         team = Team.objects.create(team_name="qa-scoped-token")
         User.objects.create_user(
             login_id="qa-scoped-user",

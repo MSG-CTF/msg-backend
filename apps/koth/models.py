@@ -2,6 +2,7 @@ import uuid
 
 from django.core.validators import RegexValidator, URLValidator
 from django.db import models
+from django.utils import timezone
 
 
 class KothChallengeStatus(models.TextChoices):
@@ -230,6 +231,44 @@ class KothPublication(models.Model):
         constraints = [models.UniqueConstraint(fields=["challenge", "registry_revision"], name="uq_koth_publication_revision")]
 
 
+class KothTokenKeyState(models.Model):
+    """One database-owned generation; a stale worker may never advance it."""
+
+    singleton = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
+    version = models.PositiveBigIntegerField(default=0)
+    fingerprint = models.CharField(max_length=64, blank=True, default="")
+
+    class Meta:
+        db_table = "koth_token_key_state"
+        constraints = [
+            models.CheckConstraint(condition=models.Q(singleton=1), name="ck_koth_key_singleton"),
+        ]
+
+
+class KothTokenKeyRotation(models.Model):
+    """Append-only operation receipt; key material is never stored here."""
+
+    operation_id = models.UUIDField(primary_key=True, editable=False)
+    version = models.PositiveBigIntegerField(unique=True)
+    fingerprint = models.CharField(max_length=64, unique=True)
+    previous_version = models.PositiveBigIntegerField()
+    actor = models.CharField(max_length=50)
+    reason = models.CharField(max_length=500)
+    activated_at = models.DateTimeField(default=timezone.now, editable=False)
+    team_token_count = models.PositiveIntegerField()
+    preview_token_count = models.PositiveIntegerField()
+    adopted_team_token_count = models.PositiveIntegerField(default=0)
+    adopted_preview_token_count = models.PositiveIntegerField(default=0)
+    audit_event = models.OneToOneField("adminpanel.AdminEvent", on_delete=models.PROTECT)
+
+    class Meta:
+        db_table = "koth_token_key_rotations"
+        ordering = ["-version"]
+        constraints = [
+            models.CheckConstraint(condition=models.Q(version__gte=1), name="ck_koth_key_positive_version"),
+        ]
+
+
 class KothTeamToken(models.Model):
     team = models.ForeignKey(
         "accounts.Team",
@@ -247,6 +286,7 @@ class KothTeamToken(models.Model):
     )
     token_hash = models.CharField(max_length=64, unique=True)
     issued_at = models.DateTimeField(auto_now_add=True)
+    key_version = models.PositiveBigIntegerField(default=0)
 
     class Meta:
         db_table = "koth_team_tokens"
@@ -277,6 +317,7 @@ class KothPreviewToken(models.Model):
     preview_team_id = models.UUIDField()
     token_hash = models.CharField(max_length=64, unique=True)
     issued_at = models.DateTimeField(auto_now_add=True)
+    key_version = models.PositiveBigIntegerField(default=0)
 
     class Meta:
         db_table = "koth_preview_tokens"
