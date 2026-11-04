@@ -61,7 +61,11 @@ http {{
         proxy_request_buffering off;
         proxy_read_timeout 900s;
         proxy_send_timeout 900s;
-        location = /api/v1/auth/login {{ proxy_pass http://login_workers; }}
+        location = /api/v1/auth/login {{
+            client_max_body_size 8k;
+            proxy_request_buffering on;
+            proxy_pass http://login_workers;
+        }}
         location / {{ proxy_pass http://api_workers; }}
     }}
 }}

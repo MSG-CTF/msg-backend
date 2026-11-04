@@ -20,7 +20,10 @@ class WebServerTests(unittest.TestCase):
 
     def test_proxy_routes_only_the_login_path_to_login_workers(self):
         config = web_server.nginx_configuration(8080)
-        self.assertIn("location = /api/v1/auth/login { proxy_pass http://login_workers; }", config)
+        login = config.split("location = /api/v1/auth/login {", 1)[1].split("}", 1)[0]
+        self.assertIn("proxy_pass http://login_workers;", login)
+        self.assertIn("proxy_request_buffering on;", login)
+        self.assertIn("client_max_body_size 8k;", login)
         self.assertIn("location / { proxy_pass http://api_workers; }", config)
         self.assertIn("client_max_body_size 0;", config)
         self.assertIn("proxy_buffering off;", config)
