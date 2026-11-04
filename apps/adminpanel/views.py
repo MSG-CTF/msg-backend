@@ -108,6 +108,7 @@ from apps.instances.services import (
     RESETTABLE_INSTANCE_STATUSES,
     SchedulerError,
     call_scheduler_delete,
+    call_scheduler_detail,
     call_scheduler_force_cleanup,
     call_scheduler_retry_cleanup,
     call_scheduler_reset,
@@ -2506,6 +2507,13 @@ def _team_update(request, team_id):
             raise InvalidRequest("leader_user_id 가 올바르지 않습니다")
 
     with transaction.atomic():
+        # Instance writes take this lock before reading membership or calling Scheduler.
+        for user_id in (
+            User.objects.filter(pk__in=remove_ids)
+            .order_by("pk")
+            .values_list("pk", flat=True)
+        ):
+            InstanceLock.objects.select_for_update().get_or_create(user_id=user_id)
         team = _get_team_for_update(team_id)
         wanted = add_ids | remove_ids | ({leader_id} if leader_id else set())
         users = {
@@ -2542,17 +2550,14 @@ def _team_update(request, team_id):
             new_leader = leader_id
 
         # 제외된 계정의 인스턴스는 팀 소속이 바뀌면 추적이 끊긴다.
-        if (
-            remove_ids
-            and Instance.objects.filter(
-                user_id__in=remove_ids, status__in=TEAM_BLOCKING_INSTANCE_STATUSES
-            ).exists()
-        ):
-            return fail(
-                "ACTIVE_INSTANCE_EXISTS",
-                "제외할 팀원의 인스턴스를 먼저 종료해야 합니다",
-                409,
-            )
+        if remove_ids:
+            try:
+                _require_instance_cleanup(
+                    Instance.objects.filter(user_id__in=remove_ids),
+                    InstanceWriteOperation.objects.filter(user_id__in=remove_ids),
+                )
+            except SchedulerError as error:
+                return fail(error.code, error.message, error.status_code)
 
         if team_name is not None and team_name != team.team_name:
             if Team.objects.filter(team_name=team_name).exclude(pk=team.pk).exists():
@@ -2637,12 +2642,59 @@ def _team_update(request, team_id):
     )
 
 
-# 종료 중 · 정리 대기도 스케줄러에 컨테이너가 남아 있을 수 있어 팀 삭제 · 팀원 제외를 막는다.
-TEAM_BLOCKING_INSTANCE_STATUSES = [
-    *ACTIVE_INSTANCE_STATUSES,
-    InstanceStatus.STOPPING,
-    InstanceStatus.CLEANUP_PENDING,
-]
+def _require_instance_cleanup(instances, operations):
+    if operations.filter(status__in=BLOCKING_STATUSES).exists():
+        raise SchedulerError(
+            "INSTANCE_REVIEW_REQUIRED",
+            "인스턴스 생성·재시작 기록을 복구한 뒤 다시 시도해주세요",
+            409,
+        )
+    remaining = instances.exclude(status=InstanceStatus.CLEANED)
+    if remaining.exclude(status=InstanceStatus.FAILED).exists():
+        raise SchedulerError(
+            "ACTIVE_INSTANCE_EXISTS", "인스턴스 정리를 완료한 뒤 다시 시도해주세요", 409
+        )
+    for instance in remaining.order_by("pk"):
+        try:
+            data = call_scheduler_detail(instance, scheduler_auth_header())
+        except (SchedulerError, ValueError, TypeError, AttributeError):
+            raise SchedulerError(
+                "INSTANCE_CLEANUP_UNVERIFIED",
+                "Scheduler에서 인스턴스 정리 여부를 확인할 수 없습니다",
+                409,
+            ) from None
+        expected = {
+            "instance_id": str(instance.pk),
+            "team_id": str(instance.team_id),
+            "challenge_id": str(instance.challenge_id),
+            "status": InstanceStatus.FAILED,
+        }
+        if instance.release_id is not None:
+            expected["release_id"] = str(instance.release_id)
+        if (
+            not isinstance(data, dict)
+            or any(data.get(key) != value for key, value in expected.items())
+            or ("user_id" in data and data["user_id"] != str(instance.user_id))
+            or "runtime_target_id" not in data
+        ):
+            raise SchedulerError(
+                "INSTANCE_CLEANUP_UNVERIFIED",
+                "Scheduler 응답의 인스턴스 정보와 배치 여부를 확인해주세요",
+                409,
+            )
+        # A missing key is not evidence of no deployment; only an explicit null is.
+        if data["runtime_target_id"] is not None:
+            raise SchedulerError(
+                "ACTIVE_INSTANCE_EXISTS",
+                "실패한 인스턴스의 정리 재시도를 완료한 뒤 다시 시도해주세요",
+                409,
+            )
+
+
+def _team_instance_owner_ids(team_id):
+    return set(User.objects.filter(team_id=team_id).values_list("pk", flat=True)) | set(
+        Instance.objects.filter(team_id=team_id).values_list("user_id", flat=True)
+    )
 
 
 def _lock_challenges(challenge_ids):
@@ -2663,12 +2715,19 @@ def _team_delete(request, team_id):
                     "challenge_id", flat=True
                 )
             )
+            owner_ids = _team_instance_owner_ids(team_id)
         except ValidationError:
             prelocked = set()
+            owner_ids = set()
         with transaction.atomic():
+            # Lock owners before challenges/team so in-flight instance writes can finish.
+            for user_id in sorted(owner_ids):
+                InstanceLock.objects.select_for_update().get_or_create(user_id=user_id)
             # 플래그 제출과 같은 문제 → 팀 순서로 잠근다.
             challenges = _lock_challenges(prelocked)
             team = _get_team_for_update(team_id)
+            if not _team_instance_owner_ids(team.pk) <= owner_ids:
+                continue
             if ExeSubmission.objects.filter(team=team).exists():
                 return fail(
                     "EXE_SUBMISSION_EXISTS",
@@ -2676,12 +2735,16 @@ def _team_delete(request, team_id):
                     409,
                 )
             # 인스턴스 행만 지우면 스케줄러의 컨테이너가 고아로 남는다.
-            if Instance.objects.filter(
-                team=team, status__in=TEAM_BLOCKING_INSTANCE_STATUSES
-            ).exists():
-                return fail(
-                    "ACTIVE_INSTANCE_EXISTS", "팀의 인스턴스를 먼저 종료해야 합니다", 409
+            member_ids = User.objects.filter(team=team).values("pk")
+            try:
+                _require_instance_cleanup(
+                    Instance.objects.filter(Q(team=team) | Q(user_id__in=member_ids)),
+                    InstanceWriteOperation.objects.filter(
+                        Q(team_id=team.pk) | Q(user_id__in=member_ids)
+                    ),
                 )
+            except SchedulerError as error:
+                return fail(error.code, error.message, error.status_code)
 
             # 읽은 뒤 팀을 잠그기 전에 새로 푼 문제가 있으면, 팀을 쥔 채 그 문제를 잠그면
             # 순서가 뒤집혀 정답 처리와 교착한다. 잠금을 풀고 처음부터 다시 잡는다.
