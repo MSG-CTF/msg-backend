@@ -42,6 +42,7 @@ class WindowsRuntimeFlagSettingsTests(SimpleTestCase):
         environment = {
             "DJANGO_SECRET_KEY": secrets.token_urlsafe(48),
             "JWT_SECRET": secrets.token_urlsafe(48),
+            "KOTH_TEAM_TOKEN_SECRET": secrets.token_urlsafe(48),
             **flags,
         }
         with patch.dict(os.environ, environment, clear=True), patch("dotenv.load_dotenv"):

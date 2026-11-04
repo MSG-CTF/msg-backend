@@ -26,6 +26,7 @@ from apps.common.jwt import hash_token
 from apps.common.response import fail
 from .admin_preview import COOKIE_NAME, PreviewAuthorizeThrottle, load_preview_ticket, preview_seconds_left
 from .models import KothPreviewToken, KothTeamToken
+from .token_keys import current_key_version
 
 GAME_COOKIE = "__Host-msg_koth_game"
 KEY_PREFIX = "koth:preview-game:v1:"
@@ -155,6 +156,7 @@ def _credential(request, profile, uri, body):
 
 
 def _authorize(request, challenge, grant, profile, uri, body=b""):
+    key_version = current_key_version()
     sid = request.COOKIES.get(GAME_COOKIE)
     key = _session_key(sid)
     stored = _get(key)
@@ -187,13 +189,13 @@ def _authorize(request, challenge, grant, profile, uri, body=b""):
     if valid and stored.get("preview"):
         current = KothPreviewToken.objects.filter(
             pk=stored.get("token_id"), challenge=challenge, admin_id=grant["user_id"],
-            token_hash=stored.get("token_hash"),
+            token_hash=stored.get("token_hash"), key_version=key_version,
         ).first()
         valid = current is not None and current.issued_at.isoformat() == stored.get("token_issued_at")
     elif valid:
         current = KothTeamToken.objects.select_related("team").filter(
             pk=stored.get("token_id"), challenge=challenge, team_id=stored.get("team_id"),
-            team__is_banned=False, token_hash=stored.get("token_hash"),
+            team__is_banned=False, token_hash=stored.get("token_hash"), key_version=key_version,
         ).first()
         valid = (current is not None
                  and current.issued_at.isoformat() == stored.get("token_issued_at")
@@ -268,12 +270,13 @@ def _native_login(request, challenge, grant, profile, uri, body):
     raw = _json(body).get("team_token")
     if not isinstance(raw, str) or not 1 <= len(raw) <= 2048:
         raise PreviewDenied()
+    key_version = current_key_version()
     token = KothTeamToken.objects.select_related("team").filter(
-        challenge=challenge, token_hash=hash_token(raw), team__is_banned=False,
+        challenge=challenge, token_hash=hash_token(raw), team__is_banned=False, key_version=key_version,
     ).first()
     # 팀이 없는 관리자는 자기 운영 테스트 토큰으로만 로그인한다
     preview = None if token is not None else KothPreviewToken.objects.filter(
-        challenge=challenge, token_hash=hash_token(raw), admin_id=grant["user_id"],
+        challenge=challenge, token_hash=hash_token(raw), admin_id=grant["user_id"], key_version=key_version,
     ).first()
     if token is None and preview is None:
         raise PreviewDenied()
@@ -317,9 +320,11 @@ def _native_login(request, challenge, grant, profile, uri, body):
         load_preview_ticket(request.COOKIES.get(COOKIE_NAME), str(challenge.pk), grant["origin"])
     except (signing.BadSignature, ValueError, TypeError, KeyError):
         raise PreviewDenied() from None
-    if token is not None and not KothTeamToken.objects.filter(pk=token.pk, token_hash=token.token_hash, team__is_banned=False).exists():
+    if current_key_version() != key_version:
         raise PreviewDenied()
-    if preview is not None and not KothPreviewToken.objects.filter(pk=preview.pk, token_hash=preview.token_hash).exists():
+    if token is not None and not KothTeamToken.objects.filter(pk=token.pk, token_hash=token.token_hash, team__is_banned=False, key_version=key_version).exists():
+        raise PreviewDenied()
+    if preview is not None and not KothPreviewToken.objects.filter(pk=preview.pk, token_hash=preview.token_hash, key_version=key_version).exists():
         raise PreviewDenied()
     sid = secrets.token_urlsafe(32)
     stored = {"challenge_id": str(challenge.pk), "admin_id": grant["user_id"],

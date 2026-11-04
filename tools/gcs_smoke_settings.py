@@ -6,6 +6,7 @@ import uuid
 
 os.environ["DJANGO_SECRET_KEY"] = secrets.token_urlsafe(48)
 os.environ["JWT_SECRET"] = secrets.token_urlsafe(48)
+os.environ["KOTH_TEAM_TOKEN_SECRET"] = secrets.token_urlsafe(48)
 
 from config.settings import *  # noqa: F403,E402
 

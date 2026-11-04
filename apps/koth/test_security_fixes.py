@@ -1,3 +1,4 @@
+from apps.koth._key_test_support import initialize_token_key
 """KOTH 보안 수정 회귀 테스트 — BK-03(예정 문제 URL), F08(no-store), BK-08(검증 반복 제한)."""
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
@@ -28,6 +29,7 @@ LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"
 @override_settings(CACHES=LOCMEM, KOTH_TEAM_TOKEN_SECRET="test-secret")
 class KothSecurityFixTests(TestCase):
     def setUp(self):
+        initialize_token_key()
         cache.clear()
         self.client = APIClient()
         self.team = Team.objects.create(team_name="sec-team")

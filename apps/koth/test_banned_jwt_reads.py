@@ -1,3 +1,4 @@
+from apps.koth._key_test_support import initialize_token_key
 from django.core.cache import cache
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
@@ -11,6 +12,9 @@ from apps.koth.models import KothChallenge, KothClub
     KOTH_TEAM_TOKEN_SECRET="test-koth-token-secret",
 )
 class BannedTeamJwtReadTests(TestCase):
+    def setUp(self):
+        initialize_token_key()
+
     def test_banned_team_existing_jwt_cannot_read_koth_profile_or_token(self):
         cache.clear()
         team = Team.objects.create(team_name="qa-banned-jwt")

@@ -292,19 +292,19 @@ JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_HOURS = 1
 REFRESH_TOKEN_HOURS = 12
 
-# KOTH 팀 토큰은 원문을 DB에 보관하지 않고 이 별도 비밀값으로 결정적으로
-# 생성한다. 기존 개발 환경은 JWT_SECRET을 fallback으로 사용하되 운영에서는
-# 반드시 별도 값을 설정한다.
-KOTH_TEAM_TOKEN_SECRET = os.getenv("KOTH_TEAM_TOKEN_SECRET") or (JWT_SECRET if DEBUG else "")
-if not KOTH_TEAM_TOKEN_SECRET:
+# KOTH 토큰은 로그인 JWT와 독립된 키로 생성한다. 개발/CI도 같은 검사를 거친다.
+KOTH_TEAM_TOKEN_SECRET = os.getenv("KOTH_TEAM_TOKEN_SECRET", "")
+if (
+    len(KOTH_TEAM_TOKEN_SECRET.encode("utf-8")) < 32
+    or not KOTH_TEAM_TOKEN_SECRET.isprintable()
+    or any(character.isspace() for character in KOTH_TEAM_TOKEN_SECRET)
+):
     raise ImproperlyConfigured(
-        "KOTH_TEAM_TOKEN_SECRET 환경변수가 필요합니다.\n"
-        '  생성: python -c "import secrets; print(secrets.token_urlsafe(48))"'
+        "KOTH_TEAM_TOKEN_SECRET에는 공백 없는 32바이트 이상의 독립 난수 키가 필요합니다"
     )
-if not DEBUG and KOTH_TEAM_TOKEN_SECRET == JWT_SECRET:
+if len({SECRET_KEY, JWT_SECRET, KOTH_TEAM_TOKEN_SECRET}) != 3:
     raise ImproperlyConfigured(
-        "KOTH_TEAM_TOKEN_SECRET은 JWT_SECRET과 같은 값일 수 없습니다. "
-        "별도의 비밀값을 생성해 .env에 설정하세요."
+        "DJANGO_SECRET_KEY, JWT_SECRET, KOTH_TEAM_TOKEN_SECRET은 서로 달라야 합니다"
     )
 KOTH_IMAGE_EXPORT_SIGNING_KEY = os.getenv("KOTH_IMAGE_EXPORT_SIGNING_KEY", "")
 KOTH_IMAGE_EXPORT_URL = os.getenv("KOTH_IMAGE_EXPORT_URL", "")
