@@ -105,6 +105,49 @@ def _adopt_legacy_tokens(version):
     return adopted_team, adopted_preview
 
 
+def _legacy_key_state():
+    """Keep retired TC-622 key IDs effective while adopting its current key."""
+    from apps.common.key_lifecycle import key_id
+    from apps.instances.models import ServiceKeyRotation, ServiceKeyState
+
+    legacy = ServiceKeyState.objects.select_for_update().filter(pk="koth").first()
+    legacy_id = key_id("koth", settings.KOTH_TEAM_TOKEN_SECRET)
+    if ServiceKeyRotation.objects.filter(
+        purpose="koth", active_key_id=legacy_id
+    ).exists() and (legacy is None or legacy.active_key_id != legacy_id):
+        raise KeyRotationError(
+            "This key was retired by the previous service key authority"
+        )
+    return legacy, legacy_id
+
+
+def _synchronize_legacy_authority(legacy, legacy_id, actor, operation_id, activated_at):
+    """Pin still-draining TC-622 workers to the same key, in this transaction."""
+    from apps.instances.models import ServiceKeyRotation, ServiceKeyState
+
+    if legacy is not None and legacy.active_key_id == legacy_id:
+        return
+    previous = legacy.active_key_id if legacy else ""
+    generation = legacy.generation + 1 if legacy else 1
+    ServiceKeyState.objects.update_or_create(
+        purpose="koth",
+        defaults={
+            "active_key_id": legacy_id,
+            "generation": generation,
+            "activated_at": activated_at,
+        },
+    )
+    ServiceKeyRotation.objects.create(
+        purpose="koth",
+        previous_key_id=previous,
+        active_key_id=legacy_id,
+        generation=generation,
+        actor=actor,
+        reason="TC-613 operation " + str(operation_id),
+        reencrypted_rows=0,
+    )
+
+
 def activate_key(*, actor, reason, expected_version, operation_id):
     """Use the key already supplied through the operator's protected environment.
 
@@ -138,6 +181,7 @@ def activate_key(*, actor, reason, expected_version, operation_id):
             raise KeyRotationError(
                 "This key was already registered; use a fresh independent key"
             )
+        legacy, legacy_id = _legacy_key_state()
         version = state.version + 1
         team_count = KothTeamToken.objects.filter(key_version=state.version).count()
         preview_count = KothPreviewToken.objects.filter(
@@ -147,6 +191,9 @@ def activate_key(*, actor, reason, expected_version, operation_id):
         if state.version == 0:
             adopted_team, adopted_preview = _adopt_legacy_tokens(version)
         activated_at = timezone.now()
+        _synchronize_legacy_authority(
+            legacy, legacy_id, actor, operation_id, activated_at
+        )
         metadata = {
             "service": "KOTH_TEAM_TOKEN_SECRET",
             "operation_id": str(operation_id),

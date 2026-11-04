@@ -12,6 +12,31 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 load_dotenv(BASE_DIR / ".env")
 
+# Production mounts a root-owned file from tmpfs instead of persisting key values
+# in Docker Config.Env or the application backup directory.
+BACKEND_SECRETS_FILE = os.getenv("BACKEND_SECRETS_FILE", "")
+if BACKEND_SECRETS_FILE:
+    import stat
+    from dotenv import dotenv_values
+
+    secret_path = Path(BACKEND_SECRETS_FILE)
+    try:
+        metadata = secret_path.lstat()
+        if not secret_path.is_absolute() or not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o007 or (os.name == "posix" and metadata.st_uid != 0):
+            raise ValueError()
+        supplied_secrets = dotenv_values(secret_path)
+        for name, value in supplied_secrets.items():
+            if not value or not isinstance(value, str):
+                raise ValueError()
+            os.environ[name] = value
+    except (OSError, ValueError):
+        raise ImproperlyConfigured("서비스 비밀값 파일을 안전하게 읽을 수 없습니다") from None
+
+_service_key_required = os.getenv("SERVICE_KEY_STATE_REQUIRED", "False").lower()
+if _service_key_required not in {"true", "false"}:
+    raise ImproperlyConfigured("SERVICE_KEY_STATE_REQUIRED는 True 또는 False여야 합니다")
+SERVICE_KEY_STATE_REQUIRED = _service_key_required == "true"
+
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
@@ -306,6 +331,12 @@ if len({SECRET_KEY, JWT_SECRET, KOTH_TEAM_TOKEN_SECRET}) != 3:
     raise ImproperlyConfigured(
         "DJANGO_SECRET_KEY, JWT_SECRET, KOTH_TEAM_TOKEN_SECRET은 서로 달라야 합니다"
     )
+if SERVICE_KEY_STATE_REQUIRED:
+    required_keys = [SECRET_KEY, JWT_SECRET, KOTH_TEAM_TOKEN_SECRET]
+    if any(not isinstance(value, str) or len(value.strip().encode()) < 32 for value in required_keys):
+        raise ImproperlyConfigured("용도별 서비스 키는 독립된 32바이트 이상의 값이어야 합니다")
+    if len(set(required_keys)) != len(required_keys):
+        raise ImproperlyConfigured("Django와 JWT 및 KOTH 서비스 키를 분리해야 합니다")
 KOTH_IMAGE_EXPORT_SIGNING_KEY = os.getenv("KOTH_IMAGE_EXPORT_SIGNING_KEY", "")
 KOTH_IMAGE_EXPORT_URL = os.getenv("KOTH_IMAGE_EXPORT_URL", "")
 KOTH_SCORE_API_ALLOWED_ORIGINS = [value.strip() for value in os.getenv("KOTH_SCORE_API_ALLOWED_ORIGINS", "").split(",") if value.strip()]

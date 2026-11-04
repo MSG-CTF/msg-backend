@@ -7,6 +7,7 @@ from rest_framework.test import APIClient
 
 from apps.accounts.models import Team
 from apps.common.jwt import hash_token
+from apps.koth.tokens import build_team_token
 from apps.koth.models import (
     KothChallenge,
     KothClub,
@@ -28,10 +29,11 @@ class VerifyTeamTokenInputTests(TestCase):
             opened_at=timezone.now(),
             inbound_internal_token_hash=hash_token("input-qa-internal"),
         )
+        self.raw_token = build_team_token(self.team.pk, self.challenge.pk)
         KothTeamToken.objects.create(
             team=self.team,
             challenge=self.challenge,
-            token_hash=hash_token("input-qa-team-token"),
+            token_hash=hash_token(self.raw_token),
             key_version=1,
         )
 
@@ -57,11 +59,11 @@ class VerifyTeamTokenInputTests(TestCase):
     def test_invalid_object_fields_are_rejected(self):
         valid = {
             "koth_challenge_id": str(self.challenge.pk),
-            "team_token": "input-qa-team-token",
+            "team_token": self.raw_token,
         }
         for payload in (
             {},
-            {"team_token": "input-qa-team-token"},
+            {"team_token": self.raw_token},
             {**valid, "extra": True},
             {**valid, "team_token": None},
             {**valid, "team_token": {}},
@@ -76,7 +78,7 @@ class VerifyTeamTokenInputTests(TestCase):
     def test_object_payload_still_requires_internal_authentication(self):
         payload = {
             "koth_challenge_id": str(self.challenge.pk),
-            "team_token": "input-qa-team-token",
+            "team_token": self.raw_token,
         }
         for internal in (None, "wrong-internal"):
             with self.subTest(internal=internal):

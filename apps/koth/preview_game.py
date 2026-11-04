@@ -23,10 +23,12 @@ from rest_framework.permissions import AllowAny
 from apps.accounts.models import User
 from apps.common.exceptions import RateLimitUnavailable
 from apps.common.jwt import hash_token
+from apps.common.key_lifecycle import active_service_key, service_key_guard
 from apps.common.response import fail
 from .admin_preview import COOKIE_NAME, PreviewAuthorizeThrottle, load_preview_ticket, preview_seconds_left
 from .models import KothPreviewToken, KothTeamToken
 from .token_keys import current_key_version
+from .tokens import build_preview_token, build_team_token, matches_token
 
 GAME_COOKIE = "__Host-msg_koth_game"
 KEY_PREFIX = "koth:preview-game:v1:"
@@ -155,6 +157,13 @@ def _credential(request, profile, uri, body):
     return value if isinstance(value, str) else ""
 
 
+def _current_token(token):
+    if isinstance(token, KothPreviewToken):
+        return token.admin_id is not None and matches_token(build_preview_token(token.admin_id, token.challenge_id), token.token_hash)
+    return matches_token(build_team_token(token.team_id, token.challenge_id), token.token_hash)
+
+
+@service_key_guard("koth")
 def _authorize(request, challenge, grant, profile, uri, body=b""):
     key_version = current_key_version()
     sid = request.COOKIES.get(GAME_COOKIE)
@@ -191,13 +200,14 @@ def _authorize(request, challenge, grant, profile, uri, body=b""):
             pk=stored.get("token_id"), challenge=challenge, admin_id=grant["user_id"],
             token_hash=stored.get("token_hash"), key_version=key_version,
         ).first()
-        valid = current is not None and current.issued_at.isoformat() == stored.get("token_issued_at")
+        valid = current is not None and _current_token(current) and current.issued_at.isoformat() == stored.get("token_issued_at")
     elif valid:
         current = KothTeamToken.objects.select_related("team").filter(
             pk=stored.get("token_id"), challenge=challenge, team_id=stored.get("team_id"),
             team__is_banned=False, token_hash=stored.get("token_hash"), key_version=key_version,
         ).first()
         valid = (current is not None
+                 and _current_token(current)
                  and current.issued_at.isoformat() == stored.get("token_issued_at")
                  and current.team.updated_at.isoformat() == stored.get("team_version"))
     if not valid:
@@ -281,6 +291,11 @@ def _native_login(request, challenge, grant, profile, uri, body):
     if token is None and preview is None:
         raise PreviewDenied()
     subject = token or preview
+    # Do not hold the authority lock over the game RPC: the game calls the
+    # token verifier back on another worker. Recheck after that RPC instead.
+    with active_service_key("koth"):
+        if not _current_token(subject):
+            raise PreviewDenied()
     key = KEY_PREFIX + "permit:" + str(challenge.pk) + ":" + subject.token_hash
     owner = secrets.token_urlsafe(24)
     record = {"owner": owner, "challenge_id": str(challenge.pk),
@@ -294,6 +309,9 @@ def _native_login(request, challenge, grant, profile, uri, body):
         return fail("KOTH_PREVIEW_LOGIN_BUSY", "다른 인증 요청이 진행 중입니다 잠시 후 다시 시도해 주세요", 409)
     try:
         response = _native_request(request, challenge, uri, body)
+        with active_service_key("koth"):
+            if not _current_token(subject):
+                raise PreviewDenied()
     finally:
         current = _get(key)
         if isinstance(current, dict) and current.get("owner") == owner:

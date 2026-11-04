@@ -27,6 +27,7 @@ from apps.common.exceptions import (
     TeamBanned,
 )
 from apps.common.jwt import hash_token
+from apps.common.key_lifecycle import service_key_guard
 from apps.common.permissions import IsAuthenticated
 from apps.common.response import ok
 from apps.common.throttling import ReadApiThrottle
@@ -392,6 +393,7 @@ def _preview_token(request):
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
+@service_key_guard("koth")
 def team_token(request):
     if request.user.team_id is None and request.user.role == Role.ADMIN:
         return _preview_token(request)
@@ -501,11 +503,12 @@ def _verify_current_team_token(request, challenge, key_version):
     valid = (
         token is not None
         and not token.team.is_banned
+        and matches_token(build_team_token(token.team_id, challenge.pk), token.token_hash)
         and challenge.status == KothChallengeStatus.ACTIVE
     )
     if token is not None and not token.team.is_banned and challenge.status == KothChallengeStatus.SCHEDULED:
         from .preview_game import permits_token_verification
-        valid = permits_token_verification(challenge, token)
+        valid = matches_token(build_team_token(token.team_id, challenge.pk), token.token_hash) and permits_token_verification(challenge, token)
     preview = None
     from .operator_qa import operator_qa_open
 
@@ -516,7 +519,7 @@ def _verify_current_team_token(request, challenge, key_version):
             token_hash=candidate_hash, challenge=challenge, admin__role=Role.ADMIN,
             key_version=key_version,
         ).first()
-        valid = preview is not None and (qa_open or permits_token_verification(challenge, preview, owner_id=preview.admin_id))
+        valid = preview is not None and matches_token(build_preview_token(preview.admin_id, challenge.pk), preview.token_hash) and (qa_open or permits_token_verification(challenge, preview, owner_id=preview.admin_id))
     if not valid:
         if _register_verify_failure(challenge):
             raise KothVerifyThrottled()

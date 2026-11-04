@@ -22,6 +22,7 @@ def protect_registered_keys(apps, schema_editor):
 class Migration(migrations.Migration):
     dependencies = [
         ("adminpanel", "0015_alter_adminevent_type"),
+        ("instances", "0023_service_key_lifecycle"),
         ("koth", "0013_preview_tokens"),
     ]
 

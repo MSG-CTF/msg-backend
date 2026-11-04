@@ -5,6 +5,7 @@ import hmac
 import secrets
 import time
 import uuid
+from contextlib import contextmanager
 from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch
 
@@ -22,8 +23,8 @@ from .admin_preview import COOKIE_NAME
 from .models import KothChallenge, KothClub, KothPreviewToken, KothTeamToken, KothEnvironmentConfig
 from .environment import create_version
 from .preview_game import GAME_COOKIE, KEY_PREFIX, _session_key, permits_token_verification
-from .tokens import preview_team_id
 from .token_keys import activate_key
+from .tokens import build_team_token, preview_team_id
 
 
 @override_settings(KOTH_ADMIN_PREVIEW_ORIGINS=["https://game.example"],
@@ -37,7 +38,8 @@ class PreviewGameTests(TestCase):
             club=KothClub.objects.create(name="Preview native QA"), title="Native QA",
             repository_slug="koth-jenga", challenge_url="https://game.example", status="SCHEDULED",
             open_group=1, inbound_internal_token_hash=hash_token("preview-native-internal"))
-        self.token = KothTeamToken.objects.create(team=self.team, challenge=self.challenge, token_hash=hash_token("native-qa-token"), key_version=1)
+        self.raw_token = build_team_token(self.team.pk, self.challenge.pk)
+        self.token = KothTeamToken.objects.create(team=self.team, challenge=self.challenge, token_hash=hash_token(self.raw_token), key_version=1)
         self.client = APIClient()
         self.client.credentials(HTTP_AUTHORIZATION="Bearer " + issue_access_token(self.admin))
         result = self.client.post(f"/api/v1/admin/koth/challenges/{self.challenge.pk}/preview_sessions", {}, format="json")
@@ -56,7 +58,7 @@ class PreviewGameTests(TestCase):
     def native_response(self, request, challenge, uri, body):
         self.assertTrue(permits_token_verification(self.challenge, self.token))
         native = APIClient().post("/internal/koth/team_tokens/verify", {
-            "koth_challenge_id": str(challenge.pk), "team_token": "native-qa-token"},
+            "koth_challenge_id": str(challenge.pk), "team_token": self.raw_token},
             format="json", HTTP_X_INTERNAL_TOKEN="preview-native-internal")
         self.assertEqual(native.status_code, 200)
         self.assertIs(native.data["data"]["valid"], True)
@@ -66,7 +68,7 @@ class PreviewGameTests(TestCase):
 
     def login(self):
         with patch("apps.koth.preview_game._native_request", side_effect=self.native_response):
-            response = self.client.post(self.proxy, {"team_token": "native-qa-token"}, format="json", **self.headers())
+            response = self.client.post(self.proxy, {"team_token": self.raw_token}, format="json", **self.headers())
         self.assertEqual(response.status_code, 200)
         return response
 
@@ -103,7 +105,7 @@ class PreviewGameTests(TestCase):
             result.set_cookie("jenga_session", value, httponly=True)
             return result
         with patch("apps.koth.preview_game._native_request", side_effect=response):
-            result = self.client.post(self.proxy, {"team_token": "native-qa-token"}, format="json", **self.headers())
+            result = self.client.post(self.proxy, {"team_token": self.raw_token}, format="json", **self.headers())
         return result
 
     def test_native_login_permit_lasts_only_for_the_authorized_call(self):
@@ -116,9 +118,37 @@ class PreviewGameTests(TestCase):
         self.challenge.refresh_from_db()
         self.assertEqual(self.challenge.status, "SCHEDULED")
         verify = APIClient().post("/internal/koth/team_tokens/verify", {
-            "koth_challenge_id": str(self.challenge.pk), "team_token": "native-qa-token"},
+            "koth_challenge_id": str(self.challenge.pk), "team_token": self.raw_token},
             format="json", HTTP_X_INTERNAL_TOKEN="preview-native-internal")
         self.assertIs(verify.data["data"]["valid"], False)
+
+    def test_unregistered_service_key_refuses_an_existing_native_session(self):
+        self.login()
+        self.assertEqual(self.authorize_session().status_code, 204)
+        with override_settings(KOTH_TEAM_TOKEN_SECRET=secrets.token_urlsafe(48)):
+            response = self.authorize_session()
+            self.assertEqual((response.status_code, response.data["code"]), (503, "KOTH_TOKEN_KEY_UNAVAILABLE"))
+
+    def test_native_callback_does_not_hold_service_key_authority_lock(self):
+        from apps.common.key_lifecycle import active_service_key
+        active = []
+
+        @contextmanager
+        def measured(purpose):
+            with active_service_key(purpose) as state:
+                active.append(purpose)
+                try:
+                    yield state
+                finally:
+                    active.pop()
+
+        def response(*args):
+            self.assertEqual(active, [])
+            return self.native_response(*args)
+
+        with patch('apps.common.key_lifecycle.active_service_key', measured), patch('apps.koth.preview_game.active_service_key', measured), patch('apps.koth.preview_game._native_request', side_effect=response):
+            result = self.client.post(self.proxy, {'team_token': self.raw_token}, format='json', **self.headers())
+        self.assertEqual(result.status_code, 200)
 
     def test_common_cross_problem_and_wrong_team_tokens_never_reach_native_login(self):
         KothTeamToken.objects.create(team=self.team, challenge=None, token_hash=hash_token("legacy-qa"))
@@ -149,7 +179,7 @@ class PreviewGameTests(TestCase):
             return response
         self.client.cookies["session"] = "stale-legacy-cookie"
         with patch("apps.koth.preview_game._native_request", side_effect=latest_response):
-            response = self.client.post(self.proxy, {"team_token": "native-qa-token"}, format="json", **self.headers())
+            response = self.client.post(self.proxy, {"team_token": self.raw_token}, format="json", **self.headers())
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.cookies["session"]["max-age"], 0)
         self.assertEqual(self.authorize_session().status_code, 204)
@@ -210,7 +240,7 @@ class PreviewGameTests(TestCase):
         self.client.cookies["jenga_session"] = self.latest_cookie()
         self.token.token_hash = hash_token("revoked-current-token");self.token.save(update_fields=["token_hash"])
         self.assertEqual(self.authorize_session().status_code, 401)
-        self.token.token_hash = hash_token("native-qa-token");self.token.save(update_fields=["token_hash"])
+        self.token.token_hash = hash_token(self.raw_token);self.token.save(update_fields=["token_hash"])
         self.assertEqual(self.authorize_session().status_code, 401)
 
     def test_mixed_jenga_cookie_names_revoke_the_bound_preview_session(self):
@@ -226,7 +256,7 @@ class PreviewGameTests(TestCase):
             response.set_cookie("jenga_session", "another-team-cookie", httponly=True)
             return response
         with patch("apps.koth.preview_game._native_request", side_effect=ambiguous_response):
-            response = self.client.post(self.proxy, {"team_token": "native-qa-token"}, format="json", **self.headers())
+            response = self.client.post(self.proxy, {"team_token": self.raw_token}, format="json", **self.headers())
         self.assertEqual(response.status_code, 502)
         self.assertNotIn(GAME_COOKIE, response.cookies)
 
@@ -234,7 +264,7 @@ class PreviewGameTests(TestCase):
         self.login()
         self.token.token_hash = hash_token("revoked-qa"); self.token.save(update_fields=["token_hash"])
         self.assertEqual(self.authorize_session().status_code, 401)
-        self.token.token_hash = hash_token("native-qa-token"); self.token.save(update_fields=["token_hash"])
+        self.token.token_hash = hash_token(self.raw_token); self.token.save(update_fields=["token_hash"])
         self.assertEqual(self.authorize_session().status_code, 401)
         self.login()
         self.assertEqual(self.authorize_session().status_code, 204)
@@ -266,26 +296,26 @@ class PreviewGameTests(TestCase):
     def test_missing_tampered_and_cross_origin_preview_cannot_proxy_login(self):
         self.client.cookies[COOKIE_NAME] = "invalid"
         with patch("apps.koth.preview_game._native_request") as native:
-            self.assertEqual(self.client.post(self.proxy, {"team_token": "native-qa-token"}, format="json", **self.headers()).status_code, 401)
+            self.assertEqual(self.client.post(self.proxy, {"team_token": self.raw_token}, format="json", **self.headers()).status_code, 401)
             native.assert_not_called()
 
     def test_private_absolute_and_encoded_paths_are_never_forwarded(self):
         for uri in ["https://169.254.169.254/", "//other.example/", "/internal/koth/scores",
                     "/%252e%252e/internal/", "/%252finternal/koth/scores", "/__operator/preview"]:
             with self.subTest(uri=uri), patch("apps.koth.preview_game._native_request") as native:
-                self.assertEqual(self.client.post(self.proxy, {"team_token": "native-qa-token"}, format="json", **self.headers(uri)).status_code, 401)
+                self.assertEqual(self.client.post(self.proxy, {"team_token": self.raw_token}, format="json", **self.headers(uri)).status_code, 401)
                 native.assert_not_called()
 
     def test_native_failure_removes_the_temporary_permit(self):
         with patch("apps.koth.preview_game._native_request", side_effect=OSError("offline")):
-            self.assertEqual(self.client.post(self.proxy, {"team_token": "native-qa-token"}, format="json", **self.headers()).status_code, 502)
+            self.assertEqual(self.client.post(self.proxy, {"team_token": self.raw_token}, format="json", **self.headers()).status_code, 502)
         self.assertFalse(permits_token_verification(self.challenge, self.token))
 
     def test_busy_native_login_is_retriable_and_does_not_replace_permit(self):
         key = KEY_PREFIX + "permit:" + str(self.challenge.pk) + ":" + self.token.token_hash
         cache.set(key, {"owner": "another-request"}, 12)
         try:
-            response = self.client.post(self.proxy, {"team_token": "native-qa-token"}, format="json", **self.headers())
+            response = self.client.post(self.proxy, {"team_token": self.raw_token}, format="json", **self.headers())
             self.assertEqual(response.status_code, 409)
             self.assertEqual(cache.get(key)["owner"], "another-request")
         finally:
@@ -319,7 +349,7 @@ class PreviewGameTests(TestCase):
     def test_cross_origin_login_and_protected_write_are_rejected(self):
         headers = {**self.headers(), "HTTP_ORIGIN": "https://other.example"}
         with patch("apps.koth.preview_game._native_request") as native:
-            self.assertEqual(self.client.post(self.proxy, {"team_token": "native-qa-token"}, format="json", **headers).status_code, 401)
+            self.assertEqual(self.client.post(self.proxy, {"team_token": self.raw_token}, format="json", **headers).status_code, 401)
             native.assert_not_called()
         self.login()
         headers = {**self.headers("/place"), "HTTP_ORIGIN": "https://other.example", "HTTP_X_KOTH_PREVIEW_METHOD": "POST"}
@@ -384,7 +414,7 @@ class PreviewGameTests(TestCase):
                 activate_key(actor="operator", reason="in-flight login rotation", expected_version=1, operation_id=uuid.uuid4())
             return response
         with patch("apps.koth.preview_game._native_request", side_effect=native):
-            response = self.client.post(self.proxy, {"team_token": "native-qa-token"}, format="json", **self.headers())
+            response = self.client.post(self.proxy, {"team_token": self.raw_token}, format="json", **self.headers())
         self.assertEqual((response.status_code, response.data["code"]), (503, "KOTH_TOKEN_KEY_UNAVAILABLE"))
         self.assertNotIn(GAME_COOKIE, response.cookies)
 
