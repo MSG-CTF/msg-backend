@@ -10,7 +10,7 @@ import web_server
 class WebServerTests(unittest.TestCase):
     def test_login_pool_is_single_threaded_and_independent_of_api_pool(self):
         api, login = web_server.commands({"WEB_CONCURRENCY": "3", "GUNICORN_THREADS": "8"})
-        self.assertIn("config.wsgi:application", api)
+        self.assertIn("config.api_wsgi:application", api)
         self.assertIn("config.login_wsgi:application", login)
         self.assertEqual(api[api.index("--workers")+1], "3")
         self.assertEqual(api[api.index("--threads")+1], "8")
@@ -28,6 +28,8 @@ class WebServerTests(unittest.TestCase):
         self.assertIn("client_max_body_size 0;", config)
         self.assertIn("proxy_buffering off;", config)
         self.assertIn("proxy_request_buffering off;", config)
+        self.assertIn("location = /_internal/api-ready { return 404; }", config)
+        self.assertIn("location = /_internal/login-ready { return 404; }", config)
 
     def test_invalid_worker_count_is_rejected_before_launch(self):
         for count in ("0", "-1", "9", "not-a-number"):

@@ -7,9 +7,10 @@ import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 
-RUNTIME = Path("/tmp/msg-backend-web")
+RUNTIME = Path(tempfile.gettempdir()) / "msg-backend-web"
 
 
 def integer(environment, name, default, minimum, maximum):
@@ -61,6 +62,8 @@ http {{
         proxy_request_buffering off;
         proxy_read_timeout 900s;
         proxy_send_timeout 900s;
+        location = /_internal/api-ready {{ return 404; }}
+        location = /_internal/login-ready {{ return 404; }}
         location = /api/v1/auth/login {{
             client_max_body_size 8k;
             proxy_request_buffering on;
@@ -81,7 +84,7 @@ def commands(environment, directory=RUNTIME):
     common = ["--worker-class", "gthread", "--keep-alive", str(keepalive),
               "--timeout", str(timeout), "--access-logfile", "-", "--error-logfile", "-"]
     return [
-        [sys.executable, "-m", "gunicorn", "config.wsgi:application", "--bind",
+        [sys.executable, "-m", "gunicorn", "config.api_wsgi:application", "--bind",
          "unix:"+str(directory/"api.sock"), "--control-socket", str(directory/"api-control.sock"),
          "--workers", str(workers), "--threads", str(threads), *common],
         [sys.executable, "-m", "gunicorn", "config.login_wsgi:application", "--bind",
@@ -136,11 +139,11 @@ def stop(children, grace=8):
             child.wait(timeout=5)
 
 
-def main():
-    prepare_runtime()
+def supervise(directory):
+    prepare_runtime(directory)
     port = integer(os.environ, "PORT", 8080, 1, 65535)
-    config = RUNTIME/"nginx.conf"
-    config.write_text(nginx_configuration(port), encoding="utf-8")
+    config = directory/"nginx.conf"
+    config.write_text(nginx_configuration(port, directory), encoding="utf-8")
     children = []
     stopping = False
 
@@ -160,13 +163,13 @@ def main():
     signal.signal(signal.SIGINT, terminate)
     signal.signal(signal.SIGHUP, reload_workers)
     try:
-        for command in commands(os.environ):
+        for command in commands(os.environ, directory):
             children.append(subprocess.Popen(command, start_new_session=True))
         deadline = time.monotonic()+60
         while not stopping and time.monotonic()<deadline:
             if any(child.poll() is not None for child in children):
                 raise RuntimeError("Web worker pool stopped during startup")
-            if ready(RUNTIME/"api.sock", "/healthz") and ready(RUNTIME/"login.sock", "/_internal/login-ready"):
+            if ready(directory/"api.sock", "/_internal/api-ready") and ready(directory/"login.sock", "/_internal/login-ready"):
                 break
             time.sleep(.2)
         else:
@@ -184,6 +187,11 @@ def main():
         return 1
     finally:
         stop(children)
+
+
+def main():
+    with tempfile.TemporaryDirectory(prefix="msg-backend-web-") as directory:
+        return supervise(Path(directory))
 
 
 if __name__ == "__main__":
