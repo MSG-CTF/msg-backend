@@ -42,11 +42,12 @@ class Profile:
     cookie: str = ""
     logout: str = ""
     response_token: str = "session_token"
+    cookie_aliases: tuple[str, ...] = ()
 
 
 PROFILES = {
     "koth-card-battle-arena": Profile("/api/session", "card", response_token="session_id"),
-    "koth-jenga": Profile("/auth", "cookie", cookie="session"),
+    "koth-jenga": Profile("/auth", "cookie", cookie="jenga_session", cookie_aliases=("session",)),
     "koth-swanopoly": Profile("/api/team/login", "cookie", cookie="swan_sid"),
     "koth-pixel-smuggler": Profile("/api/v1/session", "bearer", logout="/api/v1/session"),
     "koth-grand-tour-duel": Profile("/api/team/session", "cookie", cookie="koth_duel_session", logout="/api/team/session"),
@@ -157,7 +158,18 @@ def _authorize(request, challenge, grant, profile, uri, body=b""):
     sid = request.COOKIES.get(GAME_COOKIE)
     key = _session_key(sid)
     stored = _get(key)
-    credential = _credential(request, profile, uri, body)
+    if profile.kind == "cookie" and profile.cookie_aliases:
+        # Bind the exact cookie returned by login. Mixed credentials must never
+        # authorize one team while the native app reads another cookie name.
+        names = (profile.cookie, *profile.cookie_aliases)
+        bound = stored.get("native_cookie_name") if isinstance(stored, dict) else None
+        present = [name for name in names if request.COOKIES.get(name)]
+        if bound not in names or present != [bound]:
+            _delete(key)
+            raise PreviewDenied()
+        credential = request.COOKIES[bound]
+    else:
+        credential = _credential(request, profile, uri, body)
     valid = (isinstance(stored, dict) and credential
              and stored.get("challenge_id") == str(challenge.pk)
              and stored.get("admin_id") == grant["user_id"]
@@ -269,9 +281,17 @@ def _native_login(request, challenge, grant, profile, uri, body):
             _delete(key)
     if response.status_code != 200:
         return response
+    native_cookie_name = ""
     if profile.kind == "cookie":
-        credential = response.cookies.get(profile.cookie)
-        credential = credential.value if credential else ""
+        names = (profile.cookie, *profile.cookie_aliases)
+        found = [(name, response.cookies[name].value) for name in names
+                 if name in response.cookies and response.cookies[name].value]
+        if len(found) != 1:
+            raise ValueError("native login response has ambiguous cookie credentials")
+        native_cookie_name, credential = found[0]
+        for name in names:
+            if name != native_cookie_name:
+                response.delete_cookie(name, path="/", samesite="Lax")
     else:
         credential = _json(response.content).get("data", {}).get(profile.response_token, "")
     if not isinstance(credential, str) or not credential:
@@ -294,6 +314,8 @@ def _native_login(request, challenge, grant, profile, uri, body):
               "team_version": token.team.updated_at.isoformat() if token else "",
               "preview": preview is not None,
               "native_hash": hash_token(credential)}
+    if native_cookie_name:
+        stored["native_cookie_name"] = native_cookie_name
     remaining = preview_seconds_left(grant)
     if not remaining:
         raise PreviewDenied()
