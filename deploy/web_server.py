@@ -139,6 +139,15 @@ def stop(children, grace=8):
             child.wait(timeout=5)
 
 
+def reload_children(children):
+    for child in children:
+        if child.poll() is None:
+            try:
+                os.kill(child.pid, signal.SIGHUP)
+            except ProcessLookupError:
+                pass
+
+
 def supervise(directory):
     prepare_runtime(directory)
     port = integer(os.environ, "PORT", 8080, 1, 65535)
@@ -152,12 +161,7 @@ def supervise(directory):
         stopping = True
 
     def reload_workers(signum, frame):
-        for child in children:
-            if child.poll() is None:
-                try:
-                    os.killpg(child.pid, signal.SIGHUP)
-                except ProcessLookupError:
-                    pass
+        reload_children(children)
 
     signal.signal(signal.SIGTERM, terminate)
     signal.signal(signal.SIGINT, terminate)

@@ -48,6 +48,18 @@ class WebServerTests(unittest.TestCase):
                 web_server.prepare_runtime(link)
             self.assertTrue(target.is_dir())
 
+    def test_reload_signals_only_masters_so_inflight_workers_can_drain(self):
+        children = [Mock(), Mock(), Mock()]
+        for number, child in enumerate(children, 101):
+            child.pid = number
+            child.poll.return_value = None
+        with patch("web_server.os.kill", side_effect=[ProcessLookupError(), None, None]) as kill:
+            with patch("web_server.os.killpg", create=True) as kill_group:
+                with patch("web_server.signal.SIGHUP", 1, create=True):
+                    web_server.reload_children(children)
+        self.assertEqual([call.args[0] for call in kill.call_args_list], [101, 102, 103])
+        kill_group.assert_not_called()
+
     def test_shutdown_race_does_not_skip_other_children(self):
         first, second = Mock(), Mock()
         first.pid, second.pid = 101, 102
