@@ -4,6 +4,7 @@ import hmac
 import secrets
 import time
 import uuid
+from contextlib import contextmanager
 from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch
 
@@ -123,6 +124,27 @@ class PreviewGameTests(TestCase):
         self.assertEqual(self.authorize_session().status_code, 204)
         with override_settings(KOTH_TEAM_TOKEN_SECRET=secrets.token_urlsafe(48)):
             self.assertEqual(self.authorize_session().status_code, 401)
+
+    def test_native_callback_does_not_hold_service_key_authority_lock(self):
+        from apps.common.key_lifecycle import active_service_key
+        active = []
+
+        @contextmanager
+        def measured(purpose):
+            with active_service_key(purpose) as state:
+                active.append(purpose)
+                try:
+                    yield state
+                finally:
+                    active.pop()
+
+        def response(*args):
+            self.assertEqual(active, [])
+            return self.native_response(*args)
+
+        with patch('apps.common.key_lifecycle.active_service_key', measured), patch('apps.koth.preview_game.active_service_key', measured), patch('apps.koth.preview_game._native_request', side_effect=response):
+            result = self.client.post(self.proxy, {'team_token': self.raw_token}, format='json', **self.headers())
+        self.assertEqual(result.status_code, 200)
 
     def test_common_cross_problem_and_wrong_team_tokens_never_reach_native_login(self):
         KothTeamToken.objects.create(team=self.team, challenge=None, token_hash=hash_token("legacy-qa"))
