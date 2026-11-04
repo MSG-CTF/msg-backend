@@ -8,10 +8,11 @@ from django.utils import timezone
 
 from apps.common.key_lifecycle import key_id, material_for
 from apps.instances.models import RuntimeSecret, ServiceKeyRotation, ServiceKeyState
+from apps.koth.models import KothEnvironmentVersion
 
 
 class Command(BaseCommand):
-    help = "Activate a service key generation and atomically reencrypt runtime records"
+    help = "Activate a service key generation and atomically reencrypt all service ciphertext"
 
     def add_arguments(self, parser):
         parser.add_argument("--purpose", choices=["runtime", "koth"], required=True)
@@ -39,18 +40,24 @@ class Command(BaseCommand):
         if not created and ServiceKeyRotation.objects.filter(purpose=purpose, active_key_id=version).exists():
             raise CommandError("Retired service key versions cannot be reactivated")
         rows = 0
+        model_rows = {}
         if purpose == "runtime":
             if not options["reencrypt"]:
                 raise CommandError("Runtime activation requires --reencrypt")
             try:
                 cipher = MultiFernet([Fernet(value.encode()) for value in settings.RUNTIME_SECRET_ENCRYPTION_KEYS])
-                for secret in RuntimeSecret.objects.select_for_update().order_by("pk").iterator():
-                    rotated = cipher.rotate(secret.encrypted_value.encode()).decode()
-                    # Verify that retiring all old keys will preserve this record.
-                    Fernet(material.encode()).decrypt(rotated.encode())
-                    secret.encrypted_value = rotated
-                    secret.save(update_fields=["encrypted_value"])
-                    rows += 1
+                primary = Fernet(material.encode())
+                for model, field in ((RuntimeSecret, "encrypted_value"), (KothEnvironmentVersion, "encrypted_settings")):
+                    count = 0
+                    for record in model.objects.select_for_update().order_by("pk").iterator():
+                        rotated = cipher.rotate(getattr(record, field).encode()).decode()
+                        # Every consumer must remain readable after old keys retire.
+                        primary.decrypt(rotated.encode())
+                        setattr(record, field, rotated)
+                        record.save(update_fields=[field])
+                        count += 1
+                    model_rows[model._meta.label] = count
+                    rows += count
             except (InvalidToken, ValueError, TypeError):
                 raise CommandError("Key activation aborted; no rows or key state were committed") from None
         state.active_key_id = version
@@ -60,4 +67,4 @@ class Command(BaseCommand):
         ServiceKeyRotation.objects.create(purpose=purpose,previous_key_id=previous,
             active_key_id=version,generation=state.generation,reencrypted_rows=rows,actor=actor,reason=reason)
         self.stdout.write(json.dumps({"purpose":purpose,"generation":state.generation,
-            "changed":True,"reencrypted_rows":rows,"active_key_id":version}))
+            "changed":True,"reencrypted_rows":rows,"reencrypted_models":model_rows,"active_key_id":version}))
