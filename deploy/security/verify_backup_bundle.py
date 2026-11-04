@@ -54,16 +54,19 @@ def restore_sql(compressed):
         execute(['docker','exec','-i',container,'psql','-X','-v','ON_ERROR_STOP=1','-U','postgres','tc622_restore'],sql,timeout=100)
         count=int(execute(['docker','exec',container,'psql','-X','-A','-t','-U','postgres','tc622_restore','-c','SELECT count(*) FROM challenge_runtime_secrets']).strip())
         ciphertexts=execute(['docker','exec',container,'psql','-X','-A','-t','-U','postgres','tc622_restore','-c','SELECT encrypted_value FROM challenge_runtime_secrets']).splitlines()
+        koth_ciphertexts=execute(['docker','exec',container,'psql','-X','-A','-t','-U','postgres','tc622_restore','-c','SELECT encrypted_settings FROM koth_environment_versions']).splitlines()
         from cryptography.fernet import Fernet, MultiFernet
         keys=[]
         for path in Path('/etc/credstore.encrypted').glob('msgctf-service-key-recovery*'):
             payload=json.loads(execute(['systemd-creds','decrypt','--name=service-recovery.json',str(path),'-']))
             keys.extend(payload['secrets']['RUNTIME_SECRET_ENCRYPTION_KEYS'].split(','))
         cipher=MultiFernet([Fernet(key.encode()) for key in dict.fromkeys(keys)])
-        for ciphertext in ciphertexts:
+        for ciphertext in ciphertexts+koth_ciphertexts:
             cipher.decrypt(ciphertext)
         return {'database_restore_succeeded':True,'runtime_secret_rows':count,
-            'restored_runtime_rows_decrypted':len(ciphertexts),'plaintext_written_to_persistent_storage':False}
+            'restored_runtime_rows_decrypted':len(ciphertexts),
+            'restored_koth_environment_rows_decrypted':len(koth_ciphertexts),
+            'plaintext_written_to_persistent_storage':False}
     finally:
         execute(['docker','rm','--force',container])
 

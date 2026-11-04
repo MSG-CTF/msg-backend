@@ -13,6 +13,7 @@ from apps.instances.models import RuntimeSecret, ServiceKeyRotation, ServiceKeyS
 from apps.instances.runtime_secrets import create_runtime_secret, decrypt_runtime_secret
 from apps.koth import tests as koth_fixtures
 from apps.koth.models import KothTeamToken, KothTokenKeyState
+from apps.koth.environment import create_version, decode_settings
 
 OLD_KOTH = secrets.token_urlsafe(48)
 NEW_KOTH = secrets.token_urlsafe(48)
@@ -75,6 +76,13 @@ class KeyLifecycleTests(TestCase):
         with self.assertRaises(CommandError):
             self.activate("koth")
 
+    def environment(self):
+        return create_version(self.challenge,{'containers':[{'name':'service',
+            'image':'ghcr.io/msg-ctf/koth/service@sha256:'+'a'*64,
+            'entries':{'TOKEN':{'value':'synthetic-environment-secret','kind':'secret',
+                'required':True,'locked':False,'operator_override':False}}}]},
+            'a'*40,'tc622-review',uuid.uuid4(),'f'*64)
+
     def test_runtime_rotation_reencrypts_existing_data_and_rejects_old_worker(self):
         self.activate("runtime", True)
         # Use a separate ordinary challenge; KOTH's model is not a RuntimeSecret FK.
@@ -93,21 +101,29 @@ class KeyLifecycleTests(TestCase):
             challenge, "internal_token", "synthetic-review-value", "tc622-review"
         )
         old_ciphertext = row.encrypted_value
+        environment = self.environment()
+        old_environment_ciphertext = environment.encrypted_settings
         with override_settings(
             RUNTIME_SECRET_ENCRYPTION_KEYS=[NEW_RUNTIME, OLD_RUNTIME]
         ):
             self.activate("runtime", True)
         row.refresh_from_db()
         self.assertNotEqual(row.encrypted_value, old_ciphertext)
+        environment.refresh_from_db()
+        self.assertNotEqual(environment.encrypted_settings, old_environment_ciphertext)
         with override_settings(RUNTIME_SECRET_ENCRYPTION_KEYS=[NEW_RUNTIME]):
             self.assertEqual(decrypt_runtime_secret(row), "synthetic-review-value")
+            self.assertEqual(decode_settings(environment)['containers'][0]['entries']['TOKEN']['value'],
+                'synthetic-environment-secret')
         with self.assertRaises(ServiceKeyUnavailable):
             decrypt_runtime_secret(row)
+        with self.assertRaises(ServiceKeyUnavailable):decode_settings(environment)
+        with self.assertRaises(ServiceKeyUnavailable):self.environment()
         self.assertEqual(
             ServiceKeyRotation.objects.filter(purpose="runtime")
             .latest("created_at")
             .reencrypted_rows,
-            1,
+            2,
         )
 
     def test_failed_reencryption_rolls_back_rows_state_and_audit(self):
@@ -138,6 +154,24 @@ class KeyLifecycleTests(TestCase):
             key_id("runtime", OLD_RUNTIME),
         )
         self.assertEqual(ServiceKeyRotation.objects.count(), count)
+
+    def test_invalid_koth_ciphertext_rolls_back_both_models_and_key_state(self):
+        self.activate('runtime',True)
+        from apps.challenge.models import Challenge
+        challenge=Challenge.objects.create(title='TC622',challenge_slug='tc622-koth-rollback',
+            category='WEB',difficulty='EASY',score=1,description='fixture',flag_hash='0'*64)
+        runtime=create_runtime_secret(challenge,'internal_token','synthetic-runtime-secret','tc622-review')
+        environment=self.environment()
+        environment.encrypted_settings='invalid-ciphertext'
+        environment.save(update_fields=['encrypted_settings'])
+        original=runtime.encrypted_value
+        count=ServiceKeyRotation.objects.count()
+        with override_settings(RUNTIME_SECRET_ENCRYPTION_KEYS=[NEW_RUNTIME,OLD_RUNTIME]):
+            with self.assertRaises(CommandError):self.activate('runtime',True)
+        runtime.refresh_from_db()
+        self.assertEqual(runtime.encrypted_value,original)
+        self.assertEqual(ServiceKeyState.objects.get(pk='runtime').active_key_id,key_id('runtime',OLD_RUNTIME))
+        self.assertEqual(ServiceKeyRotation.objects.count(),count)
 
     @override_settings(SERVICE_KEY_STATE_REQUIRED=True)
     def test_missing_authority_fails_closed(self):
