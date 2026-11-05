@@ -301,6 +301,8 @@ class KothPreviewToken(models.Model):
     # 팀이 없는 관리자가 공개 전 문제를 게임 테스트할 때만 쓰는 토큰이다.
     # 실제 팀을 만들지 않아 순위표·점수에 들어가지 않고, 점수 응답에 이 팀 ID가 섞이면 뺀다.
     # 관리자 계정이 지워져도 게임 기록에 남은 팀 ID를 계속 걸러야 해서 행은 남긴다
+    # 운영 검증용 실제 팀도 admin=None, key_version=0인 사용 불가 표식으로 등록해
+    # 참가팀 수와 지급 대상에서 제외한다. 이 표식으로 인증 권한을 만들지 않는다.
     admin = models.ForeignKey(
         "accounts.User",
         on_delete=models.SET_NULL,
