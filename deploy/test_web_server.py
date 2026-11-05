@@ -14,7 +14,7 @@ class WebServerTests(unittest.TestCase):
         self.assertIn("config.login_wsgi:application", login)
         self.assertEqual(api[api.index("--workers")+1], "3")
         self.assertEqual(api[api.index("--threads")+1], "8")
-        self.assertEqual(login[login.index("--workers")+1], "1")
+        self.assertEqual(login[login.index("--workers")+1], "2")
         self.assertEqual(login[login.index("--threads")+1], "1")
         self.assertNotEqual(api[api.index("--bind")+1], login[login.index("--bind")+1])
 

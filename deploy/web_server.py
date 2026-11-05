@@ -77,7 +77,7 @@ http {{
 
 def commands(environment, directory=RUNTIME):
     workers = integer(environment, "WEB_CONCURRENCY", 2, 1, 32)
-    login_workers = integer(environment, "LOGIN_WEB_CONCURRENCY", 1, 1, 8)
+    login_workers = integer(environment, "LOGIN_WEB_CONCURRENCY", 2, 1, 8)
     threads = integer(environment, "GUNICORN_THREADS", 4, 1, 64)
     timeout = integer(environment, "GUNICORN_TIMEOUT", 30, 1, 900)
     keepalive = integer(environment, "GUNICORN_KEEPALIVE", 10, 0, 300)
