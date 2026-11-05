@@ -20,7 +20,7 @@ ENV HOME=/app \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     WEB_CONCURRENCY=2 \
-    LOGIN_WEB_CONCURRENCY=1 \
+    LOGIN_WEB_CONCURRENCY=2 \
     GUNICORN_WORKER_CLASS=gthread \
     GUNICORN_THREADS=4 \
     GUNICORN_KEEPALIVE=10 \
@@ -29,6 +29,7 @@ ENV HOME=/app \
 USER app
 
 RUN test "$(id -u)" = 100 && test "$(id -g)" = 101
+RUN python -c 'import os; from deploy.web_server import commands; assert commands(os.environ) == commands({}), "Image web defaults differ from launcher defaults"'
 
 EXPOSE 8080
 
