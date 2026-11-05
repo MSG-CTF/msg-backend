@@ -2,8 +2,6 @@ import uuid
 from datetime import timedelta
 from unittest.mock import patch
 
-from psycopg import sql
-
 from django.core.cache import cache
 from django.db import connection
 from django.test import TestCase, override_settings
@@ -48,28 +46,21 @@ class SchedulerObservationTests(Fixtures, TestCase):
     def test_old_backend_inserts_without_observation_columns_still_work(self):
         instance = self.instance()
         new_id = uuid.uuid4()
-        fields = [
-            field
-            for field in Instance._meta.concrete_fields
-            if field.name
-            not in ("scheduler_status", "scheduler_checked_at", "scheduler_error_code")
-        ]
-        table = sql.Identifier(Instance._meta.db_table)
-        columns = sql.SQL(", ").join(sql.Identifier(field.column) for field in fields)
-        selected = sql.SQL(", ").join(
-            sql.Placeholder() if field.primary_key else sql.Identifier(field.column)
-            for field in fields
-        )
         with connection.cursor() as cursor:
             cursor.execute(
-                sql.SQL(
-                    "INSERT INTO {} ({}) SELECT {} FROM {} WHERE instance_id = %s"
-                ).format(
-                    table,
-                    columns,
-                    selected,
-                    table,
-                ),
+                """
+                INSERT INTO instances (
+                    instance_id, user_id, team_id, challenge_id, status, host,
+                    ports, endpoints, expires_at, hard_expires_at, extend_count,
+                    replaced_instance_id, release_id, delete_reason,
+                    created_at, updated_at
+                )
+                SELECT %s, user_id, team_id, challenge_id, status, host,
+                    ports, endpoints, expires_at, hard_expires_at, extend_count,
+                    replaced_instance_id, release_id, delete_reason,
+                    created_at, updated_at
+                FROM instances WHERE instance_id = %s
+                """,
                 [new_id, instance.pk],
             )
         legacy = Instance.objects.get(pk=new_id)
