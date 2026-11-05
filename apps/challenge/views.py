@@ -19,6 +19,7 @@ from apps.challenge.services import (
     update_dynamic_score_and_team_scores,
 )
 from apps.common.bans import check_active_team
+from apps.common.exceptions import Forbidden
 from apps.common.response import fail, ok
 from apps.instances.models import ChallengeRuntimeConfig, Instance
 from apps.instances.user_file_downloads import user_file_response
@@ -33,7 +34,7 @@ from apps.instances.services import (
     sync_instance_from_scheduler,
 )
 from apps.common.permissions import IsAuthenticated
-from apps.accounts.models import Team
+from apps.accounts.models import Team, User
 from apps.adminpanel.models import setting_values
 from apps.board.models import TeamBoardState, TeamChallengeAccess
 from apps.board.services import challenge_solve_deadline, complete_challenge_from_submission
@@ -218,6 +219,31 @@ class ChallengeSubmitView(APIView):
                 challenge = Challenge.objects.select_for_update().get(pk=challenge.pk)
             except Challenge.DoesNotExist:
                 return fail("CHALLENGE_NOT_FOUND", "존재하지 않는 문제 ID입니다.", 404)
+            # The challenge lock stabilizes the next score before selecting team locks.
+            next_score = calculate_dynamic_score(
+                challenge.initial_score,
+                challenge.minimum_score,
+                challenge.decay,
+                Solve.objects.filter(challenge=challenge).count() + 1,
+            )
+            affected_team_ids = {team.pk}
+            if next_score != challenge.current_score:
+                affected_team_ids.update(
+                    Solve.objects.filter(challenge=challenge).values_list(
+                        "team_id", flat=True
+                    )
+                )
+            # Preserve UUID lock order; NO KEY UPDATE permits unrelated FK inserts.
+            locked_teams = {
+                row.pk: row
+                for row in Team.objects.select_for_update(no_key=True)
+                .filter(pk__in=affected_team_ids)
+                .order_by("pk")
+            }
+            check_active_team(locked_teams.get(team.pk))
+            # Admin membership changes hold the same team lock.
+            if not User.objects.filter(pk=request.user.pk, team_id=team.pk).exists():
+                raise Forbidden("팀 소속이 변경되었습니다 현재 팀을 확인해주세요")
             flag_lock, _ = FlagSubmissionLock.objects.select_for_update().get_or_create(
                 team=team,
                 challenge=challenge,
@@ -251,29 +277,6 @@ class ChallengeSubmitView(APIView):
             if challenge.flag_hash != initial_flag_hash:
                 is_flag_correct = is_correct_flag(flag, challenge.flag_hash)
 
-            # The challenge lock stabilizes the next score before selecting team locks.
-            next_score = calculate_dynamic_score(
-                challenge.initial_score,
-                challenge.minimum_score,
-                challenge.decay,
-                Solve.objects.filter(challenge=challenge).count() + 1,
-            )
-            affected_team_ids = {team.pk}
-            if next_score != challenge.current_score:
-                affected_team_ids.update(
-                    Solve.objects.filter(challenge=challenge).values_list(
-                        "team_id", flat=True
-                    )
-                )
-            # Preserve UUID lock order; NO KEY UPDATE permits unrelated FK inserts.
-            locked_teams = {
-                row.pk: row
-                for row in Team.objects.select_for_update(no_key=True)
-                .filter(pk__in=affected_team_ids)
-                .order_by("pk")
-            }
-            # 잠근 행으로 정지·삭제를 다시 확인한다. 인증 뒤 정지되거나 삭제됐을 수 있다.
-            check_active_team(locked_teams.get(team.pk))
             if Solve.objects.filter(team=team, challenge=challenge).exists():
                 return fail("ALREADY_SOLVED", "이미 정답을 맞춘 문제입니다.", 409)
 
