@@ -45,6 +45,7 @@ from .models import (
 )
 from .tokens import PREVIEW_TEAM_NAME, build_preview_token, build_team_token, matches_token, preview_team_id
 from .token_keys import current_key_version
+from .services import eligible_teams
 from .files import public_file_metadata, with_file_metadata
 
 
@@ -551,6 +552,6 @@ def internal_teams(request):
             "team_name": team.team_name,
             "koth_division": team.koth_division,
         }
-        for team in Team.objects.filter(is_banned=False).order_by("team_name")
+        for team in eligible_teams().order_by("team_name")
     ]
     return ok({"teams": teams, "total_count": len(teams)})

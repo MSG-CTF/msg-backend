@@ -188,11 +188,7 @@ class ChallengesView(APIView):
 
     def get(self, request):
         rows = [challenge_data(c) for c in KothChallenge.objects.select_related("club")]
-        division_counts = dict(
-            Team.objects.filter(is_banned=False)
-            .values_list("koth_division")
-            .annotate(total=Count("team_id"))
-        )
+        division_counts = services.scoring_team_counts()
         points_by_division = {
             division: list(services.rank_points(division_counts.get(division, 0)))
             for division in Team.KothDivision.values
