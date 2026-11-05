@@ -208,7 +208,8 @@ def solves(request):
                     if opened and row.solved_at
                     else None
                 ),
-                "earned_score": num(row.earned_score),
+                # 팀 점수 · 순위와 같은 기준으로 문제의 현재 점수를 보여준다 (QA TC-285).
+                "earned_score": num(row.challenge.current_score),
                 "earned_mileage": row.earned_mileage,
                 "is_extra_dice_granted": row.is_extra_dice_granted,
                 "solved_by": (

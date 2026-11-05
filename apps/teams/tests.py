@@ -281,12 +281,30 @@ class MyPageTests(TestCase):
         # 보드에서 연 기록이 없으면 걸린 시간을 지어내지 않는다
         self.assertIsNone(row["elapsed_seconds"])
         self.assertEqual(row["challenge_title"], "웹 상 문제")
-        self.assertEqual(row["earned_score"], 100)
+        self.assertEqual(row["earned_score"], 1000)
         self.assertEqual(row["earned_mileage"], 30)
         self.assertTrue(row["is_extra_dice_granted"])
         self.assertEqual(set(row["solved_by"]), {"user_id", "nickname"})
         self.assertEqual(row["solved_by"]["nickname"], "나")
         self.assertEqual(res.data["data"]["total_count"], 1)
+
+    def test_solves_score_follows_current_score_like_team_total(self):
+        """동적 점수가 내려가면 풀이 목록도 팀 합계와 같은 현재 점수를 보여준다 (QA TC-285)."""
+        ch = self._challenge()
+        Solve.objects.create(
+            team=self.team,
+            challenge=ch,
+            solved_by_user=self.user,
+            earned_score=1000,
+            earned_mileage=30,
+        )
+        Challenge.objects.filter(pk=ch.pk).update(current_score=600)
+
+        row = self.client.get("/api/v1/teams/me/solves").data["data"]["solves"][0]
+        team = self.client.get("/api/v1/teams/me").data["data"]
+
+        self.assertEqual(row["earned_score"], 600)
+        self.assertEqual(team["team_score"], 600)
 
     def test_solves_elapsed_seconds_counts_from_board_open_to_solve(self):
         from datetime import timedelta
