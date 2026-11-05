@@ -21,7 +21,28 @@ CREATE_FAILED_CLEANUP은 생성 실패의 정리 사유이므로 참가자 삭�
 조회 중에는 DB 행 잠금을 유지하지 않습니다
 PostgreSQL advisory lock으로 중복 실행을 막고 Redis에 확인 순서를 저장해 오래된 오류 기록이 뒤의 기록을 막지 않게 합니다
 조회 한 건이 실패해도 다음 주기에 다시 시도하며 다른 기록의 갱신은 유지합니다
-새 테이블이나 마이그레이션은 필요하지 않습니다
+관리자 원격 확인 결과 필드 추가를 위해 Backend 배포 전에 instances.0024_instance_scheduler_observation을 적용합니다
+기존 인스턴스의 관측 값은 비어 있으며 확인한 것으로 소급 처리하지 않습니다
+
+## 관리자 목록의 원격 관측
+
+GET /api/v1/admin/instances의 각 행에 scheduler_observation을 추가합니다
+기존 status와 updated_at은 DB 상태와 수명 변경 시각이며 의미를 바꾸지 않습니다
+목록 조회는 Scheduler를 호출하지 않고 마지막 주기 작업의 저장 결과만 읽습니다
+
+- status: 소유 정보와 릴리스 검증을 통과한 마지막 Scheduler 상태. 조회 실패 시 null
+- checked_at: 검증·반영 결과를 저장한 시각. 아직 확인하지 않았다면 null
+- check_status: NOT_CHECKED / OK / ERROR / STALE
+- error_code: NOT_FOUND / UNAUTHORIZED / FORBIDDEN / UNAVAILABLE / INVALID_RESPONSE 또는 null
+- status_mismatch: OK일 때만 DB status와 원격 status의 비교 결과, 나머지는 null
+
+60초를 초과했거나 확인 후 DB 행이 변경됐거나 미래 시각이면 STALE로 표시합니다
+과거 성공을 현재 원격 상태로 간주하지 않으며 NOT_CHECKED와 ERROR도 정상 일치로 표시하지 않습니다
+관측 필드만 갱신할 때는 updated_at을 바꾸지 않아 종료 대기 시간과 오래된 응답 검사를 유지합니다
+실패 응답 원문·인증값·URL·환경변수는 관측 필드와 관리자 응답에 저장하지 않습니다
+
+프론트는 DB 상태와 관측 상태·시각을 구분하고 status_mismatch가 null이면 일치로 처리하지 않아야 합니다
+서버의 기존 reconcile timer가 실행되지 않으면 NOT_CHECKED 또는 STALE로 남습니다
 
 ## 운영 VM 적용
 
@@ -44,7 +65,7 @@ timer는 부팅 30초 뒤 시작하고, 이전 실행이 끝난 뒤 15초 간격
     python manage.py reconcile_instances --interval 15
     python manage.py reconcile_instances --instance-id INSTANCE_UUID
 
-이미 종료된 과거 이력의 사유가 비어 있다면 해당 instance-id를 지정해 보충할 수 있습니다
+이미 CLEANED인 과거 이력도 해당 instance-id를 지정하면 관측 결과와 비어 있는 종료 사유를 확인할 수 있습니다
 기본 주기 작업은 이미 종료된 이력을 반복 조회하지 않습니다
 
 중지할 때는 sudo systemctl disable --now msg-instance-reconcile.timer를 실행합니다
