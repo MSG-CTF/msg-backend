@@ -2351,7 +2351,7 @@ class AdminInstanceTests(TestCase):
     def test_force_delete_success(self, mock_delete):
         mock_delete.return_value = None
         inst = self._instance(status=InstanceStatus.RUNNING)
-        res = self.client.delete(f"/api/v1/admin/instances/{inst.instance_id}")
+        res = self.client.delete(f"/api/v1/admin/instances/{inst.instance_id}", {"reason": "운영 점검"}, format="json")
         self.assertEqual(res.status_code, 202)
         self.assertEqual(res.data["data"]["status"], "STOPPING")
         self.assertEqual(res.data["data"]["forced_by"], "root")
@@ -2360,20 +2360,20 @@ class AdminInstanceTests(TestCase):
         self.assertEqual(inst.delete_reason, DeleteReason.ADMIN_FORCED)
 
     def test_force_delete_not_found(self):
-        res = self.client.delete(f"/api/v1/admin/instances/{uuid.uuid4()}")
+        res = self.client.delete(f"/api/v1/admin/instances/{uuid.uuid4()}", {"reason": "운영 점검"}, format="json")
         self.assertEqual(res.status_code, 404)
         self.assertEqual(res.data["code"], "INSTANCE_NOT_FOUND")
 
     def test_force_delete_already_terminated(self):
         inst = self._instance(status=InstanceStatus.STOPPED)
-        res = self.client.delete(f"/api/v1/admin/instances/{inst.instance_id}")
+        res = self.client.delete(f"/api/v1/admin/instances/{inst.instance_id}", {"reason": "운영 점검"}, format="json")
         self.assertEqual(res.status_code, 409)
         self.assertEqual(res.data["code"], "INSTANCE_ALREADY_TERMINATED")
 
     def test_force_delete_participant_blocked(self):
         inst = self._instance()
         self.auth("player")
-        res = self.client.delete(f"/api/v1/admin/instances/{inst.instance_id}")
+        res = self.client.delete(f"/api/v1/admin/instances/{inst.instance_id}", {"reason": "운영 점검"}, format="json")
         self.assertEqual(res.status_code, 403)
 
     @patch("apps.adminpanel.views.call_scheduler_reset")
@@ -2390,7 +2390,7 @@ class AdminInstanceTests(TestCase):
         old.save(update_fields=["endpoints", "updated_at"])
         new_id = uuid.uuid4()
         mock_reset.return_value = {"instance_id": str(new_id), "status": "RESETTING"}
-        res = self.client.post(f"/api/v1/admin/instances/{old.instance_id}/reset")
+        res = self.client.post(f"/api/v1/admin/instances/{old.instance_id}/reset", {"reason": "운영 점검"}, format="json")
         self.assertEqual(res.status_code, 202)
         self.assertEqual(res.data["data"]["instance_id"], str(new_id))
         self.assertNotEqual(res.data["data"]["instance_id"], str(old.instance_id))
@@ -2407,19 +2407,19 @@ class AdminInstanceTests(TestCase):
 
     def test_force_reset_not_restartable(self):
         inst = self._instance(status=InstanceStatus.STOPPED)
-        res = self.client.post(f"/api/v1/admin/instances/{inst.instance_id}/reset")
+        res = self.client.post(f"/api/v1/admin/instances/{inst.instance_id}/reset", {"reason": "운영 점검"}, format="json")
         self.assertEqual(res.status_code, 409)
         self.assertEqual(res.data["code"], "INSTANCE_NOT_RESTARTABLE")
 
     def test_force_reset_not_found(self):
-        res = self.client.post(f"/api/v1/admin/instances/{uuid.uuid4()}/reset")
+        res = self.client.post(f"/api/v1/admin/instances/{uuid.uuid4()}/reset", {"reason": "운영 점검"}, format="json")
         self.assertEqual(res.status_code, 404)
         self.assertEqual(res.data["code"], "INSTANCE_NOT_FOUND")
 
     def test_force_reset_participant_blocked(self):
         inst = self._instance()
         self.auth("player")
-        res = self.client.post(f"/api/v1/admin/instances/{inst.instance_id}/reset")
+        res = self.client.post(f"/api/v1/admin/instances/{inst.instance_id}/reset", {"reason": "운영 점검"}, format="json")
         self.assertEqual(res.status_code, 403)
 
     def test_list_summary_optout(self):
@@ -3474,7 +3474,7 @@ class AdminEventRecordingTests(TestCase):
         mock_delete.return_value = None
         inst = self.instance()
 
-        res = self.client.delete(f"/api/v1/admin/instances/{inst.instance_id}")
+        res = self.client.delete(f"/api/v1/admin/instances/{inst.instance_id}", {"reason": "운영 점검"}, format="json")
 
         self.assertEqual(res.status_code, 202)
         event = self.only_event(AdminEvent.EventType.INSTANCE_FORCED)
@@ -3494,7 +3494,7 @@ class AdminEventRecordingTests(TestCase):
         )
         inst = self.instance()
 
-        res = self.client.delete(f"/api/v1/admin/instances/{inst.instance_id}")
+        res = self.client.delete(f"/api/v1/admin/instances/{inst.instance_id}", {"reason": "운영 점검"}, format="json")
 
         self.assertEqual(res.status_code, 503)
         [event] = self.events()
@@ -3528,7 +3528,7 @@ class AdminEventRecordingTests(TestCase):
         new_id = uuid.uuid4()
         mock_reset.return_value = {"instance_id": str(new_id), "status": "RESETTING"}
 
-        res = self.client.post(f"/api/v1/admin/instances/{old.instance_id}/reset")
+        res = self.client.post(f"/api/v1/admin/instances/{old.instance_id}/reset", {"reason": "운영 점검"}, format="json")
 
         self.assertEqual(res.status_code, 202)
         event = self.only_event(AdminEvent.EventType.INSTANCE_FORCED)
@@ -3571,7 +3571,7 @@ class AdminEventRecordingTests(TestCase):
         mock_reset.return_value = {"instance_id": str(new_id), "status": "RESETTING"}
         mock_replaced.side_effect = DatabaseError("db down")
 
-        res = self.client.post(f"/api/v1/admin/instances/{old.instance_id}/reset")
+        res = self.client.post(f"/api/v1/admin/instances/{old.instance_id}/reset", {"reason": "운영 점검"}, format="json")
 
         self.assertEqual(res.status_code, 500)
         self.assertFalse(Instance.objects.filter(instance_id=new_id).exists())
@@ -3590,7 +3590,7 @@ class AdminEventRecordingTests(TestCase):
         new_id = uuid.uuid4()
         mock_reset.return_value = {"instance_id": str(new_id), "status": "RESETTING"}
 
-        res = self.client.post(f"/api/v1/admin/instances/{old.instance_id}/reset")
+        res = self.client.post(f"/api/v1/admin/instances/{old.instance_id}/reset", {"reason": "운영 점검"}, format="json")
 
         self.assertEqual(res.status_code, 503)
         event = self.only_event(AdminEvent.EventType.INSTANCE_FORCED)
@@ -3605,7 +3605,7 @@ class AdminEventRecordingTests(TestCase):
 
         inst = self.instance()
         with patch.object(Instance, "save", side_effect=DatabaseError("db down")):
-            res = self.client.delete(f"/api/v1/admin/instances/{inst.instance_id}")
+            res = self.client.delete(f"/api/v1/admin/instances/{inst.instance_id}", {"reason": "운영 점검"}, format="json")
 
         self.assertEqual(res.status_code, 500)
         mock_delete.assert_called_once()
@@ -3637,7 +3637,8 @@ class AdminEventRecordingTests(TestCase):
                     Instance, "save", side_effect=DatabaseError("db down")
                 ):
                     response = self.client.delete(
-                        f"/api/v1/admin/instances/{inst.pk}"
+                        f"/api/v1/admin/instances/{inst.pk}",
+                        {"reason": "운영 점검"}, format="json",
                     )
 
                 self.assertEqual(response.status_code, 500)
@@ -3680,7 +3681,7 @@ class AdminEventRecordingTests(TestCase):
         )
         old = self.instance()
 
-        res = self.client.post(f"/api/v1/admin/instances/{old.instance_id}/reset")
+        res = self.client.post(f"/api/v1/admin/instances/{old.instance_id}/reset", {"reason": "운영 점검"}, format="json")
 
         self.assertEqual(res.status_code, 503)
         [event] = self.events()
