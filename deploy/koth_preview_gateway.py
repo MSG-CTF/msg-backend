@@ -7,6 +7,69 @@ from urllib.parse import urlsplit
 from uuid import UUID
 
 
+def with_game_keepalive(original, upstream):
+    """Bound private game idle connections below the servers' five seconds.
+
+    Input uses the multiline block layout produced by this renderer/caddy fmt.
+    Malformed or inline target blocks fail before a configuration is applied.
+    """
+    host, port = upstream.rsplit(":", 1)
+    address = ipaddress.ip_address(host)
+    if (not address.is_private or address.is_unspecified or address.is_multicast
+            or not port.isdecimal() or not 1 <= int(port) <= 65535):
+        raise ValueError("valid private upstream required")
+    lines = original.splitlines(keepends=True)
+    target = re.compile(r"^\s*reverse_proxy " + re.escape(upstream) + r"\s*\{\s*$")
+
+    def end_block(start):
+        depth = 0
+        for index in range(start, len(lines)):
+            text = lines[index].strip()
+            if text.startswith("#"):
+                continue
+            if text.endswith("{"):
+                depth += 1
+            elif text == "}":
+                depth -= 1
+            if depth == 0:
+                return index
+        raise ValueError("unterminated game proxy block")
+
+    edits = []
+    targets = [index for index, line in enumerate(lines) if target.fullmatch(line)]
+    if not targets:
+        raise ValueError("multiline game proxy boundary not found")
+    for start in targets:
+        end = end_block(start)
+        transports = [index for index in range(start + 1, end)
+                      if lines[index].strip() == "transport http {"]
+        if len(transports) > 1:
+            raise ValueError("ambiguous game HTTP transport")
+        if not transports:
+            indent = re.match(r"\s*", lines[start]).group() + " "
+            edits.append((end, end, [indent + "transport http {\n",
+                                    indent + " keepalive 4s\n", indent + "}\n"]))
+            continue
+        transport = transports[0]
+        transport_end = end_block(transport)
+        if transport_end >= end:
+            raise ValueError("invalid game HTTP transport boundary")
+        options = [index for index in range(transport + 1, transport_end)
+                   if re.match(r"\s*keepalive\s+", lines[index])]
+        if len(options) > 1:
+            raise ValueError("duplicate game keepalive option")
+        if options and re.match(r"^\s*keepalive\s+off(?:\s|$)", lines[options[0]]):
+            continue
+        indent = re.match(r"\s*", lines[transport]).group() + " "
+        if options:
+            edits.append((options[0], options[0] + 1, [indent + "keepalive 4s\n"]))
+        else:
+            edits.append((transport + 1, transport + 1, [indent + "keepalive 4s\n"]))
+    for start, end, replacement in sorted(edits, reverse=True):
+        lines[start:end] = replacement
+    return "".join(lines)
+
+
 def render_preview_gateway(original, challenge_id, origin, upstream, bootstrap):
     if str(UUID(challenge_id)) != challenge_id:
         raise ValueError("canonical challenge UUID required")
@@ -92,7 +155,7 @@ def render_preview_gateway(original, challenge_id, origin, upstream, bootstrap):
         lambda m:m.group(1) + '\n header_up Cookie "(^|; *)__Host-msg_koth_preview=[^;]*" ""', original)
     if count < 2:
         raise ValueError("game proxy boundaries not found")
-    return original
+    return with_game_keepalive(original, upstream)
 
 
 GAME_PROFILES = {
@@ -158,7 +221,7 @@ def upgrade_game_preview(original, challenge_id, origin, upstream, game_slug,
     transport = "transport http {\n dial_timeout 2s\n response_header_timeout 12s\n}\n"
     native = (f"reverse_proxy {upstream} {{\n"
               'header_up Cookie "(^|; *)__Host-msg_koth_[^=;]+=[^;]*" ""\n'
-              "transport http {\n response_header_timeout 160s\n}\n}\n")
+              "transport http {\n keepalive 4s\n response_header_timeout 160s\n}\n}\n")
     proxy = ("reverse_proxy https://msgctf.kr {\n"
              "rewrite /api/v1/koth/preview_sessions/game_proxy\n"
              + headers(True) + transport + "}\n")
@@ -186,4 +249,4 @@ def upgrade_game_preview(original, challenge_id, origin, upstream, game_slug,
         return original[:starts[0].start()] + block + original[starts[0].start():]
     start = starts[0].start()
     finish = ends[0].end()
-    return original[:start] + block + original[finish:]
+    return with_game_keepalive(original[:start] + block + original[finish:], upstream)
