@@ -103,6 +103,7 @@ class AdminEvent(models.Model):
         CHALLENGE_DELETED = "CHALLENGE_DELETED"
         CHALLENGE_FLAG_REVEALED = "CHALLENGE_FLAG_REVEALED"
         SERVICE_KEY_ROTATED = "SERVICE_KEY_ROTATED"
+        KOTH_PERIOD_RETRIED = "KOTH_PERIOD_RETRIED"
 
     class Severity(models.TextChoices):
         INFO = "INFO"
