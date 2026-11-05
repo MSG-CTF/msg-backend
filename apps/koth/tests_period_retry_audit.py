@@ -5,8 +5,9 @@ from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.db import DatabaseError
-from django.test import TestCase, override_settings
+from django.test import TestCase
 from rest_framework.test import APIClient
+from rest_framework.throttling import SimpleRateThrottle
 
 from apps.adminpanel.models import AdminEvent
 from apps.koth.models import (
@@ -19,14 +20,17 @@ from apps.koth.models import (
 User = get_user_model()
 
 
-@override_settings(
-    REST_FRAMEWORK={
-        "DEFAULT_THROTTLE_CLASSES": [],
-        "DEFAULT_THROTTLE_RATES": {},
-    }
-)
 class PeriodRetryAuditTests(TestCase):
     def setUp(self):
+        # throttle을 무력화. 종료 후 원복됨
+        self._throttle_patch = patch.object(
+            SimpleRateThrottle,
+            "allow_request",
+            lambda self, request, view: True,
+        )
+        self._throttle_patch.start()
+        self.addCleanup(self._throttle_patch.stop)
+
         self.admin = User.objects.create_user(
             login_id="period-retry-admin",
             password="Audit-Strong#Pw-2026",
