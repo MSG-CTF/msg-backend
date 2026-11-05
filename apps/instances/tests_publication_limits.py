@@ -8,7 +8,7 @@ from unittest.mock import patch
 import yaml
 from django.test import SimpleTestCase
 
-from apps.instances import published_challenges as publications
+from apps.instances import poller, published_challenges as publications
 from apps.instances.releases import ReleaseValidationError
 
 
@@ -42,7 +42,7 @@ class PublicationCompatibilityTests(SimpleTestCase):
     def download(self, raw):
         # Exercise the real bounded HTTP reader; only the network response is replaced.
         with patch("apps.instances.poller.urlopen", return_value=io.BytesIO(raw)):
-            return publications._release_artifact({"id": 1})
+            return poller.download_bundle({"id": 1})
 
     def test_publication_with_large_sbom_reads_only_release_manifest(self):
         payload = {"schema_version": "2.0", "challenge_slug": "pwn-price-tag"}

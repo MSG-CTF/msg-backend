@@ -1,8 +1,10 @@
 import io
 import json
 import logging
+import lzma
 import uuid
 import zipfile
+import zlib
 from datetime import timedelta
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -28,6 +30,8 @@ logger = logging.getLogger(__name__)
 
 BUNDLE_NAME_SUFFIX = "-publish-bundle"
 BUNDLE_FILE_NAME = "artifact-v2.json"
+MAX_PUBLICATION_BUNDLE_BYTES = 16 * 1024 * 1024
+MAX_PUBLICATION_MANIFEST_BYTES = 1024 * 1024
 POLLER_CREATED_BY = "release-poller"
 RETRYABLE_WORKFLOW_STATUSES = {"queued", "in_progress"}
 ARTIFACT_DISCOVERY_LOOKBACK = timedelta(hours=48)
@@ -207,12 +211,23 @@ def download_bundle(artifact, token=None):
         + "/actions/artifacts/" + str(artifact["id"]) + "/zip",
         token=token,
         timeout=30,
+        max_bytes=MAX_PUBLICATION_BUNDLE_BYTES,
     )
-    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
-        for name in archive.namelist():
-            if name.split("/")[-1] == BUNDLE_FILE_NAME:
-                return json.loads(archive.read(name).decode("utf-8"))
-    raise ReleaseValidationError("bundle 안에 " + BUNDLE_FILE_NAME + " 파일이 없습니다")
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            entries = [entry for entry in archive.infolist() if entry.filename.split("/")[-1] == BUNDLE_FILE_NAME]
+            if len(entries) != 1 or entries[0].file_size > MAX_PUBLICATION_MANIFEST_BYTES:
+                raise ReleaseValidationError("실행 발행 파일을 확인해주세요")
+            with archive.open(entries[0]) as manifest:
+                content = manifest.read(MAX_PUBLICATION_MANIFEST_BYTES + 1)
+            if len(content) > MAX_PUBLICATION_MANIFEST_BYTES:
+                raise ReleaseValidationError("실행 발행 파일이 너무 큽니다")
+            payload = json.loads(content)
+    except (zipfile.BadZipFile, zlib.error, lzma.LZMAError, RuntimeError, OSError, EOFError, ValueError) as error:
+        raise ReleaseValidationError("실행 발행 파일 형식이 올바르지 않습니다") from error
+    if not isinstance(payload, dict):
+        raise ReleaseValidationError("실행 발행 파일은 JSON 객체여야 합니다")
+    return payload
 
 
 def expected_source_ref():
