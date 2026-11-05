@@ -1,5 +1,8 @@
 FROM python:3.12-alpine@sha256:d09d15e60962ca365d1cd544a48773bac9d33f2fb1b00f2aa0deec78ade7dc31
 
+RUN addgroup --system --gid 101 app \
+    && adduser --system --uid 100 --ingroup app --home /app app
+
 RUN apk upgrade --no-cache \
     && apk add --no-cache nginx
 
@@ -10,9 +13,6 @@ RUN python -m pip install --no-cache-dir --upgrade pip==26.2.1 \
     && python -m pip install --no-cache-dir -r requirements.txt \
     && python -m pip check \
     && python -m pip uninstall --yes pip
-
-RUN addgroup --system app \
-    && adduser --system --ingroup app --home /app app
 
 COPY --chown=app:app . .
 
@@ -27,6 +27,8 @@ ENV HOME=/app \
     GUNICORN_TIMEOUT=30
 
 USER app
+
+RUN test "$(id -u)" = 100 && test "$(id -g)" = 101
 
 EXPOSE 8080
 
