@@ -1107,15 +1107,16 @@ def _record_force_failed(request, instance, action, error, detail=None):
     )
 
 
-def _record_remote_applied(request, owner, action, detail):
+def _record_remote_applied(request, owner, action, detail, *, reason="", previous_status=None):
     """스케줄러는 처리했는데 뒤이은 DB 저장이 실패해 롤백된 경우. 원격과 DB 가 어긋났음을 따로 남긴다."""
-    message = f"인스턴스 강제 {action}: 스케줄러는 처리했으나 DB 반영 실패 ({detail})"
+    previous = f", 이전 상태: {previous_status}" if previous_status is not None else ""
+    message = f"인스턴스 강제 {action}: 스케줄러는 처리했으나 DB 반영 실패 ({detail}{previous})"
     logger.error("%s instance_id=%s", message, owner.instance_id)
     try:
         with transaction.atomic():
             _record_event(
                 AdminEvent.EventType.INSTANCE_FORCED,
-                message,
+                f"{message}: {reason}" if reason else message,
                 request.user.login_id,
                 severity=AdminEvent.Severity.CRITICAL,
                 team=owner.team,
@@ -1218,32 +1219,45 @@ def instance_retry_cleanup(request, instance_id):
     owner = Instance.objects.select_related("user").filter(pk=instance_id).first()
     if owner is None:
         return fail("INSTANCE_NOT_FOUND", "존재하지 않는 인스턴스 ID입니다", 404)
-    with transaction.atomic():
-        _lock_instance_owner(owner.user)
-        instance = (
-            Instance.objects.select_for_update(of=("self",))
-            .select_related("team", "release").filter(pk=instance_id).first()
-        )
-        if instance is None:
-            return fail("INSTANCE_NOT_FOUND", "존재하지 않는 인스턴스 ID입니다", 404)
-        if instance.status != InstanceStatus.FAILED:
-            return fail("INVALID_STATE_TRANSITION", "실패한 인스턴스만 정리를 재시도할 수 있습니다", 409,
-                        data={"instance_id": str(instance.pk), "status": instance.status})
-        try:
-            data = call_scheduler_retry_cleanup(instance, scheduler_auth_header(request))
+    applied = False
+    try:
+        with transaction.atomic():
+            _lock_instance_owner(owner.user)
+            instance = (
+                Instance.objects.select_for_update(of=("self",))
+                .select_related("team", "release").filter(pk=instance_id).first()
+            )
+            if instance is None:
+                return fail("INSTANCE_NOT_FOUND", "존재하지 않는 인스턴스 ID입니다", 404)
+            if instance.status != InstanceStatus.FAILED:
+                return fail("INVALID_STATE_TRANSITION", "실패한 인스턴스만 정리를 재시도할 수 있습니다", 409,
+                            data={"instance_id": str(instance.pk), "status": instance.status})
+            previous_status = instance.status
+            try:
+                data = call_scheduler_retry_cleanup(instance, scheduler_auth_header(request))
+            except SchedulerError as error:
+                _record_force_failed(request, instance, "정리 재시도", error)
+                return fail(error.code, error.message, error.status_code)
+            applied = True
             update_instance_from_scheduler(instance, data)
-        except SchedulerError as error:
-            _record_force_failed(request, instance, "정리 재시도", error)
+            _record_event(
+                AdminEvent.EventType.INSTANCE_FORCED,
+                "인스턴스 정리 재시도 접수",
+                request.user.login_id,
+                severity=AdminEvent.Severity.WARNING,
+                team=instance.team,
+                challenge=instance.challenge,
+                instance_id=instance.pk,
+            )
+    except Exception as error:
+        if applied:
+            _record_remote_applied(
+                request, owner, "정리 재시도", "정리 재시도 접수 응답 수신: CLEANUP_PENDING",
+                reason="", previous_status=previous_status,
+            )
+        if isinstance(error, SchedulerError):
             return fail(error.code, error.message, error.status_code)
-        _record_event(
-            AdminEvent.EventType.INSTANCE_FORCED,
-            "인스턴스 정리 재시도 접수",
-            request.user.login_id,
-            severity=AdminEvent.Severity.WARNING,
-            team=instance.team,
-            challenge=instance.challenge,
-            instance_id=instance.pk,
-        )
+        raise
     return ok({
         "instance_id": str(instance.pk), "status": instance.status,
         "requested_by": request.user.login_id, "requested_at": isoformat_z(timezone.now()),
