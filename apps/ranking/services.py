@@ -1,11 +1,12 @@
 from decimal import Decimal
 
-from django.db import IntegrityError, models, transaction
+from django.db import IntegrityError, transaction
 
-from apps.adminpanel.models import setting_values
 from apps.board.models import TeamChallengeAccess
-from apps.challenge.models import Solve
 from apps.ranking.models import LineMonopoly
+
+
+LINE_BONUS_SCORE = Decimal("300.00")
 
 
 def check_and_record_line_monopoly(team, challenge=None, *, line_number=None):
@@ -24,25 +25,6 @@ def check_and_record_line_monopoly(team, challenge=None, *, line_number=None):
     if not is_line_monopoly_completed(team, line_number):
         return None
 
-    cleared_accesses = TeamChallengeAccess.objects.filter(
-        team=team,
-        status=TeamChallengeAccess.Status.CLEARED,
-        source_cell__line_number=line_number,
-    ).select_related("challenge")
-    challenge_ids = [a.challenge_id for a in cleared_accesses]
-    categories = {a.challenge.category for a in cleared_accesses}
-
-    score_sum = Solve.objects.filter(
-        team=team, challenge_id__in=challenge_ids
-    ).aggregate(total=models.Sum("earned_score"))["total"] or Decimal("0")
-
-    is_category_bonus = len(categories) == 1
-    line_percent, category_percent = setting_values(
-        "board.line_bonus_percent", "board.line_category_bonus_percent"
-    )
-    percent = category_percent if is_category_bonus else line_percent
-    earned_score = (score_sum * percent / 100).quantize(Decimal("0.01"))
-
     try:
         # The savepoint keeps a duplicate-award IntegrityError from breaking
         # the surrounding correct-submission transaction.
@@ -50,8 +32,8 @@ def check_and_record_line_monopoly(team, challenge=None, *, line_number=None):
             monopoly = LineMonopoly.objects.create(
                 team=team,
                 line_number=line_number,
-                earned_score=earned_score,
-                is_category_bonus=is_category_bonus,
+                earned_score=LINE_BONUS_SCORE,
+                is_category_bonus=False,
             )
     except IntegrityError:
         return None

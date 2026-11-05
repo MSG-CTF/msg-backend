@@ -2528,6 +2528,8 @@ class AdminSettingsTests(TestCase):
         self.assertEqual(d["board"]["dice_rolls_per_reset"], 3)
         self.assertEqual(d["board"]["dice_reset_interval_minutes"], 15)
         self.assertEqual(d["board"]["solve_deadline_minutes"], 15)
+        self.assertNotIn("line_bonus_percent", d["board"])
+        self.assertNotIn("line_category_bonus_percent", d["board"])
         self.assertEqual(d["flag"]["max_attempts"], 3)
         self.assertEqual(d["flag"]["lock_seconds"], 30)
         self.assertIsNone(d["updated_at"])
@@ -2536,6 +2538,23 @@ class AdminSettingsTests(TestCase):
         self.auth("root")
         d = self.client.get(self.url).data["data"]
         self.assertIsNone(d["contest"])
+
+    def test_legacy_line_percent_settings_are_not_exposed_or_editable(self):
+        from apps.adminpanel.models import AdminSetting
+
+        AdminSetting.objects.create(key="board.line_bonus_percent", value=30)
+        AdminSetting.objects.create(key="board.line_category_bonus_percent", value=45)
+        self.auth("root")
+
+        board = self.client.get(self.url).data["data"]["board"]
+        self.assertNotIn("line_bonus_percent", board)
+        self.assertNotIn("line_category_bonus_percent", board)
+        for key in ("line_bonus_percent", "line_category_bonus_percent"):
+            with self.subTest(key=key):
+                response = self.client.patch(
+                    self.url, {"board": {key: 45}}, format="json"
+                )
+                self.assertEqual(response.status_code, 400)
 
     def test_get_reflects_active_contest(self):
         self._contest()
@@ -2595,8 +2614,6 @@ class AdminSettingsTests(TestCase):
             {"board": {"dice_rolls_per_reset": 21}},
             {"board": {"dice_reset_interval_minutes": 1441}},
             {"board": {"solve_deadline_minutes": 181}},
-            {"board": {"line_bonus_percent": -1}},
-            {"board": {"line_category_bonus_percent": 101}},
             {"flag": {"max_attempts": 11}},
             {"flag": {"lock_seconds": 3601}},
         ]:
@@ -2787,8 +2804,6 @@ class AdminSettingsTests(TestCase):
                 "dice_rolls_per_reset",
                 "dice_reset_interval_minutes",
                 "solve_deadline_minutes",
-                "line_bonus_percent",
-                "line_category_bonus_percent",
             },
         )
         self.assertEqual(set(d["flag"]), {"max_attempts", "lock_seconds"})
