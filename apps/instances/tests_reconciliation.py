@@ -55,6 +55,12 @@ class Fixtures:
             "status": status,
         }
 
+    def lifecycle_values(self, instance):
+        return {
+            key: value for key, value in Instance.objects.values().get(pk=instance.pk).items()
+            if key not in ("scheduler_status", "scheduler_checked_at", "scheduler_error_code")
+        }
+
 
 @override_settings(CACHES=LOCMEM, SCHEDULER_API_TOKEN="test-history-token")
 class InstanceHistoryTests(Fixtures, TestCase):

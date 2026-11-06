@@ -44,7 +44,7 @@ class FailedCleanupHistoryTests(Fixtures, TestCase):
     @patch("apps.instances.reconciliation.call_scheduler_detail")
     def test_failed_cannot_regress_or_accept_foreign_identity(self, detail):
         row = self.instance(status=InstanceStatus.FAILED)
-        before = Instance.objects.values().get(pk=row.pk)
+        before = self.lifecycle_values(row)
         invalid = [self.snapshot(row, state) for state in (
             *ACTIVE_INSTANCE_STATUSES, InstanceStatus.STOPPING, InstanceStatus.STOPPED,
             InstanceStatus.EXPIRED, "UNKNOWN", None,
@@ -55,7 +55,7 @@ class FailedCleanupHistoryTests(Fixtures, TestCase):
             with self.subTest(data=data):
                 detail.return_value = data
                 self.assertEqual(reconcile_instances_once()["error"], 1)
-                self.assertEqual(Instance.objects.values().get(pk=row.pk), before)
+                self.assertEqual(self.lifecycle_values(row), before)
 
     @patch("apps.instances.reconciliation.call_scheduler_detail")
     def test_failed_missing_or_unavailable_is_not_cleanup_evidence(self, detail):
