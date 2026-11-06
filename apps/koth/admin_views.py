@@ -25,6 +25,7 @@ from rest_framework.views import APIView
 
 from apps.accounts.models import Team
 from apps.adminpanel.models import AdminEvent
+from apps.adminpanel.views import _record_event
 from apps.common.permissions import IsAdmin
 from apps.common.response import ok, fail
 from apps.instances import published_challenges as shared
@@ -492,11 +493,19 @@ class PeriodRetryView(APIView):
             raise EnvironmentError("이미 점수가 반영된 구간입니다", "KOTH_PERIOD_ALREADY_APPLIED", 409)
         if period + timedelta(minutes=15) > timezone.now():
             raise EnvironmentError("아직 끝나지 않은 구간입니다", "KOTH_PERIOD_NOT_ENDED", 409)
-        try:
-            services.poll_challenge_period(challenge, period)
-        except services.ScoreFetchError:
-            pass
-        row.refresh_from_db()
+        with transaction.atomic():
+            try:
+                services.poll_challenge_period(challenge, period)
+            except services.ScoreFetchError:
+                pass
+            row.refresh_from_db()
+            _record_event(
+                AdminEvent.EventType.KOTH_PERIOD_RETRIED,
+                f"KOTH 점수 구간 재시도 (koth_challenge_id={challenge.pk}, period_id={period.isoformat()}): "
+                f"status: {row.status}",
+                request.user.login_id,
+                severity=AdminEvent.Severity.WARNING,
+            )
         return ok(period_data(row))
 
 
