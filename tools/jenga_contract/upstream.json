@@ -1,0 +1,20 @@
+{
+  "repository": "MSG-CTF/2026_MSG_CTF",
+  "revision": "faf7ad6d814fb99ab23bd1d0a82d935a5b08be61",
+  "source_path": "koth-jenga/prob/for_organizer",
+  "source_line_endings": "LF",
+  "files": [
+    {
+      "path": "app.py",
+      "sha256": "5b404da9c7812d4bf5b1c71d4bc054d9476e9b7d5587106586950b168084524a"
+    },
+    {
+      "path": "auth_sessions.py",
+      "sha256": "d514710028345fe9e1e02094a743ef4af5e75b0b6f8221b06fa33b0c03a1800e"
+    },
+    {
+      "path": "game.py",
+      "sha256": "30525868d4e8f6cf7218ef54765e6ca3576d61173480a2759f79b50a4d83c275"
+    }
+  ]
+}

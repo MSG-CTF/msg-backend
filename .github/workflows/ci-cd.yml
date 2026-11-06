@@ -113,6 +113,84 @@ jobs:
           persist-credentials: false
       - run: python3 -m unittest discover -s deploy -p 'test_*.py' -v
 
+  jenga-contract-tests:
+    if: github.event_name != 'workflow_dispatch' || (!inputs.verify_gcs && !inputs.verify_deploy)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: jenga-contract-local-only
+          POSTGRES_DB: jenga_contract
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7.2
+        ports:
+          - 6379:6379
+    env:
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: jenga_contract
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: jenga-contract-local-only
+      REDIS_URL: redis://127.0.0.1:6379/0
+      DJANGO_DEBUG: "True"
+      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1
+      JENGA_SOURCE_ROOT: ${{ github.workspace }}/.jenga-contract-source/koth-jenga/prob/for_organizer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Read the reviewed author source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: MSG-CTF/2026_MSG_CTF
+          ref: faf7ad6d814fb99ab23bd1d0a82d935a5b08be61
+          token: ${{ secrets.RELEASE_POLL_GITHUB_TOKEN }}
+          path: .jenga-contract-source
+          sparse-checkout: koth-jenga/prob/for_organizer
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12.14"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            tools/jenga_contract/requirements.txt
+      - name: Generate independent local service test keys
+        run: |
+          python - <<'PY'
+          import os, secrets
+          with open(os.environ['GITHUB_ENV'], 'a') as env:
+              for name in ['DJANGO_SECRET_KEY', 'JWT_SECRET', 'KOTH_TEAM_TOKEN_SECRET']:
+                  env.write(name + '=' + secrets.token_urlsafe(48) + '\n')
+          PY
+      - name: Install test dependencies
+        run: python -m pip install -r requirements.txt -r tools/jenga_contract/requirements.txt
+      - name: Verify Jenga and platform sessions over real HTTP
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python manage.py test tools.jenga_contract.contract_suite --noinput -v 2 2>&1 | tee jenga-contract-tests.log
+          python - <<'PY'
+          import re
+          from pathlib import Path
+          text = Path('jenga-contract-tests.log').read_text()
+          count = re.search(r'Ran (\d+) tests? in', text)
+          if not count or int(count[1]) < 18:
+              raise SystemExit('Expected at least 18 actual Jenga contract tests')
+          PY
+
   deploy-preflight:
     needs: deployment-tests
     if: github.event_name == 'workflow_dispatch' && inputs.verify_deploy
@@ -133,7 +211,7 @@ jobs:
         run: python3 deploy/send_backend_release.py probe
 
   deploy-development:
-    needs: [ci, deployment-tests]
+    needs: [ci, deployment-tests, jenga-contract-tests]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 18
