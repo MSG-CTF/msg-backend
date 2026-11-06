@@ -14,6 +14,7 @@ from django.db import DatabaseError, IntegrityError, connection, transaction
 from django.db.models import (
     Count,
     DecimalField,
+    Exists,
     F,
     OuterRef,
     Prefetch,
@@ -61,7 +62,8 @@ from apps.board.services import (
     get_or_create_board_state,
     is_line_monopoly_completed,
 )
-from apps.koth.models import KothSolve
+from apps.koth.models import KothPreviewToken, KothSolve
+from apps.koth.services import eligible_teams
 from apps.ranking.models import LineMonopoly
 from apps.signature.models import SignatureSolve
 from apps.timer.models import Contest
@@ -135,6 +137,7 @@ SORT_FIELDS = {
     "score": "-total_score",
     "name": "team_name",
 }
+TEAM_SCOPES = {"official", "test", "archived", "all"}
 
 DEFAULT_PAGE_SIZE = 20
 MAX_PAGE_SIZE = 100
@@ -213,6 +216,13 @@ def _annotate_total_score(queryset):
 @api_view(["GET"])
 @permission_classes([IsAdmin])
 def team_list(request):
+    if "teamScope" in request.query_params:
+        raise InvalidRequest("조회 범위는 team_scope 로 지정해야 합니다")
+    team_scope = request.query_params.get("team_scope", "official")
+    if team_scope not in TEAM_SCOPES:
+        raise InvalidRequest(
+            "조회 범위는 official, test, archived, all 중 선택해야 합니다"
+        )
     search = request.query_params.get("search", "").strip()
 
     sort = request.query_params.get("sort", "score")
@@ -224,16 +234,55 @@ def team_list(request):
         _page_number(request.query_params.get("size"), DEFAULT_PAGE_SIZE), MAX_PAGE_SIZE
     )
 
-    queryset = _annotate_total_score(Team.objects).prefetch_related(
-        Prefetch("members", queryset=User.objects.order_by("-is_leader", "nickname"))
-    )
+    if team_scope == "official":
+        queryset = eligible_teams()
+    elif team_scope == "test":
+        queryset = Team.objects.filter(
+            is_banned=False,
+            team_id__in=KothPreviewToken.objects.values("preview_team_id"),
+        )
+    elif team_scope == "archived":
+        queryset = Team.objects.filter(is_banned=True)
+    else:
+        queryset = Team.objects.all()
     if search:
         queryset = queryset.filter(team_name__icontains=search)
 
-    total_count = queryset.count()
+    summary = queryset.aggregate(
+        total_count=Count("team_id"),
+        banned_count=Count("team_id", filter=Q(is_banned=True)),
+        total_mileage=Sum("mileage"),
+    )
+    summary["total_mileage"] = summary["total_mileage"] or 0
+    total_count = summary["total_count"]
+    queryset = (
+        _annotate_total_score(queryset)
+        .annotate(
+            is_test_team=Exists(
+                KothPreviewToken.objects.filter(preview_team_id=OuterRef("pk"))
+            )
+        )
+        .prefetch_related(
+            Prefetch(
+                "members", queryset=User.objects.order_by("-is_leader", "nickname")
+            )
+        )
+    )
+    leader = queryset.order_by("-total_score", "team_name", "team_id").first()
+    summary["leader"] = (
+        {
+            "team_id": str(leader.team_id),
+            "team_name": leader.team_name,
+            "team_score": num(leader.total_score),
+        }
+        if leader is not None
+        else None
+    )
 
     offset = (page - 1) * size
-    rows = queryset.order_by(SORT_FIELDS[sort], "team_name")[offset : offset + size]
+    rows = queryset.order_by(SORT_FIELDS[sort], "team_name", "team_id")[
+        offset : offset + size
+    ]
 
     teams = []
     for team in rows:
@@ -243,6 +292,11 @@ def team_list(request):
                 "team_id": str(team.team_id),
                 "team_name": team.team_name,
                 "koth_division": team.koth_division,
+                "team_scope": (
+                    "archived"
+                    if team.is_banned
+                    else "test" if team.is_test_team else "official"
+                ),
                 "team_score": num(team.total_score),
                 "mileage": team.mileage,
                 # 보드 앱이 생기면 team_board_states.position 으로 채운다.
@@ -262,7 +316,16 @@ def team_list(request):
             }
         )
 
-    return ok({"teams": teams, "total_count": total_count, "page": page, "size": size})
+    return ok(
+        {
+            "teams": teams,
+            "total_count": total_count,
+            "page": page,
+            "size": size,
+            "team_scope": team_scope,
+            "summary": summary,
+        }
+    )
 
 
 def _get_team(team_id):

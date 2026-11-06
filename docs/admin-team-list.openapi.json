@@ -1,0 +1,297 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Administrator team list scopes",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/api/v1/admin/teams": {
+      "get": {
+        "description": "ADMIN only. Scope and search apply before pagination, score ordering, and summary aggregation. Summary leader is the highest scoring matching team regardless of list ordering or current page. Membership and stored score/history rows are read only. teamScope is rejected; use team_scope.",
+        "parameters": [
+          {
+            "name": "team_scope",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "official",
+                "test",
+                "archived",
+                "all"
+              ],
+              "default": "official"
+            },
+            "description": "official: active teams excluding preview/test markers; test: active marked teams; archived: banned teams, including marked teams; all: every stored team. These are disjoint scopes except all. No team or account is modified."
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "score",
+                "name"
+              ],
+              "default": "score"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10000,
+              "default": 1
+            }
+          },
+          {
+            "name": "size",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          }
+        ],
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Filtered teams and full filtered summary",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "code",
+                    "data"
+                  ],
+                  "properties": {
+                    "code": {
+                      "const": "SUCCESS"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/TeamListData"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "INVALID_REQUEST for invalid scope, teamScope, sort, or page/size"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "ADMIN role required"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearer_auth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    },
+    "schemas": {
+      "TeamListData": {
+        "type": "object",
+        "required": [
+          "team_scope",
+          "total_count",
+          "page",
+          "size",
+          "teams",
+          "summary"
+        ],
+        "properties": {
+          "team_scope": {
+            "type": "string",
+            "enum": [
+              "official",
+              "test",
+              "archived",
+              "all"
+            ]
+          },
+          "total_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "teams": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminTeam"
+            }
+          },
+          "summary": {
+            "$ref": "#/components/schemas/TeamSummary"
+          }
+        }
+      },
+      "AdminTeam": {
+        "type": "object",
+        "required": [
+          "team_id",
+          "team_name",
+          "team_scope",
+          "team_score",
+          "mileage",
+          "member_count",
+          "members",
+          "is_banned"
+        ],
+        "properties": {
+          "team_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "team_name": {
+            "type": "string"
+          },
+          "team_scope": {
+            "type": "string",
+            "enum": [
+              "official",
+              "test",
+              "archived"
+            ]
+          },
+          "team_score": {
+            "type": "number"
+          },
+          "mileage": {
+            "type": "integer"
+          },
+          "koth_division": {
+            "type": "string",
+            "enum": [
+              "INTERNAL",
+              "EXTERNAL"
+            ]
+          },
+          "board_position_states": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "is_banned": {
+            "type": "boolean"
+          },
+          "member_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TeamMember"
+            }
+          }
+        }
+      },
+      "TeamMember": {
+        "type": "object",
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "login_id": {
+            "type": "string"
+          },
+          "nickname": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "PARTICIPANT",
+              "ADMIN"
+            ]
+          },
+          "is_leader": {
+            "type": "boolean"
+          }
+        }
+      },
+      "TeamSummary": {
+        "type": "object",
+        "required": [
+          "total_count",
+          "banned_count",
+          "total_mileage",
+          "leader"
+        ],
+        "properties": {
+          "total_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "banned_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "total_mileage": {
+            "type": "integer"
+          },
+          "leader": {
+            "$ref": "#/components/schemas/TeamLeader"
+          }
+        }
+      },
+      "TeamLeader": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "required": [
+          "team_id",
+          "team_name",
+          "team_score"
+        ],
+        "properties": {
+          "team_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "team_name": {
+            "type": "string"
+          },
+          "team_score": {
+            "type": "number"
+          }
+        }
+      }
+    }
+  }
+}
