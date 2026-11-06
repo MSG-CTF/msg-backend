@@ -27,6 +27,7 @@ from apps.instances.services import (
     mark_instance_replaced,
     scheduler_auth_header,
     scheduler_delete_reason,
+    serialize_instance,
     validate_scheduler_instance_scope,
 )
 
@@ -36,6 +37,27 @@ BLOCKING_STATUSES = (
     InstanceWriteOperation.Status.RECOVERY_PENDING,
     InstanceWriteOperation.Status.REVIEW_REQUIRED,
 )
+
+
+def serialize_write_result(instance, **options):
+    data = serialize_instance(instance, **options)
+    if instance is None:
+        return data
+    operation_id = InstanceWriteOperation.objects.filter(
+        user_id=instance.user_id, team_id=instance.team_id,
+        challenge_id=instance.challenge_id, release_id=instance.release_id,
+        remote_instance_id=instance.pk, request_id_used=True,
+        status=InstanceWriteOperation.Status.COMPLETED,
+    ).order_by("-created_at", "-operation_id").values_list("pk", flat=True).first()
+    if operation_id:
+        data["operation_id"] = str(operation_id)
+    return data
+
+
+def recovery_error_data(operation, error):
+    if operation.request_id_used and error.status_code >= 500:
+        return {"operation_id": str(operation.pk)}
+    return None
 
 
 def require_no_pending_write(user):

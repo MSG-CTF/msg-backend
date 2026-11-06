@@ -21,6 +21,7 @@ from apps.instances.write_recovery import (
     begin_write, bind_remote_instance, complete_write, record_write_failure,
     validate_write_owner,
     resume_matching_write,
+    recovery_error_data, serialize_write_result,
 )
 from apps.instances.services import (
     ACTIVE_INSTANCE_STATUSES,
@@ -123,7 +124,7 @@ class InstanceCreateView(APIView):
                 source_instance_id=uuid.UUID(replacement_id) if replacement_id else None,
             )
             if recovered is not None:
-                return ok(serialize_instance(recovered, include_replaced=True), message="이전 생성 요청의 처리 결과를 확인했습니다", status=202)
+                return ok(serialize_write_result(recovered, include_replaced=True), message="이전 생성 요청의 처리 결과를 확인했습니다", status=202)
             try:
                 operation = begin_write(
                     action=InstanceWriteOperation.Action.CREATE,
@@ -172,7 +173,7 @@ class InstanceCreateView(APIView):
                 complete_write(operation)
         except SchedulerError as error:
             record_write_failure(operation, error, sent=sent)
-            return fail(error.code, error.message, error.status_code)
+            return fail(error.code, error.message, error.status_code, data=recovery_error_data(operation, error))
         except Exception as error:
             record_write_failure(operation, error, sent=sent)
             raise
@@ -182,7 +183,7 @@ class InstanceCreateView(APIView):
             message = "인스턴스 생성 요청이 접수되었습니다. 기존 인스턴스가 종료됩니다."
 
         return ok(
-            serialize_instance(instance, include_replaced=True),
+            serialize_write_result(instance, include_replaced=True),
             message=message,
             status=202,
         )
@@ -281,7 +282,7 @@ class InstanceResetView(APIView):
                 challenge_id=instance.challenge_id, source_instance_id=instance.pk,
             )
             if recovered is not None:
-                return ok(serialize_instance(recovered, include_replaced=True), message="이전 초기화 요청의 처리 결과를 확인했습니다", status=202)
+                return ok(serialize_write_result(recovered, include_replaced=True), message="이전 초기화 요청의 처리 결과를 확인했습니다", status=202)
 
             if instance.status not in RESETTABLE_INSTANCE_STATUSES:
                 return fail(
@@ -334,11 +335,11 @@ class InstanceResetView(APIView):
                     release=instance.release,
                 )
                 mark_instance_replaced(instance)
-                response_data = serialize_instance(new_instance, include_replaced=True)
                 complete_write(operation)
+                response_data = serialize_write_result(new_instance, include_replaced=True)
         except SchedulerError as error:
             record_write_failure(operation, error, sent=sent)
-            return fail(error.code, error.message, error.status_code)
+            return fail(error.code, error.message, error.status_code, data=recovery_error_data(operation, error))
         except Exception as error:
             record_write_failure(operation, error, sent=sent)
             raise
@@ -510,7 +511,7 @@ class MyInstanceView(APIView):
                         .first()
                     )
                     return ok(
-                        serialize_instance(
+                        serialize_write_result(
                             latest, include_title=True, include_replaced=True,
                             include_termination=True,
                         ),
@@ -568,7 +569,7 @@ class MyInstanceView(APIView):
                 return fail(error.code, error.message, error.status_code)
 
         return ok(
-            serialize_instance(instance, include_title=True),
+            serialize_write_result(instance, include_title=True, include_replaced=True),
             message="인스턴스 상태 조회 성공",
         )
 

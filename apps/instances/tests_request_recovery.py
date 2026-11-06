@@ -43,6 +43,7 @@ class InstanceRequestRecoveryTests(Fixtures, TestCase):
             response = self.post(source)
         self.assertEqual(response.status_code, 503)
         row = InstanceWriteOperation.objects.latest("created_at")
+        self.assertEqual(response.data["data"]["operation_id"], str(row.pk))
         self.assertTrue(row.request_id_used)
         self.assertEqual(row.status, "RECOVERY_PENDING")
         self.assertEqual(remote.call_args.kwargs["request_id"], row.pk)
@@ -64,10 +65,15 @@ class InstanceRequestRecoveryTests(Fixtures, TestCase):
                 response = self.post()
                 self.assertEqual(response.status_code, 202)
                 self.assertEqual(response.data["data"]["instance_id"], result["instance"]["instance_id"])
+                self.assertEqual(response.data["data"]["operation_id"], str(row.pk))
         create.assert_not_called()
         lookup.assert_called_once()
         self.assertEqual(InstanceWriteOperation.objects.count(), 1)
         self.assertEqual(Instance.objects.count(), 1)
+        with patch("apps.instances.views.call_scheduler_active", return_value=result["instance"]):
+            observed = self.client.get("/api/v1/teams/me/instances")
+        self.assertEqual(observed.status_code, 200)
+        self.assertEqual(observed.data["data"]["operation_id"], str(row.pk))
 
     def test_lost_reset_response_and_late_retry_do_not_reset_the_replacement(self):
         source = self.old_instance()
