@@ -16,7 +16,7 @@ on:
         type: boolean
         default: false
       verify_deploy:
-        description: "제한된 SSH 배포 계정과 고정 helper만 조회"
+        description: "제한된 SSH 배포 경로와 외부 공식 50팀 API 검증"
         type: boolean
         default: false
 
@@ -201,7 +201,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Verify pinned SSH and fixed deployment helper without changing services
+      - name: Verify pinned SSH, fixed helpers and official 50-team public APIs
         env:
           SOURCE_SHA: ${{ github.sha }}
           DEPLOYMENT_ID: ${{ github.run_id }}-${{ github.run_attempt }}
@@ -220,7 +220,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Deploy current main through the pinned fixed backend entry point
+      - name: Deploy and verify current main, or explicitly skip a superseded revision
         env:
           SOURCE_SHA: ${{ github.sha }}
           DEPLOYMENT_ID: ${{ github.run_id }}-${{ github.run_attempt }}

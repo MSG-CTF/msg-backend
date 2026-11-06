@@ -1,42 +1,50 @@
 # 제한된 SSH 백엔드 배포
 
-GCP의 기존 WIF provider가 새 중앙 워크플로 인증을 attribute condition에서 거절해 서버 변경 전에 자동 배포가 중단됐다
-백엔드 배포는 이미 관리 접속이 허용된 서버에 전용 제한 계정을 두고 고정 helper를 호출한다
-GCP IAM 조건이나 서버 방화벽을 변경하지 않는다
+GitHub Actions는 등록된 SSH host key와 전용 msg-backend-deploy 계정으로 배포 식별자만 보낸다
+외부 운영 VM의 forced command는 /usr/local/lib/ctf-platform-cd/ssh-backend이며 sudo는 고정 legacy_entry.py의 backend 진입점만 허용한다
+전용 계정에는 대화형 셸, Docker 그룹, 일반 sudo 권한이 없다
+deploy/backend_release.py의 manifest와 프로토콜 상수는 송신 호환성을 위해 유지하며 현재 운영 receiver는 deploy/platform_cd의 코드다
 
-## 배포 경계
+## 배포와 사전 검증
 
 - GitHub development 환경 Secret: BACKEND_DEPLOY_HOST, BACKEND_DEPLOY_SSH_KEY, BACKEND_DEPLOY_KNOWN_HOSTS
-- 서버 계정: msg-backend-deploy, Docker 그룹과 일반 sudo 권한 없음
-- root 소유 authorized_keys: restrict와 고정 forced command 적용
-- 허용 sudo 명령: /usr/bin/python3 /usr/local/lib/msgctf-backend-deploy/backend_release.py
 - 요청은 action, source_sha, deployment_id, pipeline_revision 네 항목의 작은 JSON으로 제한
-- 서버는 현재 MSG-CTF/msg-backend main SHA만 배포하고 임의 저장소·명령·파일 경로·helper를 받지 않음
-- 서버의 root 소유 trusted-central.json은 중앙 배포 SHA와 shell·프록시 helper checksum을 고정
+- deploy는 현재 MSG-CTF/msg-backend main SHA만 배포하며 뒤처진 실행은 superseded로 건너뜀
+- 호스트의 build.lock과 deployment.lock으로 이미지 빌드와 앱 전환을 직렬화
+- root 소유 정책의 helper·Compose 템플릿·공식 팀 명단 해시가 다르면 중단
+- 실제 공개 랭킹·그래프·KOTH API의 명단을 빌드 전에 검증
+- 이미지 취약점 검사, 읽기 전용 migrate --check, Django 보안 검사와 별도 후보의 health·명단 검증 후 backend 서비스만 교체
+- 운영 HTTPS와 공식 명단을 다시 확인하며 실패하면 이전 앱 이미지로 복구
 
-중앙 배포 버전은 bc0e58c40d7796c36e9856278f5a18789f6a92fd다
-동적 DNS를 사용하는 프론트 프록시도 후보 전환과 복원을 검증한다
-검토한 deploy-development-vm.sh와 backend_proxy_bridge.py를 서버 고정 경로에 설치한 뒤 사용한다
-CI에서 배포 코드를 업로드하지 않으며 고정된 root 진입점에 배포 식별자만 보낸다
-서버의 앱 환경변수와 DB·Redis 인증 정보는 기존 서버 설정에 유지한다
+기존 SSH 프로토콜 pin은 유지하며 CI는 임의 저장소·명령·파일 경로·helper를 지정할 수 없다
+CI에서 배포 코드를 업로드하지 않으며 현재 main의 앱 이미지만 고정된 root 진입점이 빌드한다
+DB 마이그레이션·계정 변경·게임 작업·DNS 변경은 수행하지 않는다
 
-CI와 배포 진입점 검사가 성공한 main push만 배포 job을 실행한다
-main push는 진행 중인 배포를 취소하지 않고 호스트의 기존 flock으로 프론트 배포와도 직렬화한다
-실제 배포는 검증된 후보로 전환하고 운영 백엔드를 교체하며 실패 시 이전 이미지 복구를 검증한다
-배포 로그는 root 전용 restricted-deploy-실행ID.log에 남기고 GitHub에는 검증 결과만 전달한다
+workflow_dispatch의 verify_deploy=true는 같은 SSH와 root 진입점을 통해 현재 운영 설정과 실제 API를 조회한다
+브랜치 SHA도 조회에 사용할 수 있으며 이미지 빌드·운영 컨테이너 교체·DB 마이그레이션은 실행하지 않는다
+성공 결과에는 공식 팀 수, 명단 digest, API 검증 여부, DB 조회의 읽기 전용 여부가 포함된다
 
-## 설치와 확인
+## 외부 50팀과 내부 25팀 유지
 
-관리자는 검토·CI가 끝난 같은 SHA의 backend_release.py와 검증된 중앙 파일 두 개를 고정 경로에 설치한다
-설치 디렉터리와 파일은 root 소유로 두고 그룹·다른 사용자의 쓰기를 허용하지 않는다
-전용 계정의 홈과 SSH 설정도 root 소유로 두어 authorized_keys 교체를 막는다
-sudoers는 visudo 검사 후 고정 Python 진입점만 허용한다
-서버 host key는 기존 관리 접속에서 확인한 값으로 등록하며 최초 연결 자동 수락이나 keyscan 결과를 신뢰하지 않는다
+/etc/ctf-platform-cd/config.json은 사이트별 Compose 경로·해시와 root 소유 ranking-scope.json의 경로·해시를 고정한다
+공식 명단은 운영 엑셀과 대조한 팀 UUID로 구성하며 외부 EXTERNAL 50팀, 내부 INTERNAL 25팀을 각각 강제한다
+실제 UUID 명단과 참가자 엑셀은 저장소에 포함하지 않는다
+팀 수가 같아도 UUID가 다르거나 다른 사이트 명단이면 검증에 실패한다
 
-workflow_dispatch의 verify_deploy=true는 고정 설치와 실제 DB·Redis healthz만 검사한다
-이 동작은 운영 컨테이너를 교체하지 않는다
-검토한 브랜치에서 이 조회를 통과한 후 main으로 머지하고 실제 배포의 외부 HTTPS·인증 경계·SLA 보고·후보 정리를 확인한다
-표준 SSH 키로 일반 명령을 요청해도 forced command가 JSON 형식과 허용 동작을 검사한다
+공식 명단은 기존 앱 환경 파일의 PUBLIC_RANKING_DIVISION과 PUBLIC_RANKING_TEAM_IDS에 보존한다
+관리 배포는 해당 두 값을 이미지 override에도 주입하고 렌더링된 Compose 설정과 실제 API를 검사한다
+계정·비밀번호·팀 소속·게임 데이터와 다른 환경변수는 변경하지 않는다
+내부 사이트에는 같은 검증기를 관리자가 사용할 수 있는 로컬 정책으로 설치하며 외부 CI의 SSH 권한을 확대하지 않는다
 
-중앙 helper나 배포 프로토콜을 바꿀 때는 CI와 검토 후 관리 접속으로 고정 설치를 갱신한다
-GitHub key 자체가 임의 root 코드 업로드나 대화형 셸 권한을 갖도록 바꾸지 않는다
+## 운영 진단과 설치
+
+BASE_TEMPLATE_CHANGED는 검토한 Compose 파일과 실제 파일의 해시 불일치다
+RANKING_SCOPE_FAILED는 공식 명단·실제 공개 API 검증 실패, HELPER_CHANGED는 설치 helper의 해시 불일치다
+MIGRATION_OR_SECURITY_CHECK_FAILED와 UNVERIFIED_RELEASE도 실패로 처리하며 민감한 명령 출력은 CI에 전달하지 않는다
+호스트의 root 전용 cd 디렉터리에 단계별 진단을 보관한다
+
+관리자는 검토한 커밋의 deploy/platform_cd/install.py로 설치한다
+설치기는 현재 정책의 예상 해시를 비교하고 기존 helper·템플릿 pin을 검증한 뒤 두 잠금 아래 코드·공식 명단·공개 환경변수 두 개·정책을 갱신한다
+원본은 서버의 root 전용 백업에 남기고 설치 도중 오류가 나면 원상 복구한다
+검토되지 않은 템플릿 변경을 자동 승인하거나 정책 pin을 우회하지 않는다
+구체적인 설치·조회·복구 절차는 deploy/platform_cd/README.md를 따른다

@@ -188,6 +188,7 @@ class SenderTests(unittest.TestCase):
                         "source_commit": "a" * 40,
                         "pipeline_revision": release.CENTRAL_REVISION,
                         "status": "verified",
+                        "ranking_scope": {"track":"external","division":"EXTERNAL","team_count":50,"configured_roster_count":50,"roster_sha256":"c"*64,"api_verified":True,"database_probe_read_only":True},
                         "deployment_strategy": "verified_backend_proxy_bridge",
                         "private": "must-not-be-forwarded",
                     }
@@ -213,7 +214,7 @@ class SenderTests(unittest.TestCase):
             with self.subTest(code=code), patch.object(
                 sender.subprocess,
                 "run",
-                return_value=Mock(returncode=code, stdout=stdout),
+                return_value=Mock(returncode=code, stdout=stdout, stderr=""),
             ):
                 with self.assertRaises(RuntimeError):
                     sender.send("deploy", self.environment())
