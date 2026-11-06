@@ -9,7 +9,6 @@ import importlib.util
 import json
 import os
 from pathlib import Path
-import re
 import sys
 import tempfile
 import threading
@@ -31,9 +30,10 @@ from apps.koth.tokens import build_team_token
 def load_author():
     contract = json.loads(Path(__file__).with_name('upstream.json').read_text())
     source = Path(os.environ['JENGA_SOURCE_ROOT']).resolve()
-    for name, expected in contract['files_sha256'].items():
-        path = source / name
-        if path.is_symlink() or hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+    for entry in contract['files']:
+        path = source / entry['path']
+        canonical = path.read_bytes().replace(b'\r\n', b'\n')
+        if path.is_symlink() or hashlib.sha256(canonical).hexdigest() != entry['sha256']:
             raise RuntimeError('Jenga source differs from the reviewed contract')
     sys.path.insert(0, str(source))
     spec = importlib.util.spec_from_file_location('jenga_contract_author', source / 'app.py')
@@ -130,11 +130,17 @@ class JengaPlatformSessionContractTests(LiveServerTestCase):
 
     def game_rows(self):
         store = self.game['app'].extensions['jenga_store']
+        queries = {
+            'jenga_matches': 'SELECT * FROM jenga_matches ORDER BY rowid',
+            'jenga_teams': 'SELECT * FROM jenga_teams ORDER BY rowid',
+            'jenga_strategies': 'SELECT * FROM jenga_strategies ORDER BY rowid',
+            'jenga_ticks': 'SELECT * FROM jenga_ticks ORDER BY rowid',
+            'jenga_periods': 'SELECT * FROM jenga_periods ORDER BY rowid',
+            'jenga_mutations': 'SELECT * FROM jenga_mutations ORDER BY rowid',
+        }
         with closing(store.connect()) as connection:
-            names = [row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
-                     if re.fullmatch(r'jenga_[a-z_]+', row[0]) and not row[0].startswith('jenga_auth_')]
-            return {name: [tuple(row) for row in connection.execute('SELECT * FROM ' + name + ' ORDER BY rowid')]
-                    for name in names}
+            return {name: [tuple(row) for row in connection.execute(query)]
+                    for name, query in queries.items()}
 
     def test_normal_login_uses_current_cookie_namespace_and_server_handle(self):
         client = self.login()

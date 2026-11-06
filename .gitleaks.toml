@@ -1,0 +1,11 @@
+[extend]
+useDefault = true
+
+# Historical CRLF-checkout SHA-256 of the pinned Jenga source file, not a credential
+# Both the exact manifest path and the exact public source digest must match
+[[allowlists]]
+description = "Pinned Jenga source file SHA-256 in historical manifest"
+condition = "AND"
+paths = ['''(^|/)tools/jenga_contract/upstream\.json$''']
+regexTarget = "secret"
+regexes = ['''^3bdab80f076f16cb00cca2832299505e5432a89c842a111249ba9ca8a7496510$''']
