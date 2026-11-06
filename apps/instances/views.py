@@ -260,7 +260,7 @@ class InstanceResetView(APIView):
             lock_instance_user(request.user)
 
             instance = (
-                Instance.objects.select_for_update()
+                Instance.objects.select_for_update(of=("self",))
                 .select_related("challenge")
                 .filter(instance_id=instance_id)
                 .first()
@@ -306,7 +306,7 @@ class InstanceResetView(APIView):
             with transaction.atomic():
                 lock_instance_user(request.user)
                 instance = (
-                    Instance.objects.select_for_update()
+                    Instance.objects.select_for_update(of=("self",))
                     .select_related("challenge").filter(pk=instance_id).first()
                 )
                 if instance is None:
