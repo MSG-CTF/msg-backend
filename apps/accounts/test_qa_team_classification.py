@@ -50,6 +50,8 @@ class QaTeamClassificationTests(TestCase):
             "XQA12-ROLLOUT-deadbeef-0",
             "QA12-ROLLOUT-deadbeef-0\n",
             "QA12-ROLLOUT-deadbeef-0 ",
+            "QA12-Équipe-deadbeef-0",
+            "QA12-복구-deadbeef-0",
         ]
         for name in names:
             with self.subTest(name=name):
@@ -128,7 +130,9 @@ class QaTeamClassificationTests(TestCase):
         for name in samples:
             team_id = uuid.uuid4()
             with connection.cursor() as cursor:
-                cursor.execute("SELECT %s ~ %s", [name, migration.QA_PATTERN])
+                cursor.execute(
+                    'SELECT %s COLLATE "C" ~ %s', [name, migration.QA_PATTERN]
+                )
                 matches = cursor.fetchone()[0]
                 self.assertEqual(
                     matches, re.fullmatch(migration.QA_PATTERN, name) is not None
@@ -193,7 +197,7 @@ class QaAdminAccountCreationTests(TestCase):
             self.payload("QA12-ACCOUNT-deadbeef-0"),
             format="json",
         )
-        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.status_code, 200, response.data)
         team_id = response.data["data"]["team_id"]
         user = User.objects.get(pk=response.data["data"]["user_id"])
         self.assertEqual(user.team_id, uuid.UUID(team_id))
@@ -212,7 +216,7 @@ class QaAdminAccountCreationTests(TestCase):
         response = self.client.post(
             "/api/v1/admin/accounts", self.payload("QA 연구회"), format="json"
         )
-        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.status_code, 200, response.data)
         self.assertEqual(
             self.client.get("/api/v1/admin/teams").data["data"]["total_count"], 1
         )

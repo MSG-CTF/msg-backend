@@ -1,5 +1,5 @@
 from django.db import migrations, models
-from django.db.models.functions import Now
+from django.db.models.functions import Collate, Now
 
 
 # 기존 마이그레이션의 규칙은 실행 시점의 모듈과 분리해 고정한다
@@ -16,7 +16,7 @@ END;
 $qa_team$;
 CREATE TRIGGER teams_register_generated_qa
 AFTER INSERT OR UPDATE OF team_name ON teams
-FOR EACH ROW WHEN (NEW.team_name ~ '\A[Qq][Aa][0-9]+-[A-Za-z][A-Za-z0-9_-]*-[0-9A-Fa-f]{8}-[0-9]+\Z')
+FOR EACH ROW WHEN (NEW.team_name COLLATE "C" ~ '\A[Qq][Aa][0-9]+-[A-Za-z][A-Za-z0-9_-]*-[0-9A-Fa-f]{8}-[0-9]+\Z')
 EXECUTE FUNCTION accounts_register_generated_qa_team();
 
 CREATE FUNCTION accounts_preserve_preview_test_identity() RETURNS trigger
@@ -54,7 +54,8 @@ def preserve_existing_test_classification(apps, schema_editor):
         ),
         (
             team.objects.using(alias)
-            .filter(team_name__regex=QA_PATTERN)
+            .annotate(qa_name=Collate("team_name", "C"))
+            .filter(qa_name__regex=QA_PATTERN)
             .values_list("pk", flat=True),
             "QA_NAMESPACE",
         ),
