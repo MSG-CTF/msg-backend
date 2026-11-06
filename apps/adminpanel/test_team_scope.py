@@ -224,6 +224,24 @@ class AdminTeamScopeTests(TestCase):
         self.assertTrue(member_team["members"][0]["is_leader"])
         self.assertNotIn("password", json.dumps(member_team))
 
+    def test_oversized_pages_are_clamped_without_skipping_matching_teams(self):
+        Team.objects.bulk_create(
+            [Team(team_name=f"추가-{n:02}", mileage=10) for n in range(35)]
+        )
+        first = self.get(size=101, sort="name")
+        second = self.get(size=101, sort="name", page=2)
+        self.assertEqual((first["size"], second["size"]), (100, 100))
+        self.assertEqual((len(first["teams"]), len(second["teams"])), (100, 10))
+        identifiers = [row["team_id"] for row in first["teams"] + second["teams"]]
+        self.assertEqual(len(set(identifiers)), 110)
+        for page in [first, second]:
+            self.assertEqual(page["total_count"], 110)
+            self.assertEqual(page["summary"]["total_count"], 110)
+            self.assertEqual(page["summary"]["total_mileage"], 1100)
+            self.assertEqual(
+                page["summary"]["leader"]["team_id"], str(self.official[2].pk)
+            )
+
     def test_versioned_contract_matches_scope_enum_and_emitted_snake_case_fields(self):
         contract = json.loads(
             (
@@ -239,6 +257,14 @@ class AdminTeamScopeTests(TestCase):
             set(parameter["schema"]["enum"]), {"official", "test", "archived", "all"}
         )
         self.assertEqual(parameter["schema"]["default"], "official")
+        size = next(p for p in operation["parameters"] if p["name"] == "size")
+        self.assertNotIn("maximum", size["schema"])
+        self.assertEqual(
+            contract["components"]["schemas"]["TeamListData"]["properties"]["size"][
+                "maximum"
+            ],
+            100,
+        )
 
         def check_keys(value):
             if isinstance(value, dict):
