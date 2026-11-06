@@ -1,0 +1,296 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "KOTH team token generation and key cutover contract",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/api/v1/koth/team_token": {
+      "get": {
+        "operationId": "get_koth_team_token",
+        "security": [
+          {
+            "participant_jwt": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "koth_challenge_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Team token or operator preview token; key generation remains server-side",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store, private"
+                  ]
+                }
+              },
+              "Pragma": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-cache"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "team_id",
+                        "team_name",
+                        "koth_challenge_id",
+                        "team_token",
+                        "issued_at"
+                      ],
+                      "properties": {
+                        "team_id": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "team_name": {
+                          "type": "string"
+                        },
+                        "koth_challenge_id": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "team_token": {
+                          "type": "string"
+                        },
+                        "issued_at": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "preview": {
+                          "type": "boolean"
+                        },
+                        "qa_open": {
+                          "type": "boolean"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing or invalid challenge identifier"
+          },
+          "401": {
+            "description": "JWT missing, expired or invalid"
+          },
+          "403": {
+            "description": "Banned team"
+          },
+          "404": {
+            "description": "Unknown challenge or user without team"
+          },
+          "409": {
+            "description": "Preview token unavailable for this challenge state"
+          },
+          "503": {
+            "description": "DB key registry missing, inaccessible, or configured key does not match the active generation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/key_unavailable"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/koth/team_tokens/verify": {
+      "post": {
+        "operationId": "verify_koth_team_token",
+        "security": [
+          {
+            "game_internal_token": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "koth_challenge_id",
+                  "team_token"
+                ],
+                "properties": {
+                  "koth_challenge_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "team_token": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Valid or invalid token; retired generations are invalid even before a team fetches again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "valid",
+                        "team_id",
+                        "team_name",
+                        "koth_division",
+                        "koth_challenge_id"
+                      ],
+                      "properties": {
+                        "valid": {
+                          "type": "boolean"
+                        },
+                        "team_id": {
+                          "type": "string",
+                          "format": "uuid",
+                          "nullable": true
+                        },
+                        "team_name": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "koth_division": {
+                          "type": "string",
+                          "nullable": true,
+                          "enum": [
+                            "INTERNAL",
+                            "EXTERNAL",
+                            null
+                          ]
+                        },
+                        "koth_challenge_id": {
+                          "type": "string",
+                          "format": "uuid"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid problem-server internal token"
+          },
+          "429": {
+            "description": "Too many failed token verifications"
+          },
+          "503": {
+            "description": "DB key registry missing, inaccessible, or configured key does not match the active generation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/key_unavailable"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "key_unavailable": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "message",
+          "data"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "KOTH_TOKEN_KEY_UNAVAILABLE"
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "type": "object",
+            "nullable": true,
+            "enum": [
+              null
+            ]
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "participant_jwt": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      },
+      "game_internal_token": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Internal-Token"
+      }
+    }
+  }
+}

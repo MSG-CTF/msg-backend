@@ -25,8 +25,6 @@ SETTING_SPECS = {
     "board.dice_rolls_per_reset": (1, 20, 3),
     "board.dice_reset_interval_minutes": (1, 1440, 15),
     "board.solve_deadline_minutes": (1, 180, 15),
-    "board.line_bonus_percent": (0, 100, 30),
-    "board.line_category_bonus_percent": (0, 100, 45),
     "flag.max_attempts": (1, 10, 3),
     "flag.lock_seconds": (1, 3600, 30),
 }
@@ -104,6 +102,8 @@ class AdminEvent(models.Model):
         RESOURCE_ACCOUNT_UPDATED = "RESOURCE_ACCOUNT_UPDATED"
         CHALLENGE_DELETED = "CHALLENGE_DELETED"
         CHALLENGE_FLAG_REVEALED = "CHALLENGE_FLAG_REVEALED"
+        SERVICE_KEY_ROTATED = "SERVICE_KEY_ROTATED"
+        KOTH_PERIOD_RETRIED = "KOTH_PERIOD_RETRIED"
 
     class Severity(models.TextChoices):
         INFO = "INFO"

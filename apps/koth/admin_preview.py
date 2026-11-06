@@ -150,5 +150,6 @@ def authorize_preview(request):
         response.delete_cookie(GAME_COOKIE, path="/", samesite="Lax")
         profile = PROFILES.get(challenge.repository_slug)
         if profile and profile.cookie:
-            response.delete_cookie(profile.cookie, path="/", samesite="Lax")
+            for name in (profile.cookie, *profile.cookie_aliases):
+                response.delete_cookie(name, path="/", samesite="Lax")
     return response

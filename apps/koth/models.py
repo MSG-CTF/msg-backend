@@ -2,6 +2,7 @@ import uuid
 
 from django.core.validators import RegexValidator, URLValidator
 from django.db import models
+from django.utils import timezone
 
 
 class KothChallengeStatus(models.TextChoices):
@@ -230,6 +231,44 @@ class KothPublication(models.Model):
         constraints = [models.UniqueConstraint(fields=["challenge", "registry_revision"], name="uq_koth_publication_revision")]
 
 
+class KothTokenKeyState(models.Model):
+    """One database-owned generation; a stale worker may never advance it."""
+
+    singleton = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
+    version = models.PositiveBigIntegerField(default=0)
+    fingerprint = models.CharField(max_length=64, blank=True, default="")
+
+    class Meta:
+        db_table = "koth_token_key_state"
+        constraints = [
+            models.CheckConstraint(condition=models.Q(singleton=1), name="ck_koth_key_singleton"),
+        ]
+
+
+class KothTokenKeyRotation(models.Model):
+    """Append-only operation receipt; key material is never stored here."""
+
+    operation_id = models.UUIDField(primary_key=True, editable=False)
+    version = models.PositiveBigIntegerField(unique=True)
+    fingerprint = models.CharField(max_length=64, unique=True)
+    previous_version = models.PositiveBigIntegerField()
+    actor = models.CharField(max_length=50)
+    reason = models.CharField(max_length=500)
+    activated_at = models.DateTimeField(default=timezone.now, editable=False)
+    team_token_count = models.PositiveIntegerField()
+    preview_token_count = models.PositiveIntegerField()
+    adopted_team_token_count = models.PositiveIntegerField(default=0)
+    adopted_preview_token_count = models.PositiveIntegerField(default=0)
+    audit_event = models.OneToOneField("adminpanel.AdminEvent", on_delete=models.PROTECT)
+
+    class Meta:
+        db_table = "koth_token_key_rotations"
+        ordering = ["-version"]
+        constraints = [
+            models.CheckConstraint(condition=models.Q(version__gte=1), name="ck_koth_key_positive_version"),
+        ]
+
+
 class KothTeamToken(models.Model):
     team = models.ForeignKey(
         "accounts.Team",
@@ -247,6 +286,7 @@ class KothTeamToken(models.Model):
     )
     token_hash = models.CharField(max_length=64, unique=True)
     issued_at = models.DateTimeField(auto_now_add=True)
+    key_version = models.PositiveBigIntegerField(default=0)
 
     class Meta:
         db_table = "koth_team_tokens"
@@ -261,6 +301,8 @@ class KothPreviewToken(models.Model):
     # 팀이 없는 관리자가 공개 전 문제를 게임 테스트할 때만 쓰는 토큰이다.
     # 실제 팀을 만들지 않아 순위표·점수에 들어가지 않고, 점수 응답에 이 팀 ID가 섞이면 뺀다.
     # 관리자 계정이 지워져도 게임 기록에 남은 팀 ID를 계속 걸러야 해서 행은 남긴다
+    # 운영 검증용 실제 팀도 admin=None, key_version=0인 사용 불가 표식으로 등록해
+    # 참가팀 수와 지급 대상에서 제외한다. 이 표식으로 인증 권한을 만들지 않는다.
     admin = models.ForeignKey(
         "accounts.User",
         on_delete=models.SET_NULL,
@@ -277,6 +319,7 @@ class KothPreviewToken(models.Model):
     preview_team_id = models.UUIDField()
     token_hash = models.CharField(max_length=64, unique=True)
     issued_at = models.DateTimeField(auto_now_add=True)
+    key_version = models.PositiveBigIntegerField(default=0)
 
     class Meta:
         db_table = "koth_preview_tokens"

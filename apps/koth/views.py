@@ -27,6 +27,7 @@ from apps.common.exceptions import (
     TeamBanned,
 )
 from apps.common.jwt import hash_token
+from apps.common.key_lifecycle import service_key_guard
 from apps.common.permissions import IsAuthenticated
 from apps.common.response import ok
 from apps.common.throttling import ReadApiThrottle
@@ -43,6 +44,8 @@ from .models import (
     KothScorePeriodStatus,
 )
 from .tokens import PREVIEW_TEAM_NAME, build_preview_token, build_team_token, matches_token, preview_team_id
+from .token_keys import current_key_version
+from .services import eligible_teams
 from .files import public_file_metadata, with_file_metadata
 
 
@@ -363,17 +366,19 @@ def _preview_token(request):
     if challenge.status != KothChallengeStatus.SCHEDULED and not qa_open:
         raise KothPreviewTokenUnavailable()
     admin = request.user
-    raw_token = build_preview_token(admin.user_id, challenge.koth_challenge_id)
     with transaction.atomic():
+        key_version = current_key_version(lock=True)
+        raw_token = build_preview_token(admin.user_id, challenge.koth_challenge_id)
         stored, created = KothPreviewToken.objects.get_or_create(
             admin=admin,
             challenge=challenge,
-            defaults={"token_hash": hash_token(raw_token), "preview_team_id": preview_team_id(admin.user_id)},
+            defaults={"token_hash": hash_token(raw_token), "preview_team_id": preview_team_id(admin.user_id), "key_version": key_version},
         )
-        if not created and not matches_token(raw_token, stored.token_hash):
+        if not created and (stored.key_version != key_version or not matches_token(raw_token, stored.token_hash)):
             stored.token_hash = hash_token(raw_token)
             stored.issued_at = timezone.now()
-            stored.save(update_fields=["token_hash", "issued_at"])
+            stored.key_version = key_version
+            stored.save(update_fields=["token_hash", "issued_at", "key_version"])
     return _token_response(
         {
             "team_id": str(stored.preview_team_id),
@@ -389,23 +394,25 @@ def _preview_token(request):
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
+@service_key_guard("koth")
 def team_token(request):
     if request.user.team_id is None and request.user.role == Role.ADMIN:
         return _preview_token(request)
     team = _request_team(request)
     challenge = _token_challenge(request)
-    raw_token = build_team_token(team.team_id, challenge.koth_challenge_id)
     with transaction.atomic():
+        key_version = current_key_version(lock=True)
+        raw_token = build_team_token(team.team_id, challenge.koth_challenge_id)
         stored, created = KothTeamToken.objects.get_or_create(
             team=team,
             challenge=challenge,
-            defaults={"token_hash": hash_token(raw_token)},
+            defaults={"token_hash": hash_token(raw_token), "key_version": key_version},
         )
-        if not created and not matches_token(raw_token, stored.token_hash):
-            # 비밀값이 교체됐을 때는 운영자가 토큰을 의도적으로 재발급할 수 있게 갱신한다.
+        if not created and (stored.key_version != key_version or not matches_token(raw_token, stored.token_hash)):
             stored.token_hash = hash_token(raw_token)
             stored.issued_at = timezone.now()
-            stored.save(update_fields=["token_hash", "issued_at"])
+            stored.key_version = key_version
+            stored.save(update_fields=["token_hash", "issued_at", "key_version"])
     return _token_response(
         {
             "team_id": str(team.team_id),
@@ -482,20 +489,27 @@ def verify_team_token(request):
     ):
         raise InvalidRequest()
     challenge = _internal_challenge(request)
+    with transaction.atomic():
+        key_version = current_key_version(lock=True)
+        return _verify_current_team_token(request, challenge, key_version)
+
+
+def _verify_current_team_token(request, challenge, key_version):
     candidate_hash = hash_token(request.data["team_token"])
     token = (
         KothTeamToken.objects.select_related("team")
-        .filter(token_hash=candidate_hash, challenge=challenge)
+        .filter(token_hash=candidate_hash, challenge=challenge, key_version=key_version)
         .first()
     )
     valid = (
         token is not None
         and not token.team.is_banned
+        and matches_token(build_team_token(token.team_id, challenge.pk), token.token_hash)
         and challenge.status == KothChallengeStatus.ACTIVE
     )
     if token is not None and not token.team.is_banned and challenge.status == KothChallengeStatus.SCHEDULED:
         from .preview_game import permits_token_verification
-        valid = permits_token_verification(challenge, token)
+        valid = matches_token(build_team_token(token.team_id, challenge.pk), token.token_hash) and permits_token_verification(challenge, token)
     preview = None
     from .operator_qa import operator_qa_open
 
@@ -504,8 +518,9 @@ def verify_team_token(request):
         from .preview_game import permits_token_verification
         preview = KothPreviewToken.objects.filter(
             token_hash=candidate_hash, challenge=challenge, admin__role=Role.ADMIN,
+            key_version=key_version,
         ).first()
-        valid = preview is not None and (qa_open or permits_token_verification(challenge, preview, owner_id=preview.admin_id))
+        valid = preview is not None and matches_token(build_preview_token(preview.admin_id, challenge.pk), preview.token_hash) and (qa_open or permits_token_verification(challenge, preview, owner_id=preview.admin_id))
     if not valid:
         if _register_verify_failure(challenge):
             raise KothVerifyThrottled()
@@ -537,6 +552,6 @@ def internal_teams(request):
             "team_name": team.team_name,
             "koth_division": team.koth_division,
         }
-        for team in Team.objects.filter(is_banned=False).order_by("team_name")
+        for team in eligible_teams().order_by("team_name")
     ]
     return ok({"teams": teams, "total_count": len(teams)})

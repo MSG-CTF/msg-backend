@@ -24,6 +24,21 @@ class ScoreFetchError(Exception):
     pass
 
 
+def eligible_teams():
+    """Use the same registered competition population for lists and awards."""
+    return Team.objects.filter(is_banned=False).exclude(
+        team_id__in=KothPreviewToken.objects.values("preview_team_id")
+    )
+
+
+def scoring_team_counts():
+    return dict(
+        eligible_teams()
+        .values_list("koth_division")
+        .annotate(total=Count("team_id"))
+    )
+
+
 def format_utc(value):
     return (
         value.astimezone(dt_timezone.utc)
@@ -247,12 +262,7 @@ def rank_points(team_count, first_place_points=FIRST_PLACE_POINTS):
 
 def _awards(results, group_counts=None):
     if group_counts is None:
-        group_counts = {
-            row["koth_division"]: row["total"]
-            for row in Team.objects.filter(is_banned=False)
-            .values("koth_division")
-            .annotate(total=Count("team_id"))
-        }
+        group_counts = scoring_team_counts()
     divisions = defaultdict(list)
     for result in results:
         team, rank = result[:2]
@@ -289,9 +299,13 @@ def _locked_awards_and_snapshot(results):
     """Calculate awards from one locked, internally consistent team snapshot."""
     team_rows = list(Team.objects.select_for_update().order_by("team_id"))
     teams_by_id = {team.pk: team for team in team_rows}
+    excluded_ids = set(
+        KothPreviewToken.objects.filter(preview_team_id__in=teams_by_id)
+        .values_list("preview_team_id", flat=True)
+    )
     group_counts = {division: 0 for division in Team.KothDivision.values}
     for team in team_rows:
-        if not team.is_banned:
+        if not team.is_banned and team.pk not in excluded_ids:
             group_counts[team.koth_division] += 1
 
     current_results = []
@@ -302,7 +316,7 @@ def _locked_awards_and_snapshot(results):
         if team is None:
             continue
         team_divisions[str(team.pk)] = team.koth_division
-        if not team.is_banned:
+        if not team.is_banned and team.pk not in excluded_ids:
             current_results.append((team, rank, metric))
 
     awards = _awards(current_results, group_counts=group_counts)

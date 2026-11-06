@@ -11,6 +11,7 @@ from django.views.decorators.debug import sensitive_variables
 from apps.challenge.services import is_correct_flag
 from apps.instances.execution_settings import MAX_VALUE_BYTES, SECRET_NAME
 from apps.instances.models import RuntimeSecret
+from apps.common.key_lifecycle import service_key_guard
 
 
 class RuntimeSecretUnavailable(Exception):
@@ -28,6 +29,7 @@ def _cipher():
 
 
 @sensitive_variables()
+@service_key_guard("runtime")
 def create_runtime_secret(challenge, name, value, created_by):
     if not isinstance(name, str) or not SECRET_NAME.fullmatch(name):
         raise ValueError("비밀값 이름은 64자 이하의 소문자 식별자여야 합니다")
@@ -55,6 +57,7 @@ def create_runtime_secret(challenge, name, value, created_by):
 
 
 @sensitive_variables()
+@service_key_guard("runtime")
 def decrypt_runtime_secret(secret):
     try:
         payload = json.loads(_cipher().decrypt(secret.encrypted_value.encode("ascii")))

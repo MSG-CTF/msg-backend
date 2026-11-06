@@ -2,9 +2,11 @@ import hashlib
 import io
 import json
 import logging
+import lzma
 import re
 import stat
 import zipfile
+import zlib
 from pathlib import PurePosixPath
 from urllib.error import HTTPError, URLError
 
@@ -155,19 +157,24 @@ def validate_user_files_archive(archive_bytes, validated):
                 if file_type not in (0, stat.S_IFREG, stat.S_IFDIR):
                     raise ReleaseValidationError("user-files.zip에 허용되지 않은 파일 형식이 있습니다")
                 if entry.is_dir():
+                    if entry.file_size:
+                        raise ReleaseValidationError("user-files.zip의 디렉터리에 파일 데이터가 있습니다")
                     continue
 
                 file_count += 1
                 uncompressed_size += entry.file_size
                 if file_count > MAX_FILE_COUNT or uncompressed_size > MAX_UNCOMPRESSED_SIZE:
                     raise ReleaseValidationError("user-files.zip이 허용 범위를 초과합니다")
-    except zipfile.BadZipFile as error:
-        raise ReleaseValidationError("user-files.zip 형식이 올바르지 않습니다") from error
 
-    if file_count != validated["file_count"]:
-        raise ReleaseValidationError("user-files.zip 파일 수가 manifest와 일치하지 않습니다")
-    if uncompressed_size != validated["uncompressed_size_bytes"]:
-        raise ReleaseValidationError("user-files.zip 압축 해제 크기가 manifest와 일치하지 않습니다")
+            if file_count != validated["file_count"]:
+                raise ReleaseValidationError("user-files.zip 파일 수가 manifest와 일치하지 않습니다")
+            if uncompressed_size != validated["uncompressed_size_bytes"]:
+                raise ReleaseValidationError("user-files.zip 압축 해제 크기가 manifest와 일치하지 않습니다")
+            # Check CRCs with bounded stdlib reads only after validating expansion limits.
+            if archive.testzip() is not None:
+                raise ReleaseValidationError("user-files.zip 내부 파일이 손상되었습니다")
+    except (zipfile.BadZipFile, zlib.error, lzma.LZMAError, RuntimeError, OSError, EOFError) as error:
+        raise ReleaseValidationError("user-files.zip 형식이 올바르지 않습니다") from error
 
 
 def download_user_files_bundle(artifact, token=None):

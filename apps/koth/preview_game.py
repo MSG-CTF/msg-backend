@@ -23,9 +23,12 @@ from rest_framework.permissions import AllowAny
 from apps.accounts.models import User
 from apps.common.exceptions import RateLimitUnavailable
 from apps.common.jwt import hash_token
+from apps.common.key_lifecycle import active_service_key, service_key_guard
 from apps.common.response import fail
 from .admin_preview import COOKIE_NAME, PreviewAuthorizeThrottle, load_preview_ticket, preview_seconds_left
 from .models import KothPreviewToken, KothTeamToken
+from .token_keys import current_key_version
+from .tokens import build_preview_token, build_team_token, matches_token
 
 GAME_COOKIE = "__Host-msg_koth_game"
 KEY_PREFIX = "koth:preview-game:v1:"
@@ -42,11 +45,12 @@ class Profile:
     cookie: str = ""
     logout: str = ""
     response_token: str = "session_token"
+    cookie_aliases: tuple[str, ...] = ()
 
 
 PROFILES = {
     "koth-card-battle-arena": Profile("/api/session", "card", response_token="session_id"),
-    "koth-jenga": Profile("/auth", "cookie", cookie="session"),
+    "koth-jenga": Profile("/auth", "cookie", cookie="jenga_session", cookie_aliases=("session",)),
     "koth-swanopoly": Profile("/api/team/login", "cookie", cookie="swan_sid"),
     "koth-pixel-smuggler": Profile("/api/v1/session", "bearer", logout="/api/v1/session"),
     "koth-grand-tour-duel": Profile("/api/team/session", "cookie", cookie="koth_duel_session", logout="/api/team/session"),
@@ -153,34 +157,70 @@ def _credential(request, profile, uri, body):
     return value if isinstance(value, str) else ""
 
 
+def _current_token(token):
+    if isinstance(token, KothPreviewToken):
+        return token.admin_id is not None and matches_token(build_preview_token(token.admin_id, token.challenge_id), token.token_hash)
+    return matches_token(build_team_token(token.team_id, token.challenge_id), token.token_hash)
+
+
+@service_key_guard("koth")
 def _authorize(request, challenge, grant, profile, uri, body=b""):
+    key_version = current_key_version()
     sid = request.COOKIES.get(GAME_COOKIE)
     key = _session_key(sid)
     stored = _get(key)
-    credential = _credential(request, profile, uri, body)
+    bound = profile.cookie
+    if profile.kind == "cookie" and profile.cookie_aliases:
+        # Bind the exact cookie returned by login. Mixed credentials must never
+        # authorize one team while the native app reads another cookie name.
+        names = (profile.cookie, *profile.cookie_aliases)
+        bound = stored.get("native_cookie_name") if isinstance(stored, dict) else None
+        present = [name for name in names if request.COOKIES.get(name)]
+        if bound not in names or present != [bound]:
+            _delete(key)
+            raise PreviewDenied()
+        credential = request.COOKIES[bound]
+    else:
+        credential = _credential(request, profile, uri, body)
+    credential_hash = ""
+    if isinstance(stored, dict) and credential:
+        try:
+            credential_hash = _native_hash(challenge, profile, bound if profile.cookie_aliases else profile.cookie,
+                                           credential, stored.get("team_id"))
+        except ValueError:
+            _delete(key)
+            raise PreviewDenied() from None
     valid = (isinstance(stored, dict) and credential
              and stored.get("challenge_id") == str(challenge.pk)
              and stored.get("admin_id") == grant["user_id"]
              and stored.get("preview_nonce") == grant["nonce"]
-             and secrets.compare_digest(stored.get("native_hash", ""), hash_token(credential)))
+             and secrets.compare_digest(stored.get("native_hash", ""), credential_hash))
     if valid and stored.get("preview"):
         current = KothPreviewToken.objects.filter(
             pk=stored.get("token_id"), challenge=challenge, admin_id=grant["user_id"],
-            token_hash=stored.get("token_hash"),
+            token_hash=stored.get("token_hash"), key_version=key_version,
         ).first()
-        valid = current is not None and current.issued_at.isoformat() == stored.get("token_issued_at")
+        valid = current is not None and _current_token(current) and current.issued_at.isoformat() == stored.get("token_issued_at")
     elif valid:
         current = KothTeamToken.objects.select_related("team").filter(
             pk=stored.get("token_id"), challenge=challenge, team_id=stored.get("team_id"),
-            team__is_banned=False, token_hash=stored.get("token_hash"),
+            team__is_banned=False, token_hash=stored.get("token_hash"), key_version=key_version,
         ).first()
         valid = (current is not None
+                 and _current_token(current)
                  and current.issued_at.isoformat() == stored.get("token_issued_at")
                  and current.team.updated_at.isoformat() == stored.get("team_version"))
     if not valid:
         _delete(key)
         raise PreviewDenied()
     return stored
+
+
+def _native_hash(challenge, profile, name, credential, team_id):
+    if profile.cookie == "jenga_session" and name == "jenga_session":
+        from .jenga_preview_cookie import credential_hash
+        return credential_hash(challenge, credential, team_id)
+    return hash_token(credential)
 
 
 def permits_token_verification(challenge, token, owner_id=None):
@@ -240,16 +280,22 @@ def _native_login(request, challenge, grant, profile, uri, body):
     raw = _json(body).get("team_token")
     if not isinstance(raw, str) or not 1 <= len(raw) <= 2048:
         raise PreviewDenied()
+    key_version = current_key_version()
     token = KothTeamToken.objects.select_related("team").filter(
-        challenge=challenge, token_hash=hash_token(raw), team__is_banned=False,
+        challenge=challenge, token_hash=hash_token(raw), team__is_banned=False, key_version=key_version,
     ).first()
     # 팀이 없는 관리자는 자기 운영 테스트 토큰으로만 로그인한다
     preview = None if token is not None else KothPreviewToken.objects.filter(
-        challenge=challenge, token_hash=hash_token(raw), admin_id=grant["user_id"],
+        challenge=challenge, token_hash=hash_token(raw), admin_id=grant["user_id"], key_version=key_version,
     ).first()
     if token is None and preview is None:
         raise PreviewDenied()
     subject = token or preview
+    # Do not hold the authority lock over the game RPC: the game calls the
+    # token verifier back on another worker. Recheck after that RPC instead.
+    with active_service_key("koth"):
+        if not _current_token(subject):
+            raise PreviewDenied()
     key = KEY_PREFIX + "permit:" + str(challenge.pk) + ":" + subject.token_hash
     owner = secrets.token_urlsafe(24)
     record = {"owner": owner, "challenge_id": str(challenge.pk),
@@ -263,15 +309,26 @@ def _native_login(request, challenge, grant, profile, uri, body):
         return fail("KOTH_PREVIEW_LOGIN_BUSY", "다른 인증 요청이 진행 중입니다 잠시 후 다시 시도해 주세요", 409)
     try:
         response = _native_request(request, challenge, uri, body)
+        with active_service_key("koth"):
+            if not _current_token(subject):
+                raise PreviewDenied()
     finally:
         current = _get(key)
         if isinstance(current, dict) and current.get("owner") == owner:
             _delete(key)
     if response.status_code != 200:
         return response
+    native_cookie_name = ""
     if profile.kind == "cookie":
-        credential = response.cookies.get(profile.cookie)
-        credential = credential.value if credential else ""
+        names = (profile.cookie, *profile.cookie_aliases)
+        found = [(name, response.cookies[name].value) for name in names
+                 if name in response.cookies and response.cookies[name].value]
+        if len(found) != 1:
+            raise ValueError("native login response has ambiguous cookie credentials")
+        native_cookie_name, credential = found[0]
+        for name in names:
+            if name != native_cookie_name:
+                response.delete_cookie(name, path="/", samesite="Lax")
     else:
         credential = _json(response.content).get("data", {}).get(profile.response_token, "")
     if not isinstance(credential, str) or not credential:
@@ -281,9 +338,11 @@ def _native_login(request, challenge, grant, profile, uri, body):
         load_preview_ticket(request.COOKIES.get(COOKIE_NAME), str(challenge.pk), grant["origin"])
     except (signing.BadSignature, ValueError, TypeError, KeyError):
         raise PreviewDenied() from None
-    if token is not None and not KothTeamToken.objects.filter(pk=token.pk, token_hash=token.token_hash, team__is_banned=False).exists():
+    if current_key_version() != key_version:
         raise PreviewDenied()
-    if preview is not None and not KothPreviewToken.objects.filter(pk=preview.pk, token_hash=preview.token_hash).exists():
+    if token is not None and not KothTeamToken.objects.filter(pk=token.pk, token_hash=token.token_hash, team__is_banned=False, key_version=key_version).exists():
+        raise PreviewDenied()
+    if preview is not None and not KothPreviewToken.objects.filter(pk=preview.pk, token_hash=preview.token_hash, key_version=key_version).exists():
         raise PreviewDenied()
     sid = secrets.token_urlsafe(32)
     stored = {"challenge_id": str(challenge.pk), "admin_id": grant["user_id"],
@@ -293,7 +352,10 @@ def _native_login(request, challenge, grant, profile, uri, body):
               "token_issued_at": subject.issued_at.isoformat(),
               "team_version": token.team.updated_at.isoformat() if token else "",
               "preview": preview is not None,
-              "native_hash": hash_token(credential)}
+              "native_hash": _native_hash(challenge, profile, native_cookie_name, credential,
+                                          str(token.team_id) if token else str(preview.preview_team_id))}
+    if native_cookie_name:
+        stored["native_cookie_name"] = native_cookie_name
     remaining = preview_seconds_left(grant)
     if not remaining:
         raise PreviewDenied()

@@ -1,3 +1,4 @@
+from apps.koth._key_test_support import initialize_token_key
 import os
 import time
 from datetime import datetime, timezone as dt_timezone
@@ -83,6 +84,7 @@ class KothRankPointTests(SimpleTestCase):
 @override_settings(CACHES=LOCMEM, KOTH_TEAM_TOKEN_SECRET="test-koth-token-secret")
 class KothApiTests(TestCase):
     def setUp(self):
+        initialize_token_key()
         cache.clear()
         self.client = APIClient()
         self.team = Team.objects.create(team_name="우리팀", team_score=100)

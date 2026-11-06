@@ -77,6 +77,11 @@ class Instance(models.Model):
         choices=InstanceStatus.choices,
         default=InstanceStatus.REQUESTED,
     )
+    scheduler_status = models.CharField(
+        max_length=30, choices=InstanceStatus.choices, null=True, blank=True
+    )
+    scheduler_checked_at = models.DateTimeField(null=True, blank=True)
+    scheduler_error_code = models.CharField(max_length=40, null=True, blank=True)
     host = models.CharField(max_length=255, null=True, blank=True)
     ports = models.JSONField(default=list, blank=True)
     endpoints = models.JSONField(default=list, blank=True)
@@ -120,6 +125,32 @@ class Instance(models.Model):
 
     def __str__(self):
         return f"{self.instance_id} {self.status}"
+
+
+class ServiceKeyState(models.Model):
+    purpose = models.CharField(max_length=32, primary_key=True)
+    active_key_id = models.CharField(max_length=64)
+    generation = models.PositiveIntegerField(default=1)
+    activated_at = models.DateTimeField()
+
+    class Meta:
+        db_table = "service_key_states"
+
+
+class ServiceKeyRotation(models.Model):
+    rotation_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    purpose = models.CharField(max_length=32)
+    previous_key_id = models.CharField(max_length=64, blank=True)
+    active_key_id = models.CharField(max_length=64)
+    generation = models.PositiveIntegerField()
+    reencrypted_rows = models.PositiveIntegerField(default=0)
+    actor = models.CharField(max_length=100)
+    reason = models.CharField(max_length=250)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "service_key_rotations"
+        ordering = ["-created_at"]
 
 
 class InstanceLock(models.Model):

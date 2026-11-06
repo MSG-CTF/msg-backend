@@ -9,6 +9,7 @@ from cryptography.fernet import InvalidToken
 from django.utils.crypto import salted_hmac
 from django.views.decorators.debug import sensitive_variables
 
+from apps.common.key_lifecycle import service_key_guard
 from apps.instances.environment_files import parse_environment_file
 from apps.instances.execution_settings import ENV_NAME, MAX_ENV_BYTES, MAX_ENV_COUNT, MAX_VALUE_BYTES, SENSITIVE_NAME
 from apps.instances.releases import ReleaseValidationError
@@ -101,6 +102,7 @@ def encode_settings(version_id, challenge_id, source_revision, settings):
 
 
 @sensitive_variables()
+@service_key_guard("runtime")
 def decode_settings(version):
     try:
         payload = json.loads(_cipher().decrypt(version.encrypted_settings.encode("ascii")))
@@ -209,6 +211,7 @@ def prepare_changes(challenge, source, body):
 
 
 @sensitive_variables()
+@service_key_guard("runtime")
 def create_version(challenge, settings, source_revision, actor, request_id, fingerprint, based_on=None):
     if not isinstance(source_revision, str) or not SHA.fullmatch(source_revision):
         raise EnvironmentError("실행 이미지의 소스 커밋을 확인해주세요")

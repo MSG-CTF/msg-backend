@@ -108,6 +108,7 @@ from apps.instances.services import (
     RESETTABLE_INSTANCE_STATUSES,
     SchedulerError,
     call_scheduler_delete,
+    call_scheduler_detail,
     call_scheduler_force_cleanup,
     call_scheduler_retry_cleanup,
     call_scheduler_reset,
@@ -118,6 +119,7 @@ from apps.instances.services import (
     update_instance_from_scheduler,
 )
 from apps.instances.write_recovery import BLOCKING_STATUSES, require_no_pending_write
+from apps.instances.observations import serialize_scheduler_observation
 from .resource_broker import fetch_resource_targets
 from .node_allocation import enrich_allocations
 from .serializers import ChallengeCreateSerializer, ChallengeUpdateSerializer
@@ -1066,6 +1068,7 @@ def instance_list(request):
     offset = (page - 1) * size
     rows = queryset.order_by("-created_at")[offset : offset + size]
 
+    now = timezone.now()
     instances = [
         {
             "instance_id": str(r.instance_id),
@@ -1074,6 +1077,7 @@ def instance_list(request):
             "challenge_id": str(r.challenge_id),
             "challenge_title": r.challenge.title,
             "status": r.status,
+            "scheduler_observation": serialize_scheduler_observation(r, now),
             "created_at": isoformat_z(r.created_at),
             "updated_at": isoformat_z(r.updated_at),
             "expires_at": isoformat_z(r.expires_at),
@@ -1092,9 +1096,15 @@ def instance_list(request):
     )
 
 
-def _record_force_failed(request, instance, action, error, detail=None):
+def _record_force_failed(
+    request, instance, action, error, detail=None, *, reason=None, previous_status=None
+):
     # fail 반환은 트랜잭션을 커밋하므로 실패 기록도 같이 남는다.
     suffix = f", {detail}" if detail else ""
+    if previous_status is not None:
+        suffix += f", 이전 상태: {previous_status}"
+    if reason is not None:
+        suffix += f", 사유: {reason}"
     _record_event(
         AdminEvent.EventType.INSTANCE_FORCED,
         f"인스턴스 강제 {action} 실패 ({error.code}): {error.message}{suffix}",
@@ -1106,15 +1116,16 @@ def _record_force_failed(request, instance, action, error, detail=None):
     )
 
 
-def _record_remote_applied(request, owner, action, detail):
+def _record_remote_applied(request, owner, action, detail, *, reason="", previous_status=None):
     """스케줄러는 처리했는데 뒤이은 DB 저장이 실패해 롤백된 경우. 원격과 DB 가 어긋났음을 따로 남긴다."""
-    message = f"인스턴스 강제 {action}: 스케줄러는 처리했으나 DB 반영 실패 ({detail})"
+    previous = f", 이전 상태: {previous_status}" if previous_status is not None else ""
+    message = f"인스턴스 강제 {action}: 스케줄러는 처리했으나 DB 반영 실패 ({detail}{previous})"
     logger.error("%s instance_id=%s", message, owner.instance_id)
     try:
         with transaction.atomic():
             _record_event(
                 AdminEvent.EventType.INSTANCE_FORCED,
-                message,
+                f"{message}: {reason}" if reason else message,
                 request.user.login_id,
                 severity=AdminEvent.Severity.CRITICAL,
                 team=owner.team,
@@ -1128,6 +1139,7 @@ def _record_remote_applied(request, owner, action, detail):
 @api_view(["DELETE"])
 @permission_classes([IsAdmin])
 def instance_force_delete(request, instance_id):
+    reason = _require_reason(_json_object(request))
     now = timezone.now().replace(microsecond=0)
 
     owner = (
@@ -1165,6 +1177,7 @@ def instance_force_delete(request, instance_id):
                     },
                 )
 
+            previous_status = instance.status
             try:
                 if cleanup:
                     data = call_scheduler_force_cleanup(instance, scheduler_auth_header(request))
@@ -1174,7 +1187,10 @@ def instance_force_delete(request, instance_id):
                     call_scheduler_delete(instance, scheduler_auth_header(request))
                     applied = ("종료", "종료 요청 접수")
             except SchedulerError as error:
-                _record_force_failed(request, instance, "정리" if cleanup else "종료", error)
+                _record_force_failed(
+                    request, instance, "정리" if cleanup else "종료", error,
+                    reason=reason, previous_status=previous_status,
+                )
                 return fail(error.code, error.message, error.status_code)
             if not cleanup:
                 instance.status = InstanceStatus.STOPPING
@@ -1182,7 +1198,8 @@ def instance_force_delete(request, instance_id):
                 instance.save(update_fields=["status", "delete_reason", "updated_at"])
             _record_event(
                 AdminEvent.EventType.INSTANCE_FORCED,
-                "인스턴스 강제 종료",
+                f"인스턴스 강제 {'정리' if cleanup else '종료'}"
+                f" (이전 상태: {previous_status}): {reason}",
                 request.user.login_id,
                 severity=AdminEvent.Severity.WARNING,
                 team=instance.team,
@@ -1192,7 +1209,9 @@ def instance_force_delete(request, instance_id):
 
     except Exception:
         if applied:
-            _record_remote_applied(request, owner, *applied)
+            _record_remote_applied(
+                request, owner, *applied, reason=reason, previous_status=previous_status
+            )
         raise
 
     return ok(
@@ -1217,32 +1236,45 @@ def instance_retry_cleanup(request, instance_id):
     owner = Instance.objects.select_related("user").filter(pk=instance_id).first()
     if owner is None:
         return fail("INSTANCE_NOT_FOUND", "존재하지 않는 인스턴스 ID입니다", 404)
-    with transaction.atomic():
-        _lock_instance_owner(owner.user)
-        instance = (
-            Instance.objects.select_for_update(of=("self",))
-            .select_related("team", "release").filter(pk=instance_id).first()
-        )
-        if instance is None:
-            return fail("INSTANCE_NOT_FOUND", "존재하지 않는 인스턴스 ID입니다", 404)
-        if instance.status != InstanceStatus.FAILED:
-            return fail("INVALID_STATE_TRANSITION", "실패한 인스턴스만 정리를 재시도할 수 있습니다", 409,
-                        data={"instance_id": str(instance.pk), "status": instance.status})
-        try:
-            data = call_scheduler_retry_cleanup(instance, scheduler_auth_header(request))
+    applied = False
+    try:
+        with transaction.atomic():
+            _lock_instance_owner(owner.user)
+            instance = (
+                Instance.objects.select_for_update(of=("self",))
+                .select_related("team", "release").filter(pk=instance_id).first()
+            )
+            if instance is None:
+                return fail("INSTANCE_NOT_FOUND", "존재하지 않는 인스턴스 ID입니다", 404)
+            if instance.status != InstanceStatus.FAILED:
+                return fail("INVALID_STATE_TRANSITION", "실패한 인스턴스만 정리를 재시도할 수 있습니다", 409,
+                            data={"instance_id": str(instance.pk), "status": instance.status})
+            previous_status = instance.status
+            try:
+                data = call_scheduler_retry_cleanup(instance, scheduler_auth_header(request))
+            except SchedulerError as error:
+                _record_force_failed(request, instance, "정리 재시도", error)
+                return fail(error.code, error.message, error.status_code)
+            applied = True
             update_instance_from_scheduler(instance, data)
-        except SchedulerError as error:
-            _record_force_failed(request, instance, "정리 재시도", error)
+            _record_event(
+                AdminEvent.EventType.INSTANCE_FORCED,
+                "인스턴스 정리 재시도 접수",
+                request.user.login_id,
+                severity=AdminEvent.Severity.WARNING,
+                team=instance.team,
+                challenge=instance.challenge,
+                instance_id=instance.pk,
+            )
+    except Exception as error:
+        if applied:
+            _record_remote_applied(
+                request, owner, "정리 재시도", "정리 재시도 접수 응답 수신: CLEANUP_PENDING",
+                reason="", previous_status=previous_status,
+            )
+        if isinstance(error, SchedulerError):
             return fail(error.code, error.message, error.status_code)
-        _record_event(
-            AdminEvent.EventType.INSTANCE_FORCED,
-            "인스턴스 정리 재시도 접수",
-            request.user.login_id,
-            severity=AdminEvent.Severity.WARNING,
-            team=instance.team,
-            challenge=instance.challenge,
-            instance_id=instance.pk,
-        )
+        raise
     return ok({
         "instance_id": str(instance.pk), "status": instance.status,
         "requested_by": request.user.login_id, "requested_at": isoformat_z(timezone.now()),
@@ -1252,6 +1284,7 @@ def instance_retry_cleanup(request, instance_id):
 @api_view(["POST"])
 @permission_classes([IsAdmin])
 def instance_force_reset(request, instance_id):
+    reason = _require_reason(_json_object(request))
     now = timezone.now().replace(microsecond=0)
 
     owner = (
@@ -1285,6 +1318,7 @@ def instance_force_reset(request, instance_id):
                     },
                 )
 
+            previous_status = instance.status
             try:
                 require_no_pending_write(instance.user)
                 scheduler_data = call_scheduler_reset(
@@ -1297,7 +1331,10 @@ def instance_force_reset(request, instance_id):
                         "이 참가자의 이전 인스턴스 요청이 저장 확인을 기다리고 있습니다 서버에서 recover_instance_writes --show로 확인하세요",
                         error.status_code,
                     )
-                _record_force_failed(request, instance, "재시작", error)
+                _record_force_failed(
+                    request, instance, "재시작", error,
+                    reason=reason, previous_status=previous_status,
+                )
                 return fail(error.code, error.message, error.status_code)
             # 스케줄러는 새 인스턴스를 이미 만들었다. 아래 저장이 실패해도 새 ID 를 남긴다.
             remote_new_id = scheduler_data.get("instance_id")
@@ -1314,15 +1351,15 @@ def instance_force_reset(request, instance_id):
                 )
             except SchedulerError as error:
                 _record_force_failed(
-                    request, instance, "재시작", error, f"원격 새 인스턴스 {remote_new_id}"
+                    request, instance, "재시작", error, f"원격 새 인스턴스 {remote_new_id}",
+                    reason=reason, previous_status=previous_status,
                 )
                 return fail(error.code, error.message, error.status_code)
-            previous_status = instance.status
             mark_instance_replaced(instance)
             _record_event(
                 AdminEvent.EventType.INSTANCE_FORCED,
                 f"인스턴스 강제 재시작: 이전 {instance.instance_id} ({previous_status})"
-                f" → 새 {new_instance.instance_id}",
+                f" → 새 {new_instance.instance_id}: {reason}",
                 request.user.login_id,
                 severity=AdminEvent.Severity.WARNING,
                 team=instance.team,
@@ -1332,7 +1369,9 @@ def instance_force_reset(request, instance_id):
 
     except Exception:
         if applied:
-            _record_remote_applied(request, owner, *applied)
+            _record_remote_applied(
+                request, owner, *applied, reason=reason, previous_status=previous_status
+            )
         raise
 
     return ok(
@@ -2506,6 +2545,13 @@ def _team_update(request, team_id):
             raise InvalidRequest("leader_user_id 가 올바르지 않습니다")
 
     with transaction.atomic():
+        # Instance writes take this lock before reading membership or calling Scheduler.
+        for user_id in (
+            User.objects.filter(pk__in=remove_ids)
+            .order_by("pk")
+            .values_list("pk", flat=True)
+        ):
+            InstanceLock.objects.select_for_update().get_or_create(user_id=user_id)
         team = _get_team_for_update(team_id)
         wanted = add_ids | remove_ids | ({leader_id} if leader_id else set())
         users = {
@@ -2542,17 +2588,14 @@ def _team_update(request, team_id):
             new_leader = leader_id
 
         # 제외된 계정의 인스턴스는 팀 소속이 바뀌면 추적이 끊긴다.
-        if (
-            remove_ids
-            and Instance.objects.filter(
-                user_id__in=remove_ids, status__in=TEAM_BLOCKING_INSTANCE_STATUSES
-            ).exists()
-        ):
-            return fail(
-                "ACTIVE_INSTANCE_EXISTS",
-                "제외할 팀원의 인스턴스를 먼저 종료해야 합니다",
-                409,
-            )
+        if remove_ids:
+            try:
+                _require_instance_cleanup(
+                    Instance.objects.filter(user_id__in=remove_ids),
+                    InstanceWriteOperation.objects.filter(user_id__in=remove_ids),
+                )
+            except SchedulerError as error:
+                return fail(error.code, error.message, error.status_code)
 
         if team_name is not None and team_name != team.team_name:
             if Team.objects.filter(team_name=team_name).exclude(pk=team.pk).exists():
@@ -2637,12 +2680,59 @@ def _team_update(request, team_id):
     )
 
 
-# 종료 중 · 정리 대기도 스케줄러에 컨테이너가 남아 있을 수 있어 팀 삭제 · 팀원 제외를 막는다.
-TEAM_BLOCKING_INSTANCE_STATUSES = [
-    *ACTIVE_INSTANCE_STATUSES,
-    InstanceStatus.STOPPING,
-    InstanceStatus.CLEANUP_PENDING,
-]
+def _require_instance_cleanup(instances, operations):
+    if operations.filter(status__in=BLOCKING_STATUSES).exists():
+        raise SchedulerError(
+            "INSTANCE_REVIEW_REQUIRED",
+            "인스턴스 생성·재시작 기록을 복구한 뒤 다시 시도해주세요",
+            409,
+        )
+    remaining = instances.exclude(status=InstanceStatus.CLEANED)
+    if remaining.exclude(status=InstanceStatus.FAILED).exists():
+        raise SchedulerError(
+            "ACTIVE_INSTANCE_EXISTS", "인스턴스 정리를 완료한 뒤 다시 시도해주세요", 409
+        )
+    for instance in remaining.order_by("pk"):
+        try:
+            data = call_scheduler_detail(instance, scheduler_auth_header())
+        except (SchedulerError, ValueError, TypeError, AttributeError):
+            raise SchedulerError(
+                "INSTANCE_CLEANUP_UNVERIFIED",
+                "Scheduler에서 인스턴스 정리 여부를 확인할 수 없습니다",
+                409,
+            ) from None
+        expected = {
+            "instance_id": str(instance.pk),
+            "team_id": str(instance.team_id),
+            "challenge_id": str(instance.challenge_id),
+            "status": InstanceStatus.FAILED,
+        }
+        if instance.release_id is not None:
+            expected["release_id"] = str(instance.release_id)
+        if (
+            not isinstance(data, dict)
+            or any(data.get(key) != value for key, value in expected.items())
+            or ("user_id" in data and data["user_id"] != str(instance.user_id))
+            or "runtime_target_id" not in data
+        ):
+            raise SchedulerError(
+                "INSTANCE_CLEANUP_UNVERIFIED",
+                "Scheduler 응답의 인스턴스 정보와 배치 여부를 확인해주세요",
+                409,
+            )
+        # A missing key is not evidence of no deployment; only an explicit null is.
+        if data["runtime_target_id"] is not None:
+            raise SchedulerError(
+                "ACTIVE_INSTANCE_EXISTS",
+                "실패한 인스턴스의 정리 재시도를 완료한 뒤 다시 시도해주세요",
+                409,
+            )
+
+
+def _team_instance_owner_ids(team_id):
+    return set(User.objects.filter(team_id=team_id).values_list("pk", flat=True)) | set(
+        Instance.objects.filter(team_id=team_id).values_list("user_id", flat=True)
+    )
 
 
 def _lock_challenges(challenge_ids):
@@ -2663,12 +2753,19 @@ def _team_delete(request, team_id):
                     "challenge_id", flat=True
                 )
             )
+            owner_ids = _team_instance_owner_ids(team_id)
         except ValidationError:
             prelocked = set()
+            owner_ids = set()
         with transaction.atomic():
+            # Lock owners before challenges/team so in-flight instance writes can finish.
+            for user_id in sorted(owner_ids):
+                InstanceLock.objects.select_for_update().get_or_create(user_id=user_id)
             # 플래그 제출과 같은 문제 → 팀 순서로 잠근다.
             challenges = _lock_challenges(prelocked)
             team = _get_team_for_update(team_id)
+            if not _team_instance_owner_ids(team.pk) <= owner_ids:
+                continue
             if ExeSubmission.objects.filter(team=team).exists():
                 return fail(
                     "EXE_SUBMISSION_EXISTS",
@@ -2676,12 +2773,16 @@ def _team_delete(request, team_id):
                     409,
                 )
             # 인스턴스 행만 지우면 스케줄러의 컨테이너가 고아로 남는다.
-            if Instance.objects.filter(
-                team=team, status__in=TEAM_BLOCKING_INSTANCE_STATUSES
-            ).exists():
-                return fail(
-                    "ACTIVE_INSTANCE_EXISTS", "팀의 인스턴스를 먼저 종료해야 합니다", 409
+            member_ids = User.objects.filter(team=team).values("pk")
+            try:
+                _require_instance_cleanup(
+                    Instance.objects.filter(Q(team=team) | Q(user_id__in=member_ids)),
+                    InstanceWriteOperation.objects.filter(
+                        Q(team_id=team.pk) | Q(user_id__in=member_ids)
+                    ),
                 )
+            except SchedulerError as error:
+                return fail(error.code, error.message, error.status_code)
 
             # 읽은 뒤 팀을 잠그기 전에 새로 푼 문제가 있으면, 팀을 쥔 채 그 문제를 잠그면
             # 순서가 뒤집혀 정답 처리와 교착한다. 잠금을 풀고 처음부터 다시 잡는다.

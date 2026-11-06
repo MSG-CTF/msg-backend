@@ -1,0 +1,23 @@
+{
+  "services": {
+    "postgres": {
+      "command": ["postgres", "-c", "ssl=on", "-c", "ssl_cert_file=/run/msg-tls/server.crt", "-c", "ssl_key_file=/run/msg-tls/server.key", "-c", "hba_file=/run/msg-tls/pg_hba.conf"],
+      "volumes": ["/etc/msgctf-security/tls/postgres:/run/msg-tls:ro"]
+    },
+    "redis": {
+      "volumes": ["/etc/msgctf-security/tls/redis:/run/msg-tls:ro", "/etc/msgctf-security/trust:/run/msg-trust:ro"],
+      "healthcheck": {"test": ["CMD-SHELL", "REDISCLI_AUTH=\"$${REDIS_PASSWORD}\" redis-cli --tls --cacert /run/msg-trust/ca.crt --sni redis ping"]}
+    },
+    "backend": {
+      "volumes": ["/run/msgctf-secrets:/run/msgctf-secrets:ro", "/etc/msgctf-security/trust:/run/msgctf-trust:ro"],
+      "environment": {
+        "BACKEND_SECRETS_FILE": "/run/msgctf-secrets/backend.env",
+        "SERVICE_KEY_STATE_REQUIRED": "True",
+        "DATASTORE_TLS_REQUIRED": "True",
+        "POSTGRES_SSLMODE": "verify-full",
+        "POSTGRES_SSLROOTCERT": "/run/msgctf-trust/ca.crt",
+        "REDIS_SSL_CA_CERTS": "/run/msgctf-trust/ca.crt"
+      }
+    }
+  }
+}

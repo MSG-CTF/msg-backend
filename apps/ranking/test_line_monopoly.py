@@ -51,12 +51,11 @@ class LineMonopolyTests(TestCase):
             last_challenge = challenge
         return last_challenge
 
-    def test_bonus_at_largest_allowed_scores_and_percent_is_stored(self):
-        """관리자 API 가 허용하는 점수와 100% 비율 조합도 저장된다. 넘치면 마지막 정답 제출이 실패한다."""
-        AdminSetting.objects.create(key="board.line_category_bonus_percent", value=100)
-        for prefix, score, expected in (
-            ("reviewed", Decimal("2000000000"), Decimal("10000000000.00")),
-            ("largest", Decimal("9999999999.99"), Decimal("49999999999.95")),
+    def test_bonus_is_fixed_even_with_large_scores_and_legacy_percent_settings(self):
+        AdminSetting.objects.create(key="board.line_bonus_percent", value=100)
+        for prefix, score in (
+            ("reviewed", Decimal("2000000000")),
+            ("largest", Decimal("9999999999.99")),
         ):
             with self.subTest(score=score):
                 team = Team.objects.create(team_name=f"{prefix} 팀")
@@ -65,7 +64,7 @@ class LineMonopolyTests(TestCase):
                 award = check_and_record_line_monopoly(team, line_number=1)
 
                 award.refresh_from_db()
-                self.assertEqual(award.earned_score, expected)
+                self.assertEqual(award.earned_score, Decimal("300.00"))
 
     def test_each_team_receives_the_same_line_bonus_once(self):
         first_team = Team.objects.create(team_name="첫 번째 팀")
@@ -80,14 +79,16 @@ class LineMonopolyTests(TestCase):
             self.complete_line(second_team, "second"),
         )
 
-        self.assertEqual(first_award.earned_score, Decimal("225.00"))
-        self.assertEqual(second_award.earned_score, Decimal("225.00"))
+        self.assertEqual(first_award.earned_score, Decimal("300.00"))
+        self.assertEqual(second_award.earned_score, Decimal("300.00"))
+        self.assertFalse(first_award.is_category_bonus)
+        self.assertFalse(second_award.is_category_bonus)
         self.assertEqual(
             set(LineMonopoly.objects.values_list("team_id", "line_number")),
             {(first_team.pk, 1), (second_team.pk, 1)},
         )
 
-    def test_bonus_percent_follows_admin_settings(self):
+    def test_same_and_mixed_categories_receive_the_same_fixed_bonus(self):
         AdminSetting.objects.create(key="board.line_bonus_percent", value=10)
         AdminSetting.objects.create(key="board.line_category_bonus_percent", value=20)
         same_category = Team.objects.create(team_name="같은 분야 팀")
@@ -101,10 +102,61 @@ class LineMonopolyTests(TestCase):
         category_award = check_and_record_line_monopoly(same_category, line_number=1)
         line_award = check_and_record_line_monopoly(mixed, line_number=1)
 
-        self.assertTrue(category_award.is_category_bonus)
-        self.assertEqual(category_award.earned_score, Decimal("100.00"))
+        self.assertFalse(category_award.is_category_bonus)
+        self.assertEqual(category_award.earned_score, Decimal("300.00"))
         self.assertFalse(line_award.is_category_bonus)
-        self.assertEqual(line_award.earned_score, Decimal("50.00"))
+        self.assertEqual(line_award.earned_score, Decimal("300.00"))
+
+    def test_dynamic_score_changes_do_not_change_line_bonus(self):
+        from apps.challenge.services import (
+            get_team_total_score,
+            update_dynamic_score_and_team_scores,
+        )
+
+        team = Team.objects.create(team_name="동적 배점 팀")
+        last = self.complete_line(team, "dynamic")
+        last.initial_score = 100
+        last.minimum_score = 10
+        last.decay = 2
+        last.save(update_fields=["initial_score", "minimum_score", "decay"])
+        award = check_and_record_line_monopoly(team, last)
+        self.assertEqual(get_team_total_score(team.pk), Decimal("800.00"))
+
+        other = Team.objects.create(team_name="다음 풀이 팀")
+        Solve.objects.create(team=other, challenge=last, earned_score=100, earned_mileage=0)
+        update_dynamic_score_and_team_scores(last)
+
+        award.refresh_from_db()
+        last.refresh_from_db()
+        self.assertEqual(last.current_score, Decimal("10"))
+        self.assertEqual(award.earned_score, Decimal("300.00"))
+        self.assertEqual(get_team_total_score(team.pk), Decimal("710.00"))
+        self.assertEqual(LineMonopoly.objects.filter(team=team).count(), 1)
+
+    def test_incomplete_line_does_not_receive_a_bonus(self):
+        team = Team.objects.create(team_name="네 문제만 해결한 팀")
+        last = self.complete_line(team, "incomplete")
+        TeamChallengeAccess.objects.filter(team=team, challenge=last).update(
+            status=TeamChallengeAccess.Status.OPENED
+        )
+
+        self.assertIsNone(check_and_record_line_monopoly(team, line_number=1))
+        self.assertFalse(LineMonopoly.objects.filter(team=team).exists())
+
+    def test_award_is_included_in_team_score_immediately(self):
+        from apps.challenge.services import get_team_total_score
+        from apps.leaderboard.views import build_team_data, collect_solves_map
+
+        team = Team.objects.create(team_name="점수 반영 팀")
+        last = self.complete_line(team, "total")
+
+        self.assertEqual(get_team_total_score(team.pk), Decimal("500"))
+        check_and_record_line_monopoly(team, last)
+
+        self.assertEqual(get_team_total_score(team.pk), Decimal("800.00"))
+        row = build_team_data([team], collect_solves_map())[0]
+        self.assertEqual(row["jeopardy_score"], Decimal("500"))
+        self.assertEqual(row["line_score"], Decimal("300.00"))
 
     def test_same_team_cannot_receive_a_line_bonus_twice(self):
         team = Team.objects.create(team_name="한 번만 받는 팀")
@@ -164,7 +216,7 @@ class SpecialCellLineMonopolyTests(TestCase):
 
         monopoly = check_and_record_line_monopoly(team, last_challenge)
         self.assertIsNotNone(monopoly)
-        self.assertEqual(monopoly.earned_score, Decimal("225.00"))
+        self.assertEqual(monopoly.earned_score, Decimal("300.00"))
 
         consume_cell(team, roulette)
 

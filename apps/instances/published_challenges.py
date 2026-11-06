@@ -1,9 +1,7 @@
 """Inspect immutable CI artifacts and import them without activating a release."""
 import base64
-import io
 import json
 import re
-import zipfile
 from urllib.parse import quote
 
 import yaml
@@ -30,7 +28,6 @@ NAME = re.compile(r"^(?P<slug>[a-z0-9]+(?:-[a-z0-9]+)*)-(?P<run>[1-9][0-9]*)-[1-
 SHA = re.compile(r"^[a-f0-9]{40}$")
 SALT = "admin-published-challenge-v1"
 PREVIEW_SECONDS = 1200
-MAX_PUBLICATION_BUNDLE_BYTES = 16 * 1024 * 1024
 
 
 class PublishedImportError(APIError):
@@ -130,21 +127,10 @@ def _metadata(slug, sha):
             or category not in Challenge.CategoryType.values
             or not isinstance(description, str) or len(description) > 100000
             or not isinstance(flag, str) or not flag or any(char in flag for char in "\0\r\n")
-            or len(flag.encode("utf-8")) > 4096):
+            or len(flag) > 512 or len(flag.encode("utf-8")) > 4096):
         raise ReleaseValidationError("info.yaml의 제목·분야·지문·플래그를 확인해주세요")
     return {"title": title.strip(), "description": description, "category": category,
             "flag": flag, "dynamic": bool(value.get("deployment"))}
-
-
-def _release_artifact(artifact):
-    # The ZIP also contains scan reports and SBOMs; only the manifest is parsed below.
-    raw = poller.github_request(f"/repos/{settings.RELEASE_POLL_REPO}/actions/artifacts/{artifact['id']}/zip",
-        token=settings.RELEASE_POLL_GITHUB_TOKEN, timeout=30, max_bytes=MAX_PUBLICATION_BUNDLE_BYTES)
-    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
-        entries = [entry for entry in archive.infolist() if entry.filename.split("/")[-1] == poller.BUNDLE_FILE_NAME]
-        if len(entries) != 1 or entries[0].file_size > 1024 * 1024:
-            raise ReleaseValidationError("실행 발행 파일을 확인해주세요")
-        return json.loads(archive.read(entries[0]))
 
 
 def _linked_request(request_id, *, lock=False):
@@ -211,7 +197,7 @@ def prepare_publication(artifact_id, *, metadata_reader=None, publication_reques
     metadata = (metadata_reader or _metadata)(slug, sha)
     release_data = release_validated = manifest = file_validated = archive_bytes = None
     if "publish" in matching:
-        release_data = _release_artifact(matching["publish"])
+        release_data = poller.download_bundle(matching["publish"], token=settings.RELEASE_POLL_GITHUB_TOKEN)
         poller.validate_bundle_source(matching["publish"], run, release_data)
         if linked and release_data.get("source_sha") != linked.requested_sha:
             raise PublishedImportError("PUBLICATION_REQUEST_MISMATCH", "bundle SHA가 발행 요청 SHA와 다릅니다", 409)

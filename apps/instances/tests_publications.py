@@ -16,6 +16,7 @@ from django.utils import timezone
 from google.api_core.exceptions import ServiceUnavailable
 from google.auth.exceptions import RefreshError
 
+from apps.board.models import Cell, TeamChallengeAccess
 from apps.challenge.models import Challenge
 from apps.challenge.services import hash_flag, is_correct_flag
 from apps.common.models import IdempotencyRecord
@@ -146,6 +147,48 @@ class PublishedChallengeTests(ReleaseTestBase):
         self.assertEqual(response.data["data"]["files"]["status"], "available")
         self.assertFalse(Challenge.objects.filter(challenge_slug=SLUG).exists())
         self.assertEqual(ChallengeRelease.objects.count(), 0)
+
+    def test_preview_rejects_flag_above_submission_limit_without_writes(self):
+        self.metadata["flag"] = "x" * 513
+        response = self.preview()
+        self.assertEqual((response.status_code, response.data["code"]), (400, "INVALID_PUBLICATION"))
+        self.assertNotIn(self.metadata["flag"], json.dumps(response.data))
+        self.assertFalse(Challenge.objects.filter(challenge_slug=SLUG).exists())
+        self.assertFalse(ChallengeRelease.objects.exists())
+        self.assertFalse(RuntimeSecret.objects.exists())
+        self.assertFalse(ChallengeUserFileBundle.objects.exists())
+        self.assertFalse(IdempotencyRecord.objects.exists())
+
+    def test_import_rechecks_flag_limit_without_consuming_idempotency_key(self):
+        body = self.body()
+        self.metadata["flag"] = "x" * 513
+        response = self.import_body(body, key="flag-length-retry")
+        self.assertEqual((response.status_code, response.data["code"]), (400, "INVALID_PUBLICATION"))
+        self.assertNotIn(self.metadata["flag"], json.dumps(response.data))
+        self.assertFalse(Challenge.objects.filter(challenge_slug=SLUG).exists())
+        self.assertFalse(ChallengeRelease.objects.exists())
+        self.assertFalse(RuntimeSecret.objects.exists())
+        self.assertFalse(ChallengeUserFileBundle.objects.exists())
+        self.assertFalse(IdempotencyRecord.objects.exists())
+        self.metadata["flag"] = "MSG{source-flag}"
+        self.assertEqual(self.import_body(body, key="flag-length-retry").status_code, 200)
+
+    def test_maximum_unicode_flag_can_be_imported_and_submitted_unchanged(self):
+        self.make_static()
+        flag = " " + "\U0001f680" * 510 + " "
+        self.metadata["flag"] = flag
+        response = self.import_body(self.body())
+        self.assertEqual(response.status_code, 200, response.data)
+        challenge = Challenge.objects.get(challenge_slug=SLUG)
+        self.assertTrue(is_correct_flag(flag, challenge.flag_hash))
+        self.assertEqual(decrypt_runtime_secret(RuntimeSecret.objects.get(challenge=challenge, name="flag")), flag)
+        cell = Cell.objects.create(cell_index=1, type="CHALLENGE", name="flag-boundary")
+        TeamChallengeAccess.objects.create(team=self.team, challenge=challenge, source_cell=cell)
+        self.auth("player")
+        response = self.client.post(
+            f"/api/v1/challenges/{challenge.pk}/submit", {"flag": flag}, format="json",
+        )
+        self.assertEqual((response.status_code, response.data["code"]), (200, "SUCCESS"))
 
     def test_import_creates_private_challenge_release_secret_and_file_without_activating(self):
         response = self.import_body(self.body())
