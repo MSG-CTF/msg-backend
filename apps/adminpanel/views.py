@@ -4,6 +4,7 @@ import re
 import uuid
 from decimal import ROUND_HALF_UP, Decimal
 
+from django.conf import settings
 from django.contrib.auth.password_validation import (
     UserAttributeSimilarityValidator,
     validate_password,
@@ -118,7 +119,11 @@ from apps.instances.services import (
     scheduler_auth_header,
     update_instance_from_scheduler,
 )
-from apps.instances.write_recovery import BLOCKING_STATUSES, require_no_pending_write
+from apps.instances.write_recovery import (
+    BLOCKING_STATUSES, begin_write, bind_remote_instance, complete_write,
+    record_write_failure, require_no_pending_write, resume_matching_write,
+    validate_write_owner,
+)
 from .resource_broker import fetch_resource_targets
 from .node_allocation import enrich_allocations
 from .serializers import ChallengeCreateSerializer, ChallengeUpdateSerializer
@@ -1250,9 +1255,12 @@ def instance_retry_cleanup(request, instance_id):
     }, message="인스턴스 정리 재시도가 접수되었습니다", status=202)
 
 
+@transaction.non_atomic_requests
 @api_view(["POST"])
 @permission_classes([IsAdmin])
 def instance_force_reset(request, instance_id):
+    if settings.SCHEDULER_REQUEST_RECOVERY_ENABLED:
+        return _instance_force_reset_recoverable(request, instance_id)
     now = timezone.now().replace(microsecond=0)
 
     owner = (
@@ -1360,6 +1368,81 @@ def instance_force_reset(request, instance_id):
         },
         message="인스턴스 재시작 요청이 접수되었습니다.",
         status=202,
+    )
+
+
+def _instance_force_reset_recoverable(request, instance_id):
+    now = timezone.now().replace(microsecond=0)
+    owner = Instance.objects.select_related("user").filter(pk=instance_id).first()
+    if owner is None:
+        return fail("INSTANCE_NOT_FOUND", "존재하지 않는 인스턴스 ID입니다", 404)
+    try:
+        with transaction.atomic():
+            _lock_instance_owner(owner.user)
+            instance = Instance.objects.select_for_update(of=("self",)).select_related(
+                "user", "team", "challenge", "release",
+            ).get(pk=instance_id)
+            new_instance = resume_matching_write(
+                instance.user, action=InstanceWriteOperation.Action.RESET,
+                challenge_id=instance.challenge_id, source_instance_id=instance.pk,
+            )
+            if new_instance is None:
+                require_no_pending_write(instance.user)
+                if instance.status not in RESETTABLE_INSTANCE_STATUSES:
+                    return fail("INSTANCE_NOT_RESTARTABLE", "재시작할 수 없는 상태입니다", 409,
+                                data={"instance_id": str(instance.pk), "status": instance.status})
+                operation = begin_write(
+                    action=InstanceWriteOperation.Action.RESET, user=instance.user,
+                    team=instance.team, challenge=instance.challenge,
+                    release=instance.release, source_instance_id=instance.pk,
+                )
+                _record_event(
+                    AdminEvent.EventType.INSTANCE_FORCED,
+                    f"인스턴스 강제 재시작 요청: {instance.pk}, 작업 {operation.pk}",
+                    request.user.login_id, severity=AdminEvent.Severity.WARNING,
+                    team=instance.team, challenge=instance.challenge, instance_id=instance.pk,
+                )
+    except SchedulerError as error:
+        return fail(error.code, error.message, error.status_code)
+
+    if new_instance is None:
+        sent = False
+        try:
+            with transaction.atomic():
+                _lock_instance_owner(owner.user)
+                instance = Instance.objects.select_for_update(of=("self",)).select_related(
+                    "user", "team", "challenge", "release",
+                ).get(pk=instance_id)
+                validate_write_owner(operation)
+                if instance.status not in RESETTABLE_INSTANCE_STATUSES:
+                    raise SchedulerError("INSTANCE_NOT_RESTARTABLE", "재시작할 수 없는 상태입니다", 409)
+                sent = True
+                data = call_scheduler_reset(instance, scheduler_auth_header(request), request_id=operation.pk)
+                bind_remote_instance(operation, data)
+                new_instance = create_instance_from_scheduler(
+                    data, user=instance.user, team=instance.team,
+                    challenge=instance.challenge, release=instance.release,
+                    replaced_instance=instance,
+                )
+                mark_instance_replaced(instance)
+                complete_write(operation)
+        except SchedulerError as error:
+            record_write_failure(operation, error, sent=sent)
+            _record_force_failed(request, instance, "재시작", error)
+            return fail(error.code, error.message, error.status_code)
+        except Exception as error:
+            record_write_failure(operation, error, sent=sent)
+            raise
+
+    return ok(
+        {"instance_id": str(new_instance.pk), "team_id": str(new_instance.team_id),
+         "team_name": instance.team.team_name, "challenge_id": str(new_instance.challenge_id),
+         "status": new_instance.status,
+         "host": new_instance.host if new_instance.status == InstanceStatus.RUNNING else None,
+         "endpoints": new_instance.endpoints if new_instance.status == InstanceStatus.RUNNING else [],
+         "port": None, "expires_at": isoformat_z(new_instance.expires_at),
+         "forced_by": request.user.login_id, "forced_at": isoformat_z(now)},
+        message="인스턴스 재시작 요청이 접수되었습니다", status=202,
     )
 
 

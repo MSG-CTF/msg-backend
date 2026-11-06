@@ -189,6 +189,9 @@ class InstanceWriteOperation(models.Model):
     release_id = models.UUIDField(null=True, blank=True)
     source_instance_id = models.UUIDField(null=True, blank=True)
     remote_instance_id = models.UUIDField(null=True, blank=True)
+    # Persist the use of the request-ID contract before sending the HTTP request.
+    # Legacy unknown-result writes must never be guessed from the active instance.
+    request_id_used = models.BooleanField(default=False)
     attempts = models.PositiveIntegerField(default=0)
     last_error_code = models.CharField(max_length=40, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
@@ -207,6 +210,8 @@ class InstanceWriteOperation(models.Model):
         ]
         indexes = [
             models.Index(fields=["status", "created_at"], name="instance_write_recovery_due"),
+            models.Index(fields=["status", "updated_at"], condition=models.Q(request_id_used=True), name="instance_req_recovery_due"),
+            models.Index(fields=["user_id", "team_id", "-created_at", "-operation_id"], condition=models.Q(request_id_used=True), name="instance_req_owner_latest"),
         ]
 
 

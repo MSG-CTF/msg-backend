@@ -8,6 +8,7 @@ from django.db import close_old_connections
 
 from apps.instances.reconciliation import reconcile_instances_once
 from apps.instances.services import SchedulerError
+from apps.instances.write_recovery import recover_pending_writes_once
 
 
 class Command(BaseCommand):
@@ -30,11 +31,16 @@ class Command(BaseCommand):
         while True:
             close_old_connections()
             try:
+                write_recovery = recover_pending_writes_once(
+                    batch_size=min(options["batch_size"], 10), max_seconds=min(options["max_seconds"] / 3, 5),
+                )
                 summary = reconcile_instances_once(
                     batch_size=options["batch_size"],
                     max_seconds=options["max_seconds"],
                     instance_ids=options["instance_id"],
                 )
+                if write_recovery["checked"]:
+                    summary["write_recovery"] = write_recovery
             except SchedulerError as error:
                 raise CommandError(f"종료 이력 동기화 설정 오류: {error.code}") from None
             self.stdout.write(json.dumps(summary))
