@@ -2523,7 +2523,8 @@ class AdminSettingsTests(TestCase):
         self.assertEqual(res.status_code, 200)
         d = res.data["data"]
         self.assertEqual(
-            set(d), {"contest", "board", "flag", "updated_at", "updated_by"}
+            set(d),
+            {"contest", "board", "flag", "koth", "updated_at", "updated_by"},
         )
         self.assertEqual(d["board"]["dice_rolls_per_reset"], 3)
         self.assertEqual(d["board"]["dice_reset_interval_minutes"], 15)
@@ -2532,6 +2533,9 @@ class AdminSettingsTests(TestCase):
         self.assertNotIn("line_category_bonus_percent", d["board"])
         self.assertEqual(d["flag"]["max_attempts"], 3)
         self.assertEqual(d["flag"]["lock_seconds"], 30)
+        self.assertEqual(
+            d["koth"], {"external_team_count": 0, "internal_team_count": 0}
+        )
         self.assertIsNone(d["updated_at"])
 
     def test_get_without_active_contest(self):
