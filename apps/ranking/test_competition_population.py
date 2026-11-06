@@ -2,8 +2,10 @@
 
 import hashlib
 import json
+import os
 from datetime import timedelta
 from decimal import Decimal
+from unittest.mock import patch
 
 from django.test import TestCase, override_settings
 from django.utils import timezone
@@ -134,3 +136,12 @@ class PublicCompetitionPopulationTests(TestCase):
         for url in ["/api/v1/ranking", "/api/v1/leaderboard", "/api/v1/ranking/me", "/api/v1/ranking/member"]:
             self.get_data(url)
         self.assertEqual(snapshot(), before)
+
+    def test_legacy_internal_uuid_manifest_excludes_only_explicit_team(self):
+        unregistered_fixture = Team.objects.create(team_name="internal-check-team-02")
+        with patch.dict(os.environ, {"PUBLIC_RANKING_EXCLUDED_TEAM_IDS": str(unregistered_fixture.pk)}):
+            data = self.get_data("/api/v1/ranking?size=100")
+            self.assertEqual(data["total_count"], 3)
+            self.assertNotIn(str(unregistered_fixture.pk), [row["team_id"] for row in data["rankings"]])
+            self.assertIn(str(self.similar_name.pk), [row["team_id"] for row in data["rankings"]])
+        self.assertTrue(Team.objects.filter(pk=unregistered_fixture.pk).exists())

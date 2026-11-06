@@ -26,9 +26,16 @@ class ScoreFetchError(Exception):
 
 def eligible_teams():
     """Share the registered participant scope with read-only ranking views."""
+    # The legacy internal deployment has no durable test-team registry. Its
+    # explicit UUID manifest affects only these new public ranking readers.
+    excluded_ids = [
+        uuid.UUID(value.strip())
+        for value in os.getenv("PUBLIC_RANKING_EXCLUDED_TEAM_IDS", "").split(",")
+        if value.strip()
+    ]
     return Team.objects.filter(is_banned=False).exclude(
         team_id__in=KothPreviewToken.objects.values("preview_team_id")
-    )
+    ).exclude(team_id__in=excluded_ids)
 
 
 def format_utc(value):
