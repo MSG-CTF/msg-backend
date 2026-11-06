@@ -54,16 +54,16 @@ def replay_unaccepted_reset(operation, user, team, challenge):
     """Only reset has an immutable wire command: the source ID and request ID."""
     if operation.action != InstanceWriteOperation.Action.RESET or not operation.request_id_used:
         raise ValueError("not a replayable reset")
+    try:
+        check_active_team(Team.objects.select_for_update(no_key=True).get(pk=team.pk))
+    except TeamBanned as error:
+        raise SchedulerError("RESET_OWNER_BANNED", "정지된 팀의 초기화를 재전송할 수 없습니다", 403) from error
     source = Instance.objects.select_for_update().filter(
         pk=operation.source_instance_id, user=user, team=team,
         challenge=challenge, release_id=operation.release_id,
     ).first()
     if source is None:
         raise ValueError("reset source scope changed")
-    try:
-        check_active_team(team)
-    except TeamBanned as error:
-        raise SchedulerError("RESET_OWNER_BANNED", "정지된 팀의 초기화를 재전송할 수 없습니다", 403) from error
     auth = scheduler_auth_header()
     detail = call_scheduler_detail(source, auth)
     if not isinstance(detail, dict) or any(detail.get(k) != v for k, v in {
