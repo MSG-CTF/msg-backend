@@ -4,13 +4,14 @@ from django.db.models import Count, Max, Min, OuterRef, Subquery, Sum
 from rest_framework.decorators import api_view, permission_classes, throttle_classes
 from apps.common.throttling import ReadApiThrottle
 
-from apps.accounts.models import Team, User
+from apps.accounts.models import User
 from apps.challenge.models import Challenge, Solve
 from apps.common.exceptions import UserHasNoTeam
 from apps.common.permissions import IsAuthenticated
 from apps.common.response import ok
 from apps.common.utils import num
 from apps.koth.models import KothSolve
+from apps.koth.services import eligible_teams
 from apps.ranking.pagination import parse_pagination
 from apps.ranking.ranking import build_team_ranking, build_member_ranking
 from apps.signature.models import SignatureSolve
@@ -95,7 +96,7 @@ def collect_team_data():
         .values("total")
     )
 
-    teams = Team.objects.filter(is_banned=False).annotate(
+    teams = eligible_teams().annotate(
         jeopardy_total=Sum("solves__challenge__current_score"),
         last_jeopardy_at=Max("solves__solved_at"),
         koth_total=Subquery(koth_score_sq),
@@ -127,8 +128,7 @@ def collect_team_data():
 def collect_member_data():
     users = (
         User.objects.filter(
-            team__isnull=False,
-            team__is_banned=False,
+            team_id__in=eligible_teams().values("pk"),
         )
         .select_related("team")
         .annotate(
