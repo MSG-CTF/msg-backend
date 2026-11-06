@@ -174,14 +174,14 @@ class InstanceRequestRecoveryTests(Fixtures, TestCase):
         self.client.force_authenticate(admin)
         path = f"/api/v1/admin/instances/{source.pk}/reset"
         with patch("apps.adminpanel.views.call_scheduler_reset", side_effect=SchedulerError("SCHEDULER_UNAVAILABLE", "lost", 503)) as remote:
-            self.assertEqual(self.client.post(path, {}, format="json").status_code, 503)
+            self.assertEqual(self.client.post(path, {"reason": "응답 유실 복구 검증"}, format="json").status_code, 503)
         row = InstanceWriteOperation.objects.get()
         self.assertEqual(row.user_id, self.user.pk)
         self.assertEqual(remote.call_args.kwargs["request_id"], row.pk)
         result = self.result(row)
         with patch("apps.instances.write_recovery.call_scheduler_request_result", return_value=result), patch("apps.adminpanel.views.call_scheduler_reset") as reset:
             for _ in range(2):
-                response = self.client.post(path, {}, format="json")
+                response = self.client.post(path, {"reason": "응답 유실 복구 검증"}, format="json")
                 self.assertEqual(response.status_code, 202)
                 self.assertEqual(response.data["data"]["instance_id"], result["instance"]["instance_id"])
         reset.assert_not_called()

@@ -2,7 +2,7 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-    dependencies = [("instances", "0023_service_key_lifecycle")]
+    dependencies = [("instances", "0024_instance_scheduler_observation")]
     operations = [
         migrations.AddField(
             model_name="instancewriteoperation",

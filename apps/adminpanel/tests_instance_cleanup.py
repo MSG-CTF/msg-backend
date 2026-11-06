@@ -36,7 +36,7 @@ class AdminCleanupTests(TestCase):
     def test_failed_create_cleanup_uses_guarded_operator_endpoint(self, request):
         instance = self._instance(status=InstanceStatus.CLEANUP_PENDING)
         request.return_value = self.snapshot(instance)
-        response = self.client.delete(f"/api/v1/admin/instances/{instance.pk}")
+        response = self.client.delete(f"/api/v1/admin/instances/{instance.pk}", {"reason": "운영 점검"}, format="json")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["data"]["status"], "FAILED")
         instance.refresh_from_db()
@@ -49,7 +49,7 @@ class AdminCleanupTests(TestCase):
     def test_confirmed_deleted_workload_preserves_cleaned_status(self, request):
         instance = self._instance(status=InstanceStatus.CLEANUP_PENDING)
         request.return_value = self.snapshot(instance, "CLEANED")
-        response = self.client.delete(f"/api/v1/admin/instances/{instance.pk}")
+        response = self.client.delete(f"/api/v1/admin/instances/{instance.pk}", {"reason": "운영 점검"}, format="json")
         self.assertEqual((response.status_code, response.data["data"]["status"]), (200, "CLEANED"))
         instance.refresh_from_db()
         self.assertEqual(instance.delete_reason, DeleteReason.CREATE_FAILED_CLEANUP)
@@ -60,7 +60,7 @@ class AdminCleanupTests(TestCase):
         for code, status in [("WORKLOAD_STILL_EXISTS", 409), ("CREATE_RESULT_UNKNOWN", 409), ("RUNTIME_DELETE_FAILED", 503)]:
             with self.subTest(code=code):
                 request.side_effect = SchedulerError(code, "정리 여부를 확인하지 못했습니다", status)
-                response = self.client.delete(f"/api/v1/admin/instances/{instance.pk}")
+                response = self.client.delete(f"/api/v1/admin/instances/{instance.pk}", {"reason": "운영 점검"}, format="json")
                 self.assertEqual((response.status_code, response.data["code"]), (status, code))
                 instance.refresh_from_db()
                 self.assertEqual(instance.status, "CLEANUP_PENDING")
@@ -75,7 +75,7 @@ class AdminCleanupTests(TestCase):
                 data = self.snapshot(instance)
                 data[key] = value
                 request.return_value = data
-                response = self.client.delete(f"/api/v1/admin/instances/{instance.pk}")
+                response = self.client.delete(f"/api/v1/admin/instances/{instance.pk}", {"reason": "운영 점검"}, format="json")
                 self.assertEqual(response.status_code, 503)
                 instance.refresh_from_db()
                 self.assertEqual(instance.status, "CLEANUP_PENDING")
@@ -94,13 +94,13 @@ class AdminCleanupTests(TestCase):
     def test_participant_cannot_force_cleanup(self, request):
         instance = self._instance(status=InstanceStatus.CLEANUP_PENDING)
         self.auth("player")
-        response = self.client.delete(f"/api/v1/admin/instances/{instance.pk}")
+        response = self.client.delete(f"/api/v1/admin/instances/{instance.pk}", {"reason": "운영 점검"}, format="json")
         self.assertEqual(response.status_code, 403)
         request.assert_not_called()
 
     def test_stopping_is_not_reported_as_already_terminated(self):
         instance = self._instance(status=InstanceStatus.STOPPING)
-        response = self.client.delete(f"/api/v1/admin/instances/{instance.pk}")
+        response = self.client.delete(f"/api/v1/admin/instances/{instance.pk}", {"reason": "운영 점검"}, format="json")
         self.assertEqual((response.status_code, response.data["code"]), (400, "INVALID_STATE_TRANSITION"))
 
     def test_repeated_poll_does_not_reset_state_age(self):

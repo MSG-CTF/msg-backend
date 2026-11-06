@@ -31,11 +31,11 @@ class ExpiryHistoryTests(Fixtures, TestCase):
         for local in (InstanceStatus.REQUESTED, InstanceStatus.SCHEDULING, InstanceStatus.PROVISIONING,
                       InstanceStatus.RUNNING, InstanceStatus.RESTARTING, InstanceStatus.RESETTING):
             row = self.instance(status=local, delete_reason=None)
-            before = Instance.objects.values().get(pk=row.pk)
+            before = self.lifecycle_values(row)
             detail.side_effect = lambda item, _: {**self.snapshot(item, InstanceStatus.RUNNING),
                 "expires_at": "2099-01-01T00:00:00Z", "endpoints": [{"service_url": "bad"}]}
             self.assertEqual(reconcile_instances_once()["error"], 0)
-            self.assertEqual(Instance.objects.values().get(pk=row.pk), before)
+            self.assertEqual(self.lifecycle_values(row), before)
 
     @patch("apps.instances.reconciliation.call_scheduler_detail")
     def test_cleanup_pending_and_stopped_continue_until_final_cleanup(self, detail):
@@ -60,13 +60,13 @@ class ExpiryHistoryTests(Fixtures, TestCase):
     @patch("apps.instances.reconciliation.call_scheduler_detail")
     def test_rejects_unknown_reason_or_foreign_scope_without_changing_active_history(self, detail):
         row = self.instance(status=InstanceStatus.RUNNING, delete_reason=None)
-        before = Instance.objects.values().get(pk=row.pk)
+        before = self.lifecycle_values(row)
         for extra in ({"delete_reason": "FUTURE_REASON"}, {"delete_reason": []},
                       {"delete_reason": "TTL_EXPIRED", "team_id": str(uuid.uuid4())},
                       {"delete_reason": "TTL_EXPIRED", "status": "RUNNING"}):
             detail.return_value = {**self.snapshot(row), **extra}
             self.assertEqual(reconcile_instances_once()["error"], 1)
-            self.assertEqual(Instance.objects.values().get(pk=row.pk), before)
+            self.assertEqual(self.lifecycle_values(row), before)
 
     @patch("apps.instances.reconciliation.call_scheduler_detail")
     def test_does_not_infer_reason_from_local_expiry_or_legacy_response(self, detail):

@@ -77,6 +77,11 @@ class Instance(models.Model):
         choices=InstanceStatus.choices,
         default=InstanceStatus.REQUESTED,
     )
+    scheduler_status = models.CharField(
+        max_length=30, choices=InstanceStatus.choices, null=True, blank=True
+    )
+    scheduler_checked_at = models.DateTimeField(null=True, blank=True)
+    scheduler_error_code = models.CharField(max_length=40, null=True, blank=True)
     host = models.CharField(max_length=255, null=True, blank=True)
     ports = models.JSONField(default=list, blank=True)
     endpoints = models.JSONField(default=list, blank=True)

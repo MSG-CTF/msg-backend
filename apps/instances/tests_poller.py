@@ -115,8 +115,8 @@ class FakeResponse:
     def __init__(self, payload):
         self.payload = payload
 
-    def read(self):
-        return self.payload
+    def read(self, size=-1):
+        return self.payload if size < 0 else self.payload[:size]
 
     def __enter__(self):
         return self
@@ -405,6 +405,31 @@ class RegisterBundleTests(PollerTestBase):
 
 
 class PollOnceTests(PollerTestBase):
+    def test_oversized_manifest_is_skipped_without_blocking_next_bundle_or_activation(self):
+        status, active = register_bundle(bundle(challenge_id=self.challenge.pk))
+        self.assertEqual(status, "registered")
+        config, _ = ChallengeRuntimeConfig.objects.get_or_create(challenge=self.challenge)
+        config.current_release = active
+        config.save(update_fields=["current_release"])
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zipped:
+            zipped.writestr("artifact-v2.json", json.dumps({"padding": "x" * (1024 * 1024)}))
+        responses = [
+            json.dumps({"artifacts": [
+                publish_artifact(11, "web-basic-100-1-x-publish-bundle"),
+                publish_artifact(12, "web-basic-101-1-x-publish-bundle"),
+            ]}).encode(),
+            workflow_run(11), archive.getvalue(),
+            workflow_run(12), bundle_zip(bundle(revision=2, challenge_id=self.challenge.pk)),
+        ]
+        with patch("apps.instances.poller.urlopen", fake_urlopen(responses)):
+            summary = poll_once(token="test-token")
+        self.assertEqual((summary["invalid"], summary["registered"], summary["error"]), (1, 1, 0))
+        self.assertEqual(ChallengeRelease.objects.count(), 2)
+        self.assertFalse(PollerArtifact.objects.filter(artifact_id__in=[11, 12], processed_at__isnull=True).exists())
+        config.refresh_from_db()
+        self.assertEqual(config.current_release_id, active.pk)
+
     def test_poll_once_registers_only_new_bundles(self):
         artifacts_page = json.dumps(
             {

@@ -12,7 +12,7 @@ from apps.instances.write_recovery import recover_pending_writes_once
 
 
 class Command(BaseCommand):
-    help = "생성·실행·종료 대기 이력의 만료 및 종료 상태를 스케줄러와 동기화합니다"
+    help = "인스턴스의 Scheduler 관측 결과와 만료·종료 상태를 동기화합니다"
 
     def add_arguments(self, parser):
         parser.add_argument("--batch-size", type=int, default=100)
@@ -31,12 +31,17 @@ class Command(BaseCommand):
         while True:
             close_old_connections()
             try:
-                write_recovery = recover_pending_writes_once(
-                    batch_size=min(options["batch_size"], 10), max_seconds=min(options["max_seconds"] / 3, 5),
+                started = time.monotonic()
+                write_recovery = (
+                    recover_pending_writes_once(
+                        batch_size=min(options["batch_size"], 10),
+                        max_seconds=min(options["max_seconds"] / 3, 5),
+                    )
+                    if not options["instance_id"] else {"checked": 0}
                 )
                 summary = reconcile_instances_once(
                     batch_size=options["batch_size"],
-                    max_seconds=options["max_seconds"],
+                    max_seconds=max(0.001, options["max_seconds"] - (time.monotonic() - started)),
                     instance_ids=options["instance_id"],
                 )
                 if write_recovery["checked"]:
