@@ -22,6 +22,10 @@ class AdminSetting(models.Model):
 
 # 키: (최솟값, 최댓값, 기본값). 게임 로직은 setting_values 로 읽어 운영 중 변경이 바로 적용된다.
 SETTING_SPECS = {
+    # 0 keeps the live eligible-team count; positive values pin the KOTH
+    # scoring population to the event's official registration count.
+    "koth.external_team_count": (0, 81, 0),
+    "koth.internal_team_count": (0, 81, 0),
     "board.dice_rolls_per_reset": (1, 20, 3),
     "board.dice_reset_interval_minutes": (1, 1440, 15),
     "board.solve_deadline_minutes": (1, 180, 15),

@@ -2083,6 +2083,7 @@ def _settings_payload():
         "contest": contest_data,
         "board": grouped.get("board", {}),
         "flag": grouped.get("flag", {}),
+        "koth": grouped.get("koth", {}),
         "updated_at": marker.updated_at if marker else None,
         "updated_by": marker.updated_by if marker else None,
     }
@@ -2098,14 +2099,14 @@ def settings_view(request):
     if not isinstance(body, dict) or not body:
         raise InvalidRequest("변경할 설정이 없습니다")
 
-    unknown_groups = set(body) - {"board", "flag", "contest"}
+    unknown_groups = set(body) - {"board", "flag", "contest", "koth"}
     if unknown_groups:
         raise InvalidRequest(
             f"알 수 없는 항목입니다: {', '.join(sorted(unknown_groups))}"
         )
 
     changes = {}
-    for group in ("board", "flag"):
+    for group in ("board", "flag", "koth"):
         if group not in body:
             continue
         values = body[group]

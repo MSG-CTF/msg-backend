@@ -13,6 +13,7 @@ from django.db.models import Count
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
+from apps.adminpanel.models import setting_values
 from apps.accounts.models import Team, TestTeamIdentity
 
 from .models import KothScorePeriod, KothScorePeriodStatus, KothSolve
@@ -31,12 +32,27 @@ def eligible_teams():
     )
 
 
+def _apply_scoring_team_count_overrides(counts):
+    external_count, internal_count = setting_values(
+        "koth.external_team_count", "koth.internal_team_count"
+    )
+    overrides = {
+        "EXTERNAL": external_count,
+        "INTERNAL": internal_count,
+    }
+    for division, count in overrides.items():
+        if count:
+            counts[division] = count
+    return counts
+
+
 def scoring_team_counts():
-    return dict(
+    counts = dict(
         eligible_teams()
         .values_list("koth_division")
         .annotate(total=Count("team_id"))
     )
+    return _apply_scoring_team_count_overrides(counts)
 
 
 def format_utc(value):
@@ -307,6 +323,7 @@ def _locked_awards_and_snapshot(results):
     for team in team_rows:
         if not team.is_banned and team.pk not in excluded_ids:
             group_counts[team.koth_division] += 1
+    _apply_scoring_team_count_overrides(group_counts)
 
     current_results = []
     team_divisions = {}
