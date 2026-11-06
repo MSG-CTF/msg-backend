@@ -495,6 +495,12 @@ def verify_team_token(request):
 
 
 def _verify_current_team_token(request, challenge, key_version):
+    from .preview_game import preview_callback_identity
+
+    callback_identity = preview_callback_identity(challenge, request.data["team_token"], key_version)
+    if callback_identity is not None:
+        return ok({"valid": True, "team_id": callback_identity[0], "team_name": callback_identity[1],
+            "koth_division": callback_identity[2], "koth_challenge_id": str(challenge.pk)})
     candidate_hash = hash_token(request.data["team_token"])
     token = (
         KothTeamToken.objects.select_related("team")
