@@ -10,6 +10,26 @@ import tempfile
 
 from backend_release import CENTRAL_REVISION, PREFIX, manifest
 
+ERROR_CODES = {"BASE_TEMPLATE_CHANGED", "RANKING_SCOPE_FAILED", "HELPER_CHANGED", "MIGRATION_OR_SECURITY_CHECK_FAILED", "UNVERIFIED_RELEASE"}
+
+
+class DeploymentFailure(RuntimeError):
+    def __init__(self, code):
+        self.code = code if code in ERROR_CODES else "UNVERIFIED_RELEASE"
+        super().__init__(self.code)
+
+
+def scope_proof(value):
+    if not isinstance(value, dict) or value.get("track") != "external" or value.get("division") != "EXTERNAL":
+        raise DeploymentFailure("RANKING_SCOPE_FAILED")
+    if (type(value.get("team_count")) is not int or value["team_count"] != 50
+            or type(value.get("configured_roster_count")) is not int or value["configured_roster_count"] != 50
+            or not isinstance(value.get("roster_sha256"), str)
+            or not re.fullmatch(r"[a-f0-9]{64}", value["roster_sha256"])
+            or value.get("api_verified") is not True or value.get("database_probe_read_only") is not True):
+        raise DeploymentFailure("RANKING_SCOPE_FAILED")
+    return {key: value[key] for key in ["track", "division", "team_count", "configured_roster_count", "roster_sha256", "api_verified", "database_probe_read_only"]}
+
 
 def send(action, environment=None):
     environment = dict(os.environ if environment is None else environment)
@@ -73,16 +93,25 @@ def send(action, environment=None):
             for line in result.stdout.splitlines()
             if line.startswith(PREFIX)
         ]
+        if result.returncode:
+            for line in result.stderr.splitlines():
+                if line.startswith("PLATFORM_DEPLOY_ERROR="):
+                    try:
+                        code = json.loads(line.split("=", 1)[1]).get("error_code")
+                    except (ValueError, TypeError, AttributeError):
+                        continue
+                    raise DeploymentFailure(code)
+            raise DeploymentFailure("UNVERIFIED_RELEASE")
         expected = "preflight_verified" if action == "probe" else "verified"
+        superseded = action == "deploy" and len(reports) == 1 and reports[0].get("status") == "superseded"
         if (
-            result.returncode
-            or len(reports) != 1
-            or reports[0].get("status") != expected
+            len(reports) != 1
+            or (reports[0].get("status") != expected and not superseded)
             or reports[0].get("source_commit") != request["source_sha"]
             or reports[0].get("pipeline_revision") != CENTRAL_REVISION
         ):
-            raise RuntimeError("Restricted backend release did not pass verification")
-        return {
+            raise DeploymentFailure("UNVERIFIED_RELEASE")
+        proof = {
             k: reports[0][k]
             for k in [
                 "source_commit",
@@ -91,6 +120,12 @@ def send(action, environment=None):
                 "status",
             ]
         }
+        if superseded:
+            current = reports[0].get("current_main_source_commit")
+            if not isinstance(current, str) or not re.fullmatch(r"[a-f0-9]{40}", current) or current == request["source_sha"]:
+                raise DeploymentFailure("UNVERIFIED_RELEASE")
+            return {**proof, "current_main_source_commit": current}
+        return {**proof, "ranking_scope": scope_proof(reports[0].get("ranking_scope"))}
 
 
 def main():
@@ -103,5 +138,6 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except Exception:
-        raise SystemExit("Restricted backend release rejected or unverified") from None
+    except Exception as error:
+        code = error.code if isinstance(error, DeploymentFailure) else "UNVERIFIED_RELEASE"
+        raise SystemExit("Restricted backend release rejected or unverified (" + code + ")") from None
