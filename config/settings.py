@@ -394,6 +394,14 @@ if (
     )
 
 SCHEDULER_TIMEOUT_SECONDS = int(os.getenv("SCHEDULER_TIMEOUT_SECONDS", "5"))
+SCHEDULER_WRITE_TIMEOUT_SECONDS = float(os.getenv("SCHEDULER_WRITE_TIMEOUT_SECONDS", "10"))
+SCHEDULER_REQUEST_LOOKUP_TIMEOUT_SECONDS = float(os.getenv("SCHEDULER_REQUEST_LOOKUP_TIMEOUT_SECONDS", "5"))
+SCHEDULER_REQUEST_RECOVERY_ENABLED = os.getenv("SCHEDULER_REQUEST_RECOVERY_ENABLED", "False").lower() == "true"
+SCHEDULER_REQUEST_RECOVERY_WAIT_SECONDS = int(os.getenv("SCHEDULER_REQUEST_RECOVERY_WAIT_SECONDS", "600"))
+if not (0 < SCHEDULER_WRITE_TIMEOUT_SECONDS <= 60 and 0 < SCHEDULER_REQUEST_LOOKUP_TIMEOUT_SECONDS <= 60):
+    raise ImproperlyConfigured("Scheduler write/lookup timeouts must be between 0 and 60 seconds")
+if not 1 <= SCHEDULER_REQUEST_RECOVERY_WAIT_SECONDS <= 3600:
+    raise ImproperlyConfigured("Scheduler request recovery wait must be between 1 and 3600 seconds")
 
 # Set False explicitly to disable acceptance or dispatch in an environment.
 EXE_SUBMISSIONS_ENABLED = os.getenv("EXE_SUBMISSIONS_ENABLED", "True").lower() == "true"

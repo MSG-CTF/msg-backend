@@ -397,7 +397,7 @@ def serialize_instance(instance, include_title=False, include_replaced=False, in
     return data
 
 
-def scheduler_request(method, path, body=None, auth_header=None, query=None):
+def scheduler_request(method, path, body=None, auth_header=None, query=None, *, timeout=None):
     # Scheduler HTTP API를 호출하고 공통 응답 data를 반환한다
     base_url = settings.SCHEDULER_BASE_URL.rstrip("/")
     url = f"{base_url}{path}"
@@ -418,7 +418,11 @@ def scheduler_request(method, path, body=None, auth_header=None, query=None):
         try:
             # settings에서 URL scheme과 authority를 검증한 배포 설정만 사용한다.
             with urlopen(  # nosec B310
-                request, timeout=settings.SCHEDULER_TIMEOUT_SECONDS
+                request, timeout=(timeout if timeout is not None else (
+                    settings.SCHEDULER_WRITE_TIMEOUT_SECONDS
+                    if method.upper() in {"POST", "PUT", "PATCH", "DELETE"}
+                    else settings.SCHEDULER_TIMEOUT_SECONDS
+                ))
             ) as response:
                 response_body = response.read()
         except HTTPError as error:
@@ -501,9 +505,12 @@ def build_scheduler_create_body(user, team, challenge, runtime_config, release):
 
 
 def call_scheduler_create(user, team, challenge, runtime_config, release, auth_header=None,
-                          *, require_replacement_confirmation=False, replace_instance_id=None):
+                          *, require_replacement_confirmation=False, replace_instance_id=None, request_id=None):
     # Scheduler에 인스턴스 생성을 요청한다
     body = build_scheduler_create_body(user, team, challenge, runtime_config, release)
+    if request_id is not None:
+        body["request_id"] = str(request_id)
+        body["release_id"] = str(release.pk)
     if require_replacement_confirmation:
         body["require_replacement_confirmation"] = True
     if replace_instance_id is not None:
@@ -573,12 +580,12 @@ def call_scheduler_retry_cleanup(instance, auth_header=None):
     return data
 
 
-def call_scheduler_reset(instance, auth_header=None):
+def call_scheduler_reset(instance, auth_header=None, *, request_id=None):
     # Scheduler에 인스턴스 초기화를 요청한다
     return scheduler_request(
         "POST",
         f"/api/instances/{instance.instance_id}/reset",
-        body={},
+        body={"request_id": str(request_id)} if request_id is not None else {},
         auth_header=auth_header,
     )
 
@@ -599,6 +606,15 @@ def call_scheduler_detail(instance, auth_header=None):
         "GET",
         f"/api/instances/{instance.instance_id}",
         auth_header=auth_header,
+    )
+
+
+def call_scheduler_request_result(operation):
+    return scheduler_request(
+        "GET", f"/api/instances/requests/{operation.operation_id}",
+        query={"user_id": str(operation.user_id), "team_id": str(operation.team_id)},
+        auth_header=scheduler_auth_header(),
+        timeout=settings.SCHEDULER_REQUEST_LOOKUP_TIMEOUT_SECONDS,
     )
 
 
