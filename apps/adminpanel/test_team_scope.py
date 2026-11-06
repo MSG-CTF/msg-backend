@@ -7,7 +7,7 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from apps.accounts.models import Role, Team, User
+from apps.accounts.models import Role, Team, TestTeamIdentity, User
 from apps.common.jwt import hash_token
 from apps.koth.models import KothChallenge, KothClub, KothPreviewToken, KothSolve
 
@@ -205,7 +205,7 @@ class AdminTeamScopeTests(TestCase):
     def test_reads_preserve_accounts_password_hashes_membership_scores_mileage_and_markers(
         self,
     ):
-        models = [Team, User, KothSolve, KothPreviewToken]
+        models = [Team, User, KothSolve, KothPreviewToken, TestTeamIdentity]
         before = {
             model: list(model.objects.order_by("pk").values()) for model in models
         }

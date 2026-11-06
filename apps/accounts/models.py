@@ -1,7 +1,17 @@
 import uuid
 
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager
-from django.db import models
+from django.db import models, router, transaction
+from django.db.models.functions import Now
+
+
+class TeamManager(models.Manager):
+    def create_qa_team(self, **fields):
+        alias = self._db or router.db_for_write(self.model, **self._hints)
+        with transaction.atomic(using=alias):
+            team = self.using(alias).create(**fields)
+            TestTeamIdentity.objects.using(alias).get_or_create(team_id=team.pk)
+        return team
 
 
 class Team(models.Model):
@@ -26,11 +36,33 @@ class Team(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    objects = TeamManager()
+
     class Meta:
         db_table = "teams"
 
     def __str__(self):
         return self.team_name
+
+
+class TestTeamIdentity(models.Model):
+    class Source(models.TextChoices):
+        EXPLICIT_QA = "EXPLICIT_QA", "EXPLICIT_QA"
+        QA_NAMESPACE = "QA_NAMESPACE", "QA_NAMESPACE"
+        LEGACY_PREVIEW = "LEGACY_PREVIEW", "LEGACY_PREVIEW"
+
+    # 팀을 삭제한 뒤에도 게임 기록의 QA UUID를 제외해야 하므로 FK를 두지 않는다
+    team_id = models.UUIDField(primary_key=True)
+    registration_source = models.CharField(
+        max_length=20,
+        choices=Source.choices,
+        default=Source.EXPLICIT_QA,
+        db_default=Source.EXPLICIT_QA,
+    )
+    created_at = models.DateTimeField(auto_now_add=True, db_default=Now())
+
+    class Meta:
+        db_table = "test_team_identities"
 
 
 class Role(models.TextChoices):

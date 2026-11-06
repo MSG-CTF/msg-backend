@@ -31,7 +31,7 @@ from datetime import datetime, timedelta
 
 from rest_framework.decorators import api_view, permission_classes
 
-from apps.accounts.models import RefreshToken, Role, Team, User
+from apps.accounts.models import RefreshToken, Role, Team, TestTeamIdentity, User
 from apps.common.exceptions import InvalidRequest, TeamBanned
 from apps.common.permissions import IsAdmin
 from apps.common.response import fail, ok
@@ -62,7 +62,7 @@ from apps.board.services import (
     get_or_create_board_state,
     is_line_monopoly_completed,
 )
-from apps.koth.models import KothPreviewToken, KothSolve
+from apps.koth.models import KothSolve
 from apps.koth.services import eligible_teams
 from apps.ranking.models import LineMonopoly
 from apps.signature.models import SignatureSolve
@@ -239,7 +239,7 @@ def team_list(request):
     elif team_scope == "test":
         queryset = Team.objects.filter(
             is_banned=False,
-            team_id__in=KothPreviewToken.objects.values("preview_team_id"),
+            team_id__in=TestTeamIdentity.objects.values("team_id"),
         )
     elif team_scope == "archived":
         queryset = Team.objects.filter(is_banned=True)
@@ -259,7 +259,7 @@ def team_list(request):
         _annotate_total_score(queryset)
         .annotate(
             is_test_team=Exists(
-                KothPreviewToken.objects.filter(preview_team_id=OuterRef("pk"))
+                TestTeamIdentity.objects.filter(team_id=OuterRef("pk"))
             )
         )
         .prefetch_related(

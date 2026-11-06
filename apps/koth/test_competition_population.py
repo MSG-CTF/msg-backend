@@ -9,7 +9,7 @@ from unittest.mock import patch
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
-from apps.accounts.models import Team, User
+from apps.accounts.models import Team, TestTeamIdentity, User
 from apps.common.jwt import hash_token
 from apps.koth import services
 from apps.koth.models import (
@@ -188,3 +188,81 @@ class KothCompetitionPopulationTests(TestCase):
         self.assertTrue(
             all(snapshot["awarded_scores"][str(team.pk)] == 0 for team in self.fixtures)
         )
+
+
+class AutomaticQaScoringTests(TestCase):
+    def setUp(self):
+        self.challenge = KothChallenge.objects.create(
+            club=KothClub.objects.create(name="Automatic QA scoring"),
+            title="Automatic QA scoring",
+            open_group=1,
+        )
+        self.real = Team.objects.bulk_create(
+            [Team(team_name=f"auto-real-{i}") for i in range(3)]
+        )
+        self.qa = Team.objects.create(team_name="QA12-SCORING-deadbeef-0")
+        self.period = datetime(2026, 11, 6, 0, 0, tzinfo=timezone.utc)
+
+    def payload(self):
+        return {
+            "code": "SUCCESS",
+            "data": {
+                "koth_challenge_id": str(self.challenge.pk),
+                "period_id": self.period.isoformat(),
+                "results": [
+                    {
+                        "team_id": str(team.pk),
+                        "period_rank": rank,
+                        "metric_score": 10 - rank,
+                    }
+                    for rank, team in enumerate([self.qa, *self.real], 1)
+                ],
+            },
+        }
+
+    def test_new_qa_needs_no_preview_token_to_be_excluded_from_counts_and_awards(self):
+        self.assertEqual(KothPreviewToken.objects.count(), 0)
+        self.assertEqual(services.scoring_team_counts(), {"EXTERNAL": 3})
+        results = services._validated_results(
+            self.challenge, self.period, self.payload()
+        )
+        self.assertEqual(
+            {team.pk for team, _, _ in results}, {team.pk for team in self.real}
+        )
+        awards, snapshot = services._locked_awards_and_snapshot(results)
+        self.assertTrue(awards)
+        self.assertFalse(any(team.pk == self.qa.pk for team, _ in awards))
+        self.assertEqual(
+            snapshot["team_count_by_division"], {"INTERNAL": 0, "EXTERNAL": 3}
+        )
+
+    def test_deleted_qa_in_game_history_is_ignored_instead_of_failing_the_period(self):
+        payload = self.payload()
+        old_id = self.qa.pk
+        self.qa.delete()
+        self.assertTrue(TestTeamIdentity.objects.filter(pk=old_id).exists())
+        results = services._validated_results(self.challenge, self.period, payload)
+        self.assertEqual(len(results), 3)
+
+    def test_unknown_non_qa_id_is_still_rejected(self):
+        import uuid
+
+        payload = self.payload()
+        payload["data"]["results"].append(
+            {"team_id": str(uuid.uuid4()), "period_rank": 5, "metric_score": 1}
+        )
+        with self.assertRaises(services.ScoreFetchError):
+            services._validated_results(self.challenge, self.period, payload)
+
+    def test_classification_added_after_fetch_is_rechecked_under_snapshot_lock(self):
+        extra = Team.objects.create(team_name="late-classification")
+        stale_results = [
+            (team, rank, 1) for rank, team in enumerate([extra, *self.real], 1)
+        ]
+        TestTeamIdentity.objects.create(team_id=extra.pk)
+        awards, snapshot = services._locked_awards_and_snapshot(stale_results)
+        self.assertEqual(
+            snapshot["team_count_by_division"], {"INTERNAL": 0, "EXTERNAL": 3}
+        )
+        self.assertEqual(snapshot["awarded_scores"][str(extra.pk)], 0)
+        self.assertTrue(all(team.pk != extra.pk for team, _ in awards))

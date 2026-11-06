@@ -22,7 +22,7 @@
               ],
               "default": "official"
             },
-            "description": "official: active teams excluding preview/test markers; test: active marked teams; archived: banned teams, including marked teams; all: every stored team. These are disjoint scopes except all. No team or account is modified."
+            "description": "official: active teams excluding persistent test classification or legacy preview/test markers; test: active teams with either classification; archived: banned teams, including test teams; all: every stored team. Generated QA names in the documented reserved namespace are classified at insertion. These are disjoint scopes except all. Reads do not modify teams or accounts."
           },
           {
             "name": "search",
