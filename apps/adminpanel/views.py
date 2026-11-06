@@ -1093,9 +1093,15 @@ def instance_list(request):
     )
 
 
-def _record_force_failed(request, instance, action, error, detail=None):
+def _record_force_failed(
+    request, instance, action, error, detail=None, *, reason=None, previous_status=None
+):
     # fail 반환은 트랜잭션을 커밋하므로 실패 기록도 같이 남는다.
     suffix = f", {detail}" if detail else ""
+    if previous_status is not None:
+        suffix += f", 이전 상태: {previous_status}"
+    if reason is not None:
+        suffix += f", 사유: {reason}"
     _record_event(
         AdminEvent.EventType.INSTANCE_FORCED,
         f"인스턴스 강제 {action} 실패 ({error.code}): {error.message}{suffix}",
@@ -1130,6 +1136,7 @@ def _record_remote_applied(request, owner, action, detail, *, reason="", previou
 @api_view(["DELETE"])
 @permission_classes([IsAdmin])
 def instance_force_delete(request, instance_id):
+    reason = _require_reason(_json_object(request))
     now = timezone.now().replace(microsecond=0)
 
     owner = (
@@ -1167,6 +1174,7 @@ def instance_force_delete(request, instance_id):
                     },
                 )
 
+            previous_status = instance.status
             try:
                 if cleanup:
                     data = call_scheduler_force_cleanup(instance, scheduler_auth_header(request))
@@ -1176,7 +1184,10 @@ def instance_force_delete(request, instance_id):
                     call_scheduler_delete(instance, scheduler_auth_header(request))
                     applied = ("종료", "종료 요청 접수")
             except SchedulerError as error:
-                _record_force_failed(request, instance, "정리" if cleanup else "종료", error)
+                _record_force_failed(
+                    request, instance, "정리" if cleanup else "종료", error,
+                    reason=reason, previous_status=previous_status,
+                )
                 return fail(error.code, error.message, error.status_code)
             if not cleanup:
                 instance.status = InstanceStatus.STOPPING
@@ -1184,7 +1195,8 @@ def instance_force_delete(request, instance_id):
                 instance.save(update_fields=["status", "delete_reason", "updated_at"])
             _record_event(
                 AdminEvent.EventType.INSTANCE_FORCED,
-                "인스턴스 강제 종료",
+                f"인스턴스 강제 {'정리' if cleanup else '종료'}"
+                f" (이전 상태: {previous_status}): {reason}",
                 request.user.login_id,
                 severity=AdminEvent.Severity.WARNING,
                 team=instance.team,
@@ -1194,7 +1206,9 @@ def instance_force_delete(request, instance_id):
 
     except Exception:
         if applied:
-            _record_remote_applied(request, owner, *applied)
+            _record_remote_applied(
+                request, owner, *applied, reason=reason, previous_status=previous_status
+            )
         raise
 
     return ok(
@@ -1267,6 +1281,7 @@ def instance_retry_cleanup(request, instance_id):
 @api_view(["POST"])
 @permission_classes([IsAdmin])
 def instance_force_reset(request, instance_id):
+    reason = _require_reason(_json_object(request))
     now = timezone.now().replace(microsecond=0)
 
     owner = (
@@ -1300,6 +1315,7 @@ def instance_force_reset(request, instance_id):
                     },
                 )
 
+            previous_status = instance.status
             try:
                 require_no_pending_write(instance.user)
                 scheduler_data = call_scheduler_reset(
@@ -1312,7 +1328,10 @@ def instance_force_reset(request, instance_id):
                         "이 참가자의 이전 인스턴스 요청이 저장 확인을 기다리고 있습니다 서버에서 recover_instance_writes --show로 확인하세요",
                         error.status_code,
                     )
-                _record_force_failed(request, instance, "재시작", error)
+                _record_force_failed(
+                    request, instance, "재시작", error,
+                    reason=reason, previous_status=previous_status,
+                )
                 return fail(error.code, error.message, error.status_code)
             # 스케줄러는 새 인스턴스를 이미 만들었다. 아래 저장이 실패해도 새 ID 를 남긴다.
             remote_new_id = scheduler_data.get("instance_id")
@@ -1329,15 +1348,15 @@ def instance_force_reset(request, instance_id):
                 )
             except SchedulerError as error:
                 _record_force_failed(
-                    request, instance, "재시작", error, f"원격 새 인스턴스 {remote_new_id}"
+                    request, instance, "재시작", error, f"원격 새 인스턴스 {remote_new_id}",
+                    reason=reason, previous_status=previous_status,
                 )
                 return fail(error.code, error.message, error.status_code)
-            previous_status = instance.status
             mark_instance_replaced(instance)
             _record_event(
                 AdminEvent.EventType.INSTANCE_FORCED,
                 f"인스턴스 강제 재시작: 이전 {instance.instance_id} ({previous_status})"
-                f" → 새 {new_instance.instance_id}",
+                f" → 새 {new_instance.instance_id}: {reason}",
                 request.user.login_id,
                 severity=AdminEvent.Severity.WARNING,
                 team=instance.team,
@@ -1347,7 +1366,9 @@ def instance_force_reset(request, instance_id):
 
     except Exception:
         if applied:
-            _record_remote_applied(request, owner, *applied)
+            _record_remote_applied(
+                request, owner, *applied, reason=reason, previous_status=previous_status
+            )
         raise
 
     return ok(

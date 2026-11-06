@@ -117,7 +117,8 @@ class InstanceWriteRecoveryTests(Fixtures, TestCase):
         self.client.force_authenticate(admin)
         with patch("apps.adminpanel.views.call_scheduler_reset") as reset:
             response = self.client.post(
-                f"/api/v1/admin/instances/{source.pk}/reset", {}, format="json"
+                f"/api/v1/admin/instances/{source.pk}/reset",
+                {"reason": "복구 확인"}, format="json",
             )
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["code"], "INSTANCE_REVIEW_REQUIRED")
