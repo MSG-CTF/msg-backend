@@ -24,6 +24,13 @@ class ScoreFetchError(Exception):
     pass
 
 
+def eligible_teams():
+    """Share the registered participant scope with read-only ranking views."""
+    return Team.objects.filter(is_banned=False).exclude(
+        team_id__in=KothPreviewToken.objects.values("preview_team_id")
+    )
+
+
 def format_utc(value):
     return (
         value.astimezone(dt_timezone.utc)
