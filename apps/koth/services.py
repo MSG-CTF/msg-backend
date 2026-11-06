@@ -13,6 +13,7 @@ from django.db.models import Count
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
+from apps.adminpanel.models import setting_values
 from apps.accounts.models import Team
 
 from .models import KothPreviewToken, KothScorePeriod, KothScorePeriodStatus, KothSolve
@@ -36,6 +37,29 @@ def eligible_teams():
     return Team.objects.filter(is_banned=False).exclude(
         team_id__in=KothPreviewToken.objects.values("preview_team_id")
     ).exclude(team_id__in=excluded_ids)
+
+
+def _apply_scoring_team_count_overrides(counts):
+    external_count, internal_count = setting_values(
+        "koth.external_team_count", "koth.internal_team_count"
+    )
+    overrides = {
+        "EXTERNAL": external_count,
+        "INTERNAL": internal_count,
+    }
+    for division, count in overrides.items():
+        if count:
+            counts[division] = count
+    return counts
+
+
+def scoring_team_counts():
+    counts = dict(
+        eligible_teams()
+        .values_list("koth_division")
+        .annotate(total=Count("team_id"))
+    )
+    return _apply_scoring_team_count_overrides(counts)
 
 
 def format_utc(value):
@@ -261,12 +285,7 @@ def rank_points(team_count, first_place_points=FIRST_PLACE_POINTS):
 
 def _awards(results, group_counts=None):
     if group_counts is None:
-        group_counts = {
-            row["koth_division"]: row["total"]
-            for row in Team.objects.filter(is_banned=False)
-            .values("koth_division")
-            .annotate(total=Count("team_id"))
-        }
+        group_counts = scoring_team_counts()
     divisions = defaultdict(list)
     for result in results:
         team, rank = result[:2]
@@ -303,10 +322,16 @@ def _locked_awards_and_snapshot(results):
     """Calculate awards from one locked, internally consistent team snapshot."""
     team_rows = list(Team.objects.select_for_update().order_by("team_id"))
     teams_by_id = {team.pk: team for team in team_rows}
+    eligible_ids = set(
+        eligible_teams()
+        .filter(team_id__in=teams_by_id)
+        .values_list("team_id", flat=True)
+    )
     group_counts = {division: 0 for division in Team.KothDivision.values}
     for team in team_rows:
-        if not team.is_banned:
+        if team.pk in eligible_ids:
             group_counts[team.koth_division] += 1
+    _apply_scoring_team_count_overrides(group_counts)
 
     current_results = []
     team_divisions = {}
@@ -316,7 +341,7 @@ def _locked_awards_and_snapshot(results):
         if team is None:
             continue
         team_divisions[str(team.pk)] = team.koth_division
-        if not team.is_banned:
+        if team.pk in eligible_ids:
             current_results.append((team, rank, metric))
 
     awards = _awards(current_results, group_counts=group_counts)

@@ -6,7 +6,11 @@ from django.test import TestCase, SimpleTestCase
 from rest_framework.test import APIClient
 from apps.accounts.models import Team, User
 from apps.koth.models import KothClub, KothChallenge, KothSolve, KothScorePeriod
-from apps.koth.services import rank_points, poll_challenge_period
+from apps.koth.services import (
+    _locked_awards_and_snapshot,
+    poll_challenge_period,
+    rank_points,
+)
 
 
 class Koth74TeamCurveTests(SimpleTestCase):
@@ -140,3 +144,82 @@ class Koth74TeamScoringTests(TestCase):
 
     def test_banned_teams_do_not_increase_curve_count(self):
         self.check_distribution(74, 0, banned=8)
+
+
+class KothOfficialTeamCountTests(TestCase):
+    def setUp(self):
+        admin = User.objects.create_user(
+            login_id="official-count-admin", nickname="QA", role="ADMIN"
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(admin)
+
+    def test_configured_official_counts_drive_admin_curve_and_period_snapshot(self):
+        settings_response = self.client.patch(
+            "/api/v1/admin/settings",
+            {
+                "koth": {
+                    "external_team_count": 50,
+                    "internal_team_count": 25,
+                }
+            },
+            format="json",
+        )
+        self.assertEqual(settings_response.status_code, 200, settings_response.data)
+        self.assertEqual(
+            settings_response.data["data"]["koth"],
+            {"external_team_count": 50, "internal_team_count": 25},
+        )
+        external = Team.objects.create(
+            team_name="official-external", koth_division="EXTERNAL"
+        )
+        internal = Team.objects.create(
+            team_name="official-internal", koth_division="INTERNAL"
+        )
+
+        response = self.client.get("/api/v1/admin/koth/challenges")
+        self.assertEqual(response.status_code, 200, response.data)
+        scoring = response.data["data"]["scoring"]
+        self.assertEqual(len(scoring["points_by_division"]["EXTERNAL"]), 25)
+        self.assertEqual(len(scoring["points_by_division"]["INTERNAL"]), 12)
+        self.assertEqual(
+            scoring["points_by_division"]["EXTERNAL"],
+            [
+                40,
+                33,
+                29,
+                26,
+                24,
+                22,
+                20,
+                18,
+                17,
+                16,
+                15,
+                14,
+                13,
+                12,
+                11,
+                10,
+                9,
+                8,
+                7,
+                6,
+                5,
+                4,
+                3,
+                2,
+                1,
+            ],
+        )
+        self.assertEqual(
+            scoring["points_by_division"]["INTERNAL"],
+            [40, 28, 22, 18, 15, 12, 10, 8, 6, 4, 2, 1],
+        )
+
+        _, snapshot = _locked_awards_and_snapshot(
+            [(external, 1, 1), (internal, 1, 1)]
+        )
+        self.assertEqual(
+            snapshot["team_count_by_division"], {"INTERNAL": 25, "EXTERNAL": 50}
+        )
