@@ -36,7 +36,7 @@ class PreviewCallbackTests(TestCase):
             self.assertEqual(result.data["data"]["team_id"], str(self.team.pk))
             response = HttpResponse(json.dumps({"data": {"team_id": str(self.team.pk)}}),
                 status=native_status, content_type="application/json")
-            response.set_cookie("session", "private-native-cookie")
+            response.set_cookie("session", "private-native-cookie", secure=True, httponly=True, samesite="Lax")
             return response
         with patch("apps.koth.preview_game._native_request", side_effect=native):
             return self.client.post(self.proxy, {"team_token": self.raw_token}, format="json", **self.headers())
