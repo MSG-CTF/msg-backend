@@ -20,6 +20,8 @@ from apps.instances.models import (
 from apps.instances.write_recovery import (
     begin_write, bind_remote_instance, complete_write, record_write_failure,
     validate_write_owner,
+    resume_matching_write,
+    recovery_error_data, serialize_write_result,
 )
 from apps.instances.services import (
     ACTIVE_INSTANCE_STATUSES,
@@ -117,6 +119,12 @@ class InstanceCreateView(APIView):
         with transaction.atomic():
             lock_instance_user(user)
             reject_if_team_banned(team.pk)
+            recovered = resume_matching_write(
+                user, action=InstanceWriteOperation.Action.CREATE, challenge_id=challenge.pk,
+                source_instance_id=uuid.UUID(replacement_id) if replacement_id else None,
+            )
+            if recovered is not None:
+                return ok(serialize_write_result(recovered, include_replaced=True), message="이전 생성 요청의 처리 결과를 확인했습니다", status=202)
             try:
                 operation = begin_write(
                     action=InstanceWriteOperation.Action.CREATE,
@@ -143,6 +151,7 @@ class InstanceCreateView(APIView):
                     auth_header,
                     require_replacement_confirmation=True,
                     replace_instance_id=replacement_id,
+                    **({"request_id": operation.pk} if operation.request_id_used else {}),
                 )
                 bind_remote_instance(operation, scheduler_data)
                 replaced_instance = None
@@ -164,7 +173,7 @@ class InstanceCreateView(APIView):
                 complete_write(operation)
         except SchedulerError as error:
             record_write_failure(operation, error, sent=sent)
-            return fail(error.code, error.message, error.status_code)
+            return fail(error.code, error.message, error.status_code, data=recovery_error_data(operation, error))
         except Exception as error:
             record_write_failure(operation, error, sent=sent)
             raise
@@ -174,7 +183,7 @@ class InstanceCreateView(APIView):
             message = "인스턴스 생성 요청이 접수되었습니다. 기존 인스턴스가 종료됩니다."
 
         return ok(
-            serialize_instance(instance, include_replaced=True),
+            serialize_write_result(instance, include_replaced=True),
             message=message,
             status=202,
         )
@@ -267,6 +276,14 @@ class InstanceResetView(APIView):
             ):
                 return fail("FORBIDDEN", "권한이 필요합니다", 403)
 
+            reject_if_team_banned(instance.team_id)
+            recovered = resume_matching_write(
+                request.user, action=InstanceWriteOperation.Action.RESET,
+                challenge_id=instance.challenge_id, source_instance_id=instance.pk,
+            )
+            if recovered is not None:
+                return ok(serialize_write_result(recovered, include_replaced=True), message="이전 초기화 요청의 처리 결과를 확인했습니다", status=202)
+
             if instance.status not in RESETTABLE_INSTANCE_STATUSES:
                 return fail(
                     "INVALID_STATE_TRANSITION",
@@ -305,7 +322,8 @@ class InstanceResetView(APIView):
                 auth_header = scheduler_auth_header(request)
                 sent = True
                 scheduler_data = call_scheduler_reset(
-                    instance, auth_header
+                    instance, auth_header,
+                    **({"request_id": operation.pk} if operation.request_id_used else {}),
                 )
                 bind_remote_instance(operation, scheduler_data)
                 new_instance = create_instance_from_scheduler(
@@ -317,11 +335,11 @@ class InstanceResetView(APIView):
                     release=instance.release,
                 )
                 mark_instance_replaced(instance)
-                response_data = serialize_instance(new_instance, include_replaced=True)
                 complete_write(operation)
+                response_data = serialize_write_result(new_instance, include_replaced=True)
         except SchedulerError as error:
             record_write_failure(operation, error, sent=sent)
-            return fail(error.code, error.message, error.status_code)
+            return fail(error.code, error.message, error.status_code, data=recovery_error_data(operation, error))
         except Exception as error:
             record_write_failure(operation, error, sent=sent)
             raise
@@ -434,6 +452,9 @@ class MyInstanceView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        # Resolve only the authenticated user's durable request identity.
+        # Looking up an arbitrary active instance must never clear a failed write.
+        resume_matching_write(request.user)
         # 현재 access token의 user_id 기준 활성 인스턴스 한 개를 Scheduler와 동기화해 조회한다
         team = getattr(request.user, "team", None)
         if team is None:
@@ -490,7 +511,7 @@ class MyInstanceView(APIView):
                         .first()
                     )
                     return ok(
-                        serialize_instance(
+                        serialize_write_result(
                             latest, include_title=True, include_replaced=True,
                             include_termination=True,
                         ),
@@ -548,7 +569,7 @@ class MyInstanceView(APIView):
                 return fail(error.code, error.message, error.status_code)
 
         return ok(
-            serialize_instance(instance, include_title=True),
+            serialize_write_result(instance, include_title=True, include_replaced=True),
             message="인스턴스 상태 조회 성공",
         )
 
