@@ -7,7 +7,7 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name="instancewriteoperation",
             name="request_id_used",
-            field=models.BooleanField(default=False),
+            field=models.BooleanField(default=False, db_default=False),
         ),
         migrations.AddIndex(
             model_name="instancewriteoperation",

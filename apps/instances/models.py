@@ -196,7 +196,7 @@ class InstanceWriteOperation(models.Model):
     remote_instance_id = models.UUIDField(null=True, blank=True)
     # Persist the use of the request-ID contract before sending the HTTP request.
     # Legacy unknown-result writes must never be guessed from the active instance.
-    request_id_used = models.BooleanField(default=False)
+    request_id_used = models.BooleanField(default=False, db_default=False)
     attempts = models.PositiveIntegerField(default=0)
     last_error_code = models.CharField(max_length=40, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)

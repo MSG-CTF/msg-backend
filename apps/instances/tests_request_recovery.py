@@ -8,7 +8,7 @@ from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 
-from django.db import IntegrityError
+from django.db import IntegrityError, connection
 from django.test import TestCase, SimpleTestCase, override_settings
 from django.utils import timezone
 
@@ -25,6 +25,18 @@ from apps.adminpanel.models import AdminEvent
 @override_settings(SECURE_SSL_REDIRECT=False, SCHEDULER_API_TOKEN="local-request-recovery",
                    SCHEDULER_REQUEST_RECOVERY_ENABLED=True)
 class InstanceRequestRecoveryTests(Fixtures, TestCase):
+    def test_previous_backend_can_insert_a_journal_without_the_new_column(self):
+        operation_id = uuid.uuid4()
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """INSERT INTO instance_write_operations
+                (operation_id, action, user_id, team_id, challenge_id, release_id,
+                 status, attempts, last_error_code, created_at, updated_at)
+                VALUES (%s, 'CREATE', %s, %s, %s, %s, 'STARTED', 0, '', NOW(), NOW())""",
+                [operation_id, self.user.pk, self.team.pk, self.challenge.pk, self.release.pk],
+            )
+        self.assertFalse(InstanceWriteOperation.objects.get(pk=operation_id).request_id_used)
+
     def lost_write(self, source=None):
         name = "call_scheduler_reset" if source else "call_scheduler_create"
         with patch("apps.instances.views." + name, side_effect=SchedulerError("SCHEDULER_UNAVAILABLE", "response lost", 503)) as remote:
