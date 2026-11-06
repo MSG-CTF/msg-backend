@@ -11,6 +11,7 @@ from django.utils import timezone
 from apps.accounts.models import Team, User
 from apps.challenge.models import Challenge
 from apps.common.bans import check_active_team
+from apps.common.exceptions import TeamBanned
 from apps.instances.models import (
     ChallengeRelease,
     Instance,
@@ -23,6 +24,10 @@ from apps.instances.services import (
     SchedulerError,
     call_scheduler_detail,
     call_scheduler_request_result,
+    call_scheduler_reset,
+    call_scheduler_active,
+    update_instance_from_scheduler,
+    RESETTABLE_INSTANCE_STATUSES,
     create_instance_from_scheduler,
     mark_instance_replaced,
     scheduler_auth_header,
@@ -37,6 +42,46 @@ BLOCKING_STATUSES = (
     InstanceWriteOperation.Status.RECOVERY_PENDING,
     InstanceWriteOperation.Status.REVIEW_REQUIRED,
 )
+
+
+class ResetSourceClosed(SchedulerError):
+    def __init__(self, data):
+        super().__init__("RESET_SOURCE_CLEANED", "초기화 대상이 종료됐습니다 새 인스턴스를 생성해주세요", 409)
+        self.source_data = data
+
+
+def replay_unaccepted_reset(operation, user, team, challenge):
+    """Only reset has an immutable wire command: the source ID and request ID."""
+    if operation.action != InstanceWriteOperation.Action.RESET or not operation.request_id_used:
+        raise ValueError("not a replayable reset")
+    try:
+        check_active_team(Team.objects.select_for_update(no_key=True).get(pk=team.pk))
+    except TeamBanned as error:
+        raise SchedulerError("RESET_OWNER_BANNED", "정지된 팀의 초기화를 재전송할 수 없습니다", 403) from error
+    source = Instance.objects.select_for_update().filter(
+        pk=operation.source_instance_id, user=user, team=team,
+        challenge=challenge, release_id=operation.release_id,
+    ).first()
+    if source is None:
+        raise ValueError("reset source scope changed")
+    auth = scheduler_auth_header()
+    detail = call_scheduler_detail(source, auth)
+    if not isinstance(detail, dict) or any(detail.get(k) != v for k, v in {
+        "instance_id": str(source.pk), "team_id": str(team.pk),
+        "challenge_id": str(challenge.pk),
+    }.items()) or ("user_id" in detail and detail["user_id"] != str(user.pk)):
+        raise ValueError("reset source response scope changed")
+    if detail.get("status") == InstanceStatus.CLEANED:
+        try:
+            call_scheduler_active(user, auth)
+        except SchedulerError as error:
+            if error.code == "INSTANCE_NOT_FOUND" and error.status_code == 404:
+                raise ResetSourceClosed(detail) from error
+            raise
+        raise ValueError("another active instance prevents cancellation")
+    if detail.get("status") not in RESETTABLE_INSTANCE_STATUSES:
+        raise SchedulerError("INSTANCE_REQUEST_NOT_FOUND", "기존 인스턴스의 종료 상태를 확인하고 있습니다", 404)
+    call_scheduler_reset(source, auth, request_id=operation.pk)
 
 
 def serialize_write_result(instance, **options):
@@ -233,7 +278,7 @@ def recover_write(operation_id, *, review=False):
                 request_data = None
                 if operation.remote_instance_id is None and operation.request_id_used:
                     waiting_for_scheduler = True
-                    request_data = verified_request_result(operation, release)
+                    request_data = verified_request_result(operation, release, replay_context=(user, team, challenge))
                     waiting_for_scheduler = False
                     bind_remote_instance(operation, request_data)
                 source = None
@@ -306,6 +351,13 @@ def recover_write(operation_id, *, review=False):
                         restored.save(update_fields=["delete_reason"])
                 if source is not None and source.status in ACTIVE_INSTANCE_STATUSES:
                     mark_instance_replaced(source)
+        except ResetSourceClosed as error:
+            source = Instance.objects.select_for_update().get(
+                pk=operation.source_instance_id, user=user, team=team, challenge=challenge,
+            )
+            update_instance_from_scheduler(source, error.source_data)
+            operation.status = InstanceWriteOperation.Status.REJECTED
+            operation.last_error_code = "RESET_SOURCE_CLEANED"
         except SchedulerError as error:
             transient = waiting_for_scheduler and error.status_code >= 500
             not_yet_found = (
@@ -313,7 +365,7 @@ def recover_write(operation_id, *, review=False):
                 and error.code == "INSTANCE_REQUEST_NOT_FOUND"
                 and operation.created_at > timezone.now() - timedelta(seconds=settings.SCHEDULER_REQUEST_RECOVERY_WAIT_SECONDS)
             )
-            operation.status = (
+            operation.status = InstanceWriteOperation.Status.REJECTED if error.code == "RESET_OWNER_BANNED" else (
                 InstanceWriteOperation.Status.RECOVERY_PENDING
                 if transient or not_yet_found
                 else InstanceWriteOperation.Status.REVIEW_REQUIRED
@@ -341,8 +393,15 @@ def recover_write(operation_id, *, review=False):
         return operation.status
 
 
-def verified_request_result(operation, release):
-    result = call_scheduler_request_result(operation)
+def verified_request_result(operation, release, *, replay_context=None):
+    try:
+        result = call_scheduler_request_result(operation)
+    except SchedulerError as error:
+        if (error.code != "INSTANCE_REQUEST_NOT_FOUND" or error.status_code != 404
+                or replay_context is None or operation.action != InstanceWriteOperation.Action.RESET):
+            raise
+        replay_unaccepted_reset(operation, *replay_context)
+        result = call_scheduler_request_result(operation)
     expected = {"request_id": str(operation.pk), "user_id": str(operation.user_id), "action": operation.action}
     if not isinstance(result, dict) or any(result.get(k) != v for k, v in expected.items()):
         raise ValueError("request result identity mismatch")
