@@ -8,7 +8,7 @@ from unittest.mock import patch
 import yaml
 from django.test import SimpleTestCase
 
-from apps.instances import published_challenges as publications
+from apps.instances import poller, published_challenges as publications
 from apps.instances.releases import ReleaseValidationError
 
 
@@ -21,9 +21,9 @@ def bundle(entries):
 
 
 class PublicationCompatibilityTests(SimpleTestCase):
-    def metadata(self, category):
+    def metadata(self, category, *, flag="test-grading-value"):
         raw = yaml.safe_dump({"name": "Evidence", "category": category,
-                              "description": "Author description", "flag": "test-grading-value"}).encode()
+                              "description": "Author description", "flag": flag}).encode()
         response = {"encoding": "base64", "size": len(raw),
                     "content": base64.b64encode(raw).decode()}
         with patch.object(publications, "_json", return_value=response):
@@ -39,10 +39,27 @@ class PublicationCompatibilityTests(SimpleTestCase):
         with self.assertRaises(ReleaseValidationError):
             self.metadata("unknown-category")
 
+    def test_flag_limit_counts_characters_and_preserves_whitespace(self):
+        for flag in ("x", "x" * 512, "\U0001f680" * 512, " " + "x" * 510 + " "):
+            with self.subTest(length=len(flag), utf8_bytes=len(flag.encode("utf-8"))):
+                self.assertEqual(self.metadata("web", flag=flag)["flag"], flag)
+
+    def test_flags_above_submission_limit_are_rejected(self):
+        for flag in ("x" * 513, "\U0001f680" * 513):
+            with self.subTest(utf8_bytes=len(flag.encode("utf-8"))):
+                with self.assertRaises(ReleaseValidationError):
+                    self.metadata("web", flag=flag)
+
+    def test_invalid_flag_types_and_control_characters_remain_rejected(self):
+        for flag in (None, 123, True, [], {}, "", "a\x00b", "a\rb", "a\nb"):
+            with self.subTest(flag_type=type(flag).__name__):
+                with self.assertRaises(ReleaseValidationError):
+                    self.metadata("web", flag=flag)
+
     def download(self, raw):
         # Exercise the real bounded HTTP reader; only the network response is replaced.
         with patch("apps.instances.poller.urlopen", return_value=io.BytesIO(raw)):
-            return publications._release_artifact({"id": 1})
+            return poller.download_bundle({"id": 1})
 
     def test_publication_with_large_sbom_reads_only_release_manifest(self):
         payload = {"schema_version": "2.0", "challenge_slug": "pwn-price-tag"}

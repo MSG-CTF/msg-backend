@@ -11,7 +11,7 @@ from apps.instances.services import SchedulerError
 
 
 class Command(BaseCommand):
-    help = "생성·실행·종료 대기 이력의 만료 및 종료 상태를 스케줄러와 동기화합니다"
+    help = "인스턴스의 Scheduler 관측 결과와 만료·종료 상태를 동기화합니다"
 
     def add_arguments(self, parser):
         parser.add_argument("--batch-size", type=int, default=100)

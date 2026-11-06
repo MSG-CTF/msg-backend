@@ -119,6 +119,7 @@ from apps.instances.services import (
     update_instance_from_scheduler,
 )
 from apps.instances.write_recovery import BLOCKING_STATUSES, require_no_pending_write
+from apps.instances.observations import serialize_scheduler_observation
 from .resource_broker import fetch_resource_targets
 from .node_allocation import enrich_allocations
 from .serializers import ChallengeCreateSerializer, ChallengeUpdateSerializer
@@ -1067,6 +1068,7 @@ def instance_list(request):
     offset = (page - 1) * size
     rows = queryset.order_by("-created_at")[offset : offset + size]
 
+    now = timezone.now()
     instances = [
         {
             "instance_id": str(r.instance_id),
@@ -1075,6 +1077,7 @@ def instance_list(request):
             "challenge_id": str(r.challenge_id),
             "challenge_title": r.challenge.title,
             "status": r.status,
+            "scheduler_observation": serialize_scheduler_observation(r, now),
             "created_at": isoformat_z(r.created_at),
             "updated_at": isoformat_z(r.updated_at),
             "expires_at": isoformat_z(r.expires_at),

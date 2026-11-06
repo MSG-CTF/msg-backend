@@ -10,6 +10,7 @@ from django.db.models import Q
 from django.utils.dateparse import parse_datetime
 
 from apps.instances.models import Instance, InstanceStatus
+from apps.instances.observations import record_scheduler_observation
 from apps.instances.services import (
     SchedulerError,
     SchedulerResponseError,
@@ -89,12 +90,9 @@ def _apply_snapshot(snapshot, data):
             .filter(pk=snapshot.pk)
             .first()
         )
-        if current is None or (
-            current.status not in PENDING_STATUSES
-            and not (current.status in FINAL_STATUSES and current.delete_reason is None)
-        ):
+        if current is None or current.status not in RESULT_STATUSES:
             return "skipped"
-        if current.updated_at != snapshot.updated_at or any(
+        if current.status != snapshot.status or current.updated_at != snapshot.updated_at or any(
             getattr(current, field) != getattr(snapshot, field)
             for field in ("user_id", "team_id", "challenge_id", "release_id")
         ):
@@ -102,6 +100,7 @@ def _apply_snapshot(snapshot, data):
         _validate_snapshot(current, data)
         if data["status"] in ACTIVE_STATUSES:
             # 생성 중인 행의 주소·수명은 기존 조회 경로가 맡는다 종료만 자동 반영한다
+            record_scheduler_observation(current, status=data["status"])
             return "pending"
         fields = []
         if current.status != data["status"]:
@@ -112,9 +111,11 @@ def _apply_snapshot(snapshot, data):
             current.delete_reason = reason
             fields.append("delete_reason")
         if not fields:
+            record_scheduler_observation(current, status=data["status"])
             return "pending"
         # 실행 설정과 이미 기록된 삭제 사유는 보존한다
         current.save(update_fields=[*fields, "updated_at"])
+        record_scheduler_observation(current, status=data["status"])
         return "updated"
 
 
@@ -132,8 +133,8 @@ def reconcile_instances_once(*, batch_size=100, max_seconds=20, instance_ids=())
         key = _cursor_key(instance_ids)
         states = Q(status__in=PENDING_STATUSES)
         if instance_ids:
-            # 명시한 과거 기록은 상태를 바꾸지 않고 누락된 종료 사유도 보충할 수 있다
-            states |= Q(status__in=FINAL_STATUSES, delete_reason__isnull=True)
+            # Final rows are checked only when explicitly selected by the operator.
+            states |= Q(status__in=FINAL_STATUSES)
         queryset = Instance.objects.filter(states).order_by("created_at", "instance_id")
         if instance_ids:
             queryset = queryset.filter(pk__in=instance_ids)
@@ -153,8 +154,13 @@ def reconcile_instances_once(*, batch_size=100, max_seconds=20, instance_ids=())
                 # 행 하나의 잘못된 응답이 뒤의 정상 기록까지 막지 않게 한다
                 # 본문은 기록하지 않고 다음 행을 확인한다
                 summary["error"] += 1
+                record_scheduler_observation(snapshot, error_code="INVALID_RESPONSE")
                 logger.warning("instance history payload rejected: instance_id=%s", snapshot.pk)
             except SchedulerError as error:
+                code = {
+                    401: "UNAUTHORIZED", 403: "FORBIDDEN", 404: "NOT_FOUND",
+                }.get(error.status_code, "UNAVAILABLE")
+                record_scheduler_observation(snapshot, error_code=code)
                 if error.code == "INSTANCE_NOT_FOUND":
                     # 404만으로 실제 workload가 정리됐다고 판단하지 않는다
                     summary["missing"] += 1
@@ -168,6 +174,7 @@ def reconcile_instances_once(*, batch_size=100, max_seconds=20, instance_ids=())
                     summary[_apply_snapshot(snapshot, data)] += 1
                 except SchedulerError as error:
                     summary["error"] += 1
+                    record_scheduler_observation(snapshot, error_code="INVALID_RESPONSE")
                     logger.warning("instance history response rejected: instance_id=%s http_status=%s", snapshot.pk, error.status_code)
             # 실패한 오래된 기록이 다음 주기에도 뒤의 기록을 막지 않게 순서를 남긴다
             cache.set(key, [snapshot.created_at.isoformat(), str(snapshot.pk)], timeout=None)
