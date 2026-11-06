@@ -564,6 +564,10 @@ class RestartedKeyWorkerTests(KeyApiMixin, TransactionTestCase):
             )
 
     def test_reverse_migration_cannot_erase_the_key_generation_and_audit_history(self):
+        # A failed reversal can still unapply dependent apps first.
+        self.addCleanup(
+            call_command, "migrate", interactive=False, stdout=io.StringIO()
+        )
         with self.assertRaises(IrreversibleError):
             call_command(
                 "migrate",
