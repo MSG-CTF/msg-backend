@@ -36,6 +36,7 @@ MAX_BODY = 1024 * 1024
 MAX_RESPONSE = 1024 * 1024
 NATIVE_TIMEOUT = 8
 PERMIT_SECONDS = 12
+CALLBACK_PREFIX = "koth_preview_"
 
 
 @dataclass(frozen=True)
@@ -237,6 +238,80 @@ def permits_token_verification(challenge, token, owner_id=None):
             and User.objects.filter(pk=record.get("admin_id"), role="ADMIN").exists())
 
 
+def _callback_key(raw):
+    if not isinstance(raw, str) or not raw.startswith(CALLBACK_PREFIX) or not 40 <= len(raw) <= 128:
+        return None
+    return KEY_PREFIX + "callback:" + hash_token(raw)
+
+
+def _revoke_callback(key, record):
+    gate_key = record.get("gate_key")
+    if isinstance(gate_key, str) and gate_key.startswith(KEY_PREFIX + "session:"):
+        _delete(gate_key)
+    _delete(key)
+
+
+def preview_callback_identity(challenge, raw, key_version):
+    """Revalidate the native app's private capability against its live preview gate.
+
+    The browser's ordinary team token never receives a lasting verification permit.
+    This separate value is delivered only to the native login handler and expires
+    with the signed preview, current subject authority and gateway session.
+    """
+    key = _callback_key(raw)
+    if key is None:
+        return None
+    record = _get(key)
+    if not isinstance(record, dict) or record.get("challenge_id") != str(challenge.pk):
+        return None
+    if record.get("key_version") != key_version or record.get("expires_at", 0) <= time.time():
+        _revoke_callback(key, record)
+        return None
+    try:
+        _, grant = load_preview_ticket(record.get("ticket"), str(challenge.pk), record.get("origin"))
+    except (signing.BadSignature, ValueError, TypeError, KeyError):
+        _revoke_callback(key, record)
+        return None
+    if grant["user_id"] != record.get("admin_id") or grant["nonce"] != record.get("preview_nonce"):
+        _revoke_callback(key, record)
+        return None
+    allowed = getattr(settings, "KOTH_PREVIEW_GAME_ADMIN_ALLOWLIST", ())
+    if allowed and grant["user_id"] not in allowed:
+        _revoke_callback(key, record)
+        return None
+    if record.get("preview"):
+        subject = KothPreviewToken.objects.filter(pk=record.get("token_id"), challenge=challenge,
+            admin_id=grant["user_id"], admin__role="ADMIN", token_hash=record.get("token_hash"), key_version=key_version).first()
+        if subject is None or not _current_token(subject) or subject.issued_at.isoformat() != record.get("token_issued_at"):
+            _revoke_callback(key, record)
+            return None
+        from .tokens import PREVIEW_TEAM_NAME
+        identity = (str(subject.preview_team_id), PREVIEW_TEAM_NAME, "EXTERNAL")
+    else:
+        subject = KothTeamToken.objects.select_related("team").filter(pk=record.get("token_id"), challenge=challenge,
+            team__is_banned=False, token_hash=record.get("token_hash"), key_version=key_version).first()
+        if (subject is None or not _current_token(subject)
+                or subject.issued_at.isoformat() != record.get("token_issued_at")
+                or subject.team.updated_at.isoformat() != record.get("team_version")):
+            _revoke_callback(key, record)
+            return None
+        identity = (str(subject.team_id), subject.team.team_name, subject.team.koth_division)
+    if record.get("gate_key"):
+        gate = _get(record["gate_key"])
+        if (not isinstance(gate, dict) or gate.get("callback_key") != key
+                or any(gate.get(field) != record.get(field) for field in
+                    ("challenge_id", "admin_id", "preview_nonce", "token_id", "token_hash", "token_issued_at", "team_version", "preview"))):
+            _revoke_callback(key, record)
+            return None
+    else:
+        permit = _get(KEY_PREFIX + "permit:" + str(challenge.pk) + ":" + subject.token_hash)
+        if (not isinstance(permit, dict) or permit.get("owner") != record.get("login_owner")
+                or permit.get("expires_at", 0) <= time.time()):
+            _revoke_callback(key, record)
+            return None
+    return identity
+
+
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -307,16 +382,33 @@ def _native_login(request, challenge, grant, profile, uri, body):
         raise RateLimitUnavailable() from None
     if not acquired:
         return fail("KOTH_PREVIEW_LOGIN_BUSY", "다른 인증 요청이 진행 중입니다 잠시 후 다시 시도해 주세요", 409)
+    callback = CALLBACK_PREFIX + secrets.token_urlsafe(32)
+    callback_key = _callback_key(callback)
+    callback_state = {"challenge_id": str(challenge.pk), "admin_id": grant["user_id"],
+        "preview_nonce": grant["nonce"], "ticket": request.COOKIES[COOKIE_NAME], "origin": grant["origin"],
+        "token_id": subject.pk, "token_hash": subject.token_hash, "token_issued_at": subject.issued_at.isoformat(),
+        "team_version": token.team.updated_at.isoformat() if token else "", "preview": preview is not None,
+        "key_version": key_version, "expires_at": grant["expires_at"], "login_owner": owner}
     try:
-        response = _native_request(request, challenge, uri, body)
+        try:
+            cache.set(callback_key, callback_state, timeout=min(PERMIT_SECONDS, preview_seconds_left(grant)))
+        except Exception:
+            raise RateLimitUnavailable() from None
+        native_body = _json(body)
+        native_body["team_token"] = callback
+        response = _native_request(request, challenge, uri, json.dumps(native_body).encode())
         with active_service_key("koth"):
             if not _current_token(subject):
                 raise PreviewDenied()
+    except Exception:
+        _delete(callback_key)
+        raise
     finally:
         current = _get(key)
         if isinstance(current, dict) and current.get("owner") == owner:
             _delete(key)
     if response.status_code != 200:
+        _delete(callback_key)
         return response
     native_cookie_name = ""
     if profile.kind == "cookie":
@@ -352,6 +444,7 @@ def _native_login(request, challenge, grant, profile, uri, body):
               "token_issued_at": subject.issued_at.isoformat(),
               "team_version": token.team.updated_at.isoformat() if token else "",
               "preview": preview is not None,
+              "callback_key": callback_key,
               "native_hash": _native_hash(challenge, profile, native_cookie_name, credential,
                                           str(token.team_id) if token else str(preview.preview_team_id))}
     if native_cookie_name:
@@ -361,7 +454,12 @@ def _native_login(request, challenge, grant, profile, uri, body):
         raise PreviewDenied()
     try:
         cache.set(_session_key(sid), stored, timeout=remaining)
+        callback_state["gate_key"] = _session_key(sid)
+        callback_state.pop("login_owner")
+        cache.set(callback_key, callback_state, timeout=remaining)
     except Exception:
+        _delete(_session_key(sid))
+        _delete(callback_key)
         raise RateLimitUnavailable() from None
     response.set_cookie(GAME_COOKIE, sid, max_age=remaining, secure=True, httponly=True, samesite="Lax", path="/")
     return response
