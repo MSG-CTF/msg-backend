@@ -130,7 +130,7 @@ def _metadata(slug, sha):
             or category not in Challenge.CategoryType.values
             or not isinstance(description, str) or len(description) > 100000
             or not isinstance(flag, str) or not flag or any(char in flag for char in "\0\r\n")
-            or len(flag.encode("utf-8")) > 4096):
+            or len(flag) > 512 or len(flag.encode("utf-8")) > 4096):
         raise ReleaseValidationError("info.yaml의 제목·분야·지문·플래그를 확인해주세요")
     return {"title": title.strip(), "description": description, "category": category,
             "flag": flag, "dynamic": bool(value.get("deployment"))}
