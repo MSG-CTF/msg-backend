@@ -6,11 +6,12 @@ from django.db.models import Count, Exists, OuterRef, Subquery
 from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
 
-from apps.accounts.models import Team
+from apps.accounts.models import Team, User
 from apps.adminpanel.models import AdminEvent, setting_values
 from apps.adminpanel.views import _record_event
 from apps.challenge.services import get_team_total_score, hash_flag, is_correct_flag
-from apps.common.exceptions import UserHasNoTeam
+from apps.common.bans import check_active_team
+from apps.common.exceptions import Forbidden, UserHasNoTeam
 from apps.common.permissions import IsAuthenticated
 from apps.common.response import fail, ok
 from apps.common.utils import num
@@ -105,7 +106,11 @@ def signature_submit(request, signature_id):
 
     with transaction.atomic():
         # Serialize submissions for one team so the unique solve and lock state move together.
-        team = Team.objects.select_for_update().get(pk=team.pk)
+        team = check_active_team(
+            Team.objects.select_for_update().filter(pk=team.pk).first()
+        )
+        if not User.objects.filter(pk=request.user.pk, team_id=team.pk).exists():
+            raise Forbidden("팀 소속이 변경되었습니다 현재 팀을 확인해주세요")
         lock_signature(signature_id, shared=True)
         # Shared row locks keep team submissions parallel but exclude admin edits.
         challenge = next(
