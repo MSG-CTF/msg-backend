@@ -29,12 +29,14 @@ class DeploymentTransitionTests(unittest.TestCase):
         if drift:template.write_text('{"unexpected":true}')
         request={"action":action,"component":"backend","source_sha":"a"*40,"archive_sha256":hashlib.sha256(b"x").hexdigest(),"archive_bytes":1}
         stdin=SimpleNamespace(buffer=io.BytesIO((json.dumps(request)+"\n").encode()+b"x"))
-        state={"active":"old-backend","up":[],"commands":[],"probe_modes":[],"candidate_exists":False}
+        state={"active":"old-backend","up":[],"commands":[],"probe_modes":[],"candidate_exists":False,"main_checks":0}
         def response(value=b""):
             return SimpleNamespace(returncode=0,stdout=value if isinstance(value,bytes) else json.dumps(value).encode(),stderr=b"")
         def runner(command,**kwargs):
             state["commands"].append(command)
-            if command[0]=="git":return response(("b"*40 if failure=="superseded" else "a"*40).encode()+b"\trefs/heads/main\n")
+            if command[0]=="git":
+                state['main_checks']+=1
+                return response(("b"*40 if failure=="superseded" and state['main_checks']>1 else "a"*40).encode()+b"\trefs/heads/main\n")
             if command[:2]==['docker','image']:
                 return response([{"Id":"new-backend","Architecture":"amd64","Config":{"Labels":{"org.opencontainers.image.revision":"a"*40}}}])
             if command[:2]==['docker','inspect']:
@@ -71,8 +73,7 @@ class DeploymentTransitionTests(unittest.TestCase):
                  patch.object(release.sys,'stdin',stdin),patch.object(release,'load_scope',return_value=roster()),
                  patch.object(release,'inspect_running',side_effect=inspect_scope),patch.object(release.subprocess,'run',side_effect=runner),
                  patch.object(release,'validate_archive',return_value='ctf-platform-backend:'+'a'*40),
-                 patch.object(release.http.client,'HTTPSConnection',HTTPS),
-                 patch.object(release.urllib.request,'urlopen',return_value=io.BytesIO(json.dumps({'object':{'sha':'a'*40}}).encode()))]
+                 patch.object(release.http.client,'HTTPSConnection',HTTPS)]
         output=io.StringIO()
         with contextlib.ExitStack() as stack,contextlib.redirect_stdout(output):
             for item in patches:stack.enter_context(item)
@@ -101,7 +102,7 @@ class DeploymentTransitionTests(unittest.TestCase):
     def test_template_drift_is_rejected_before_starting_or_loading_an_image(self):
         state=self.exercise(drift=True)
         self.assertIn('template changed',str(state['error']))
-        self.assertEqual(state['commands'],[])
+        self.assertEqual([command[0] for command in state['commands']],['git'])
 
     def test_readonly_probe_verifies_current_public_scope_and_runs_no_candidate(self):
         state=self.exercise(action='probe')

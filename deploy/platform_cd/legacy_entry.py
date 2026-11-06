@@ -123,7 +123,7 @@ def main():
   # only this read-only file, never the Docker socket or runtime credentials.
   archive.chmod(0o644)
   execute(['docker','run','--rm','--pull','never','--user','1001:1001','--cap-drop','ALL','--security-opt','no-new-privileges:true','--read-only','--memory','1g','--cpus','1','--pids-limit','128',
-   '--tmpfs','/tmp:uid=1001,gid=1001,size=128m','--env','TMPDIR=/cache/tmp','--mount','type=bind,src='+str(archive)+',dst=/scan/image.tar,readonly',
+   '--tmpfs','/scanner-tmp:uid=1001,gid=1001,size=128m','--env','TMPDIR=/scanner-tmp','--mount','type=bind,src='+str(archive)+',dst=/scan/image.tar,readonly',
    '--mount','type=bind,src=/var/cache/ctf-platform-trivy,dst=/cache',policy['scanner_image'],
    'image','--input','/scan/image.tar','--cache-dir','/cache','--scanners','vuln','--severity','HIGH,CRITICAL','--ignore-unfixed=false','--ignorefile','/dev/null','--exit-code','1','--no-progress'],'image-scan',600)
   with archive.open('rb') as f:packet['archive_sha256']=hashlib.file_digest(f,'sha256').hexdigest()

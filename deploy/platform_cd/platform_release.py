@@ -21,7 +21,6 @@ import sys
 import tarfile
 import tempfile
 import time
-import urllib.request
 
 try:
     from .ranking_scope import load_scope, image_override, check_compose_scope, inspect_running, ScopeError
@@ -134,8 +133,9 @@ def main():
 def release_locked(policy,request,component,root):
     # A read-only probe does not deploy its caller's source revision.
     if request['action']=='deploy':
-        req=urllib.request.Request('https://api.github.com/repos/'+REPOS[component]+'/git/ref/heads/main',headers={'User-Agent':'msg-platform-cd','Accept':'application/vnd.github+json'})
-        with urllib.request.urlopen(req,timeout=15) as response:main_sha=json.load(response)['object']['sha']
+        upstream=subprocess.run(['git','ls-remote','https://github.com/'+REPOS[component]+'.git','refs/heads/main'],capture_output=True,timeout=45,check=True)
+        main_sha=upstream.stdout.decode().split()[0]
+        if not SHA.fullmatch(main_sha):raise RuntimeError('Invalid upstream revision')
         if main_sha!=request['source_sha']:
             print(json.dumps({'status':'SUPERSEDED','component':component,'source_sha':request['source_sha'],'current_main_sha':main_sha}));return
     for name,digest in policy['base_file_sha256'].items():
