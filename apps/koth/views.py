@@ -32,6 +32,7 @@ from apps.common.permissions import IsAuthenticated
 from apps.common.response import ok
 from apps.common.throttling import ReadApiThrottle
 from apps.common.utils import num
+from apps.ranking.population import public_ranking_scope_key, public_ranking_teams
 
 from .models import (
     KothChallenge,
@@ -270,7 +271,7 @@ def leaderboard(request):
     # Authentication runs before this view. Only cache the shared JSON ranking;
     # browsable HTML can contain request-specific content and must never be shared.
     cache_seconds = settings.KOTH_LEADERBOARD_CACHE_SECONDS
-    cache_key = f"koth:leaderboard:json:v3:{parsed_id}"
+    cache_key = f"koth:leaderboard:json:v4:{public_ranking_scope_key()}:{parsed_id}"
     cacheable = cache_seconds > 0 and request.accepted_media_type == "application/json"
     if cacheable:
         try:
@@ -287,7 +288,7 @@ def leaderboard(request):
 
     solves = (
         KothSolve.objects.filter(
-            challenge=challenge, team__is_banned=False
+            challenge=challenge, team_id__in=public_ranking_teams().values("pk")
         )
         .order_by("-earned_score", "solved_at", "team__team_name", "team_id")
         .values("team_id", "team__team_name", "earned_score", "solved_at")

@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import uuid
 from pathlib import Path
 from urllib.parse import parse_qsl, urlsplit
 
@@ -58,6 +59,27 @@ ALLOWED_HOSTS = [
     for host in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
     if host.strip()
 ]
+
+# Ranking scope is a server setting; public query parameters cannot change it.
+PUBLIC_RANKING_DIVISION = os.getenv("PUBLIC_RANKING_DIVISION", "EXTERNAL")
+if PUBLIC_RANKING_DIVISION not in {"EXTERNAL", "INTERNAL"}:
+    raise ImproperlyConfigured("PUBLIC_RANKING_DIVISION must be EXTERNAL or INTERNAL")
+
+
+def _ranking_team_ids(name):
+    try:
+        values = {
+            uuid.UUID(value.strip())
+            for value in os.getenv(name, "").split(",")
+            if value.strip()
+        }
+        return tuple(sorted(values, key=str))
+    except ValueError:
+        raise ImproperlyConfigured(f"{name} must contain comma-separated team UUIDs") from None
+
+
+PUBLIC_RANKING_TEAM_IDS = _ranking_team_ids("PUBLIC_RANKING_TEAM_IDS")
+PUBLIC_RANKING_EXCLUDED_TEAM_IDS = _ranking_team_ids("PUBLIC_RANKING_EXCLUDED_TEAM_IDS")
 
 SECURE_SSL_REDIRECT = not DEBUG
 SESSION_COOKIE_SECURE = not DEBUG

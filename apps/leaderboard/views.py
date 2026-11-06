@@ -7,7 +7,7 @@ from apps.challenge.models import Solve
 from apps.common.response import ok
 from apps.common.utils import num
 from apps.koth.models import KothSolve
-from apps.koth.services import eligible_teams
+from apps.ranking.population import public_ranking_teams
 from apps.ranking.ranking import build_team_ranking
 from apps.signature.models import SignatureSolve
 from apps.ranking.models import LineMonopoly
@@ -145,7 +145,7 @@ def read_leaderboard_snapshot():
             with connection.cursor() as cursor:
                 cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
         solves_map = collect_solves_map()
-        teams = list(eligible_teams())
+        teams = list(public_ranking_teams())
     return solves_map, teams
 
 
