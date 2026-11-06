@@ -123,11 +123,25 @@ class SiteRankingPopulationTests(TestCase):
         with self.scope("INTERNAL"):
             self.assertEqual(set(eligible_teams().values_list("pk",flat=True)), before)
 
+    def test_koth_personal_rank_matches_site_and_preserves_scores(self):
+        for division, user, score in [("EXTERNAL", self.external_user, 10), ("INTERNAL", self.internal_user, 90)]:
+            with self.subTest(division=division), self.scope(division):
+                self.client.force_authenticate(user)
+                data = self.read("/api/v1/koth/me")
+                self.assertEqual(data["challenges"][0]["rank"], 1)
+                self.assertEqual(data["challenges"][0]["earned_score"], score)
+                self.assertEqual(data["total_koth_score"], score)
+        with self.scope("EXTERNAL"):
+            self.client.force_authenticate(self.internal_user)
+            data = self.read("/api/v1/koth/me")
+            self.assertIsNone(data["challenges"][0]["rank"])
+            self.assertEqual(data["total_koth_score"], 90)
+
     def test_all_ranking_reads_preserve_accounts_affiliations_and_game_rows(self):
         def snapshot():
             return json.dumps({model._meta.label:list(model.objects.order_by("pk").values()) for model in [Team,User,Solve,KothSolve]},sort_keys=True,default=str)
         before=snapshot()
         with self.scope("EXTERNAL"):
-            for path in ["/api/v1/ranking","/api/v1/leaderboard","/api/v1/ranking/me","/api/v1/ranking/member",f"/api/v1/koth/leaderboard?koth_challenge_id={self.koth.pk}"]:
+            for path in ["/api/v1/ranking","/api/v1/leaderboard","/api/v1/ranking/me","/api/v1/ranking/member","/api/v1/koth/me",f"/api/v1/koth/leaderboard?koth_challenge_id={self.koth.pk}"]:
                 self.read(path)
         self.assertEqual(snapshot(),before)

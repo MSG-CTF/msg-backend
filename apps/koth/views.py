@@ -5,7 +5,7 @@ from decimal import Decimal
 from django.conf import settings
 from django.core.cache import cache
 from django.db import transaction
-from django.db.models import Count, OuterRef, Prefetch, Subquery
+from django.db.models import Count, Exists, OuterRef, Prefetch, Subquery
 from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes, throttle_classes
@@ -204,7 +204,7 @@ def me(request):
         KothSolve.objects.filter(
             challenge_id=OuterRef("challenge_id"),
             earned_score__gt=OuterRef("earned_score"),
-            team__is_banned=False,
+            team_id__in=public_ranking_teams().values("pk"),
         )
         .order_by()
         .values("challenge_id")
@@ -214,7 +214,8 @@ def me(request):
     solves = {
         solve.challenge_id: solve
         for solve in KothSolve.objects.filter(team=team).annotate(
-            higher_count=Subquery(higher_scores)
+            higher_count=Subquery(higher_scores),
+            public_rank_eligible=Exists(public_ranking_teams().filter(pk=OuterRef("team_id"))),
         )
     }
     challenge_data = []
@@ -222,7 +223,7 @@ def me(request):
         solve = solves.get(challenge.koth_challenge_id)
         score = solve.earned_score if solve else Decimal("0")
         rank = None
-        if score > 0 and not team.is_banned:
+        if score > 0 and solve.public_rank_eligible:
             rank = 1 + (solve.higher_count or 0)
         challenge_data.append(
             {
