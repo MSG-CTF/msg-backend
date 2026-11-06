@@ -284,9 +284,12 @@ class JengaPlatformSessionContractTests(LiveServerTestCase):
         self.assertEqual(self.game_client(cookie=cookie).get('/state').status_code, 401)
 
     def test_token_for_another_challenge_cannot_authenticate(self):
-        other = KothChallenge.objects.create(club=self.challenge.club, title='Another challenge',
-            status='ACTIVE', open_group=1, inbound_internal_token_hash=hash_token(self.internal))
-        game = self.application(KOTH_CHALLENGE_ID=str(other.pk), KOTH_MATCH_ID='another-challenge')
+        internal = 'jenga-other-contract-internal-' + 'o' * 40
+        other = KothChallenge.objects.create(club=KothClub.objects.create(name='Other Jenga contract'),
+            title='Another challenge', status='ACTIVE', open_group=1,
+            inbound_internal_token_hash=hash_token(internal))
+        game = self.application(KOTH_CHALLENGE_ID=str(other.pk), KOTH_MATCH_ID='another-challenge',
+                                INTERNAL_TOKEN=internal)
         response = self.game_client(game).post('/auth', json={'team_token': self.tokens[self.team.pk]})
         self.assertEqual(response.status_code, 401)
 
