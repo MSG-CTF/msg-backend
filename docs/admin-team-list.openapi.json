@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Administrator team list scopes",
-    "version": "1.0.0"
+    "version": "1.1.0"
   },
   "paths": {
     "/api/v1/admin/teams": {
@@ -22,7 +22,7 @@
               ],
               "default": "official"
             },
-            "description": "official: active teams excluding preview/test markers; test: active marked teams; archived: banned teams, including marked teams; all: every stored team. These are disjoint scopes except all. No team or account is modified."
+            "description": "official: active teams excluding the persistent test identity registry; test: active teams in that registry; archived: banned teams, including test teams; all: every stored team. The registry includes existing and newly issued legacy preview identities and persists after team or token deletion. Generated QA names in the documented reserved namespace are registered atomically at insertion. These are disjoint scopes except all. Reads do not modify teams or accounts."
           },
           {
             "name": "search",

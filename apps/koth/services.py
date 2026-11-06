@@ -13,9 +13,9 @@ from django.db.models import Count
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
-from apps.accounts.models import Team
+from apps.accounts.models import Team, TestTeamIdentity
 
-from .models import KothPreviewToken, KothScorePeriod, KothScorePeriodStatus, KothSolve
+from .models import KothScorePeriod, KothScorePeriodStatus, KothSolve
 
 FIRST_PLACE_POINTS = 40
 
@@ -27,7 +27,7 @@ class ScoreFetchError(Exception):
 def eligible_teams():
     """Use the same registered competition population for lists and awards."""
     return Team.objects.filter(is_banned=False).exclude(
-        team_id__in=KothPreviewToken.objects.values("preview_team_id")
+        team_id__in=TestTeamIdentity.objects.values("team_id")
     )
 
 
@@ -175,9 +175,9 @@ def _validated_results(challenge, period, payload):
     # 공개 전 게임 테스트에 들어간 관리자 팀이 게임 기록에 남아 섞여 와도 점수판에는 넣지 않는다
     # 구간 전체를 실패시키지 않고 그 줄만 빼며, 남은 팀은 부문별로 순위를 다시 매긴다
     preview_ids = set(
-        KothPreviewToken.objects.filter(
-            preview_team_id__in=[team_id for team_id, _, _ in parsed]
-        ).values_list("preview_team_id", flat=True)
+        TestTeamIdentity.objects.filter(
+            team_id__in=[team_id for team_id, _, _ in parsed]
+        ).values_list("team_id", flat=True)
     )
     parsed = [row for row in parsed if row[0] not in preview_ids]
     teams = Team.objects.in_bulk(
@@ -300,8 +300,8 @@ def _locked_awards_and_snapshot(results):
     team_rows = list(Team.objects.select_for_update().order_by("team_id"))
     teams_by_id = {team.pk: team for team in team_rows}
     excluded_ids = set(
-        KothPreviewToken.objects.filter(preview_team_id__in=teams_by_id)
-        .values_list("preview_team_id", flat=True)
+        TestTeamIdentity.objects.filter(team_id__in=teams_by_id)
+        .values_list("team_id", flat=True)
     )
     group_counts = {division: 0 for division in Team.KothDivision.values}
     for team in team_rows:
