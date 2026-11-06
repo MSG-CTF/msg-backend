@@ -64,7 +64,7 @@ class AdminTeamScopeTests(TestCase):
             inbound_internal_token_hash=hash_token("scope-primary-internal"),
         )
         second = KothChallenge.objects.create(
-            club=cls.challenge.club,
+            club=KothClub.objects.create(name="Second scope marker"),
             title="Second marker",
             open_group=1,
             inbound_internal_token_hash=hash_token("scope-second-internal"),
