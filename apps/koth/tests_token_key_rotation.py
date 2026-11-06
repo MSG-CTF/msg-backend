@@ -18,6 +18,7 @@ from django.conf import settings
 from django.core.management import call_command, CommandError
 from django.db import connection, connections, DatabaseError, transaction
 from django.db.migrations.exceptions import IrreversibleError
+from django.db.migrations.executor import MigrationExecutor
 from django.test import Client, TestCase, TransactionTestCase, override_settings
 from rest_framework.test import APIClient
 
@@ -564,6 +565,10 @@ class RestartedKeyWorkerTests(KeyApiMixin, TransactionTestCase):
             )
 
     def test_reverse_migration_cannot_erase_the_key_generation_and_audit_history(self):
+        # A dependent app can roll back before the protected key migration fails.
+        # Restore every app even when the expected IrreversibleError is raised.
+        latest = MigrationExecutor(connection).loader.graph.leaf_nodes()
+        self.addCleanup(lambda: MigrationExecutor(connection).migrate(latest))
         with self.assertRaises(IrreversibleError):
             call_command(
                 "migrate",
