@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import tempfile
 
@@ -46,6 +47,16 @@ def send(action, environment=None):
     host = environment["BACKEND_DEPLOY_HOST"]
     if not re.fullmatch(r"[A-Za-z0-9.-]{1,253}", host):
         raise ValueError("Invalid deployment host")
+    transport = environment.get("BACKEND_DEPLOY_TRANSPORT", "direct")
+    if transport not in {"direct", "broker"}:
+        raise ValueError("Invalid deployment transport")
+    if transport == "broker":
+        if host not in {"msgctf.kr", "136.108.97.182"}:
+            raise ValueError("Broker destination must be the existing external VM")
+        if not all(environment.get(name, "").strip() for name in [
+            "BACKEND_DEPLOY_BROKER_SSH_KEY", "BACKEND_DEPLOY_BROKER_KNOWN_HOSTS"
+        ]):
+            raise ValueError("Broker credentials are required; direct fallback is disabled")
     with tempfile.TemporaryDirectory(prefix="backend-release-") as temporary:
         directory = Path(temporary)
         os.chmod(directory, 0o700)
@@ -56,6 +67,28 @@ def send(action, environment=None):
         ]:
             path.write_text(environment[field].rstrip() + "\n", encoding="utf-8")
             os.chmod(path, 0o600)
+        broker_options = []
+        if transport == "broker":
+            broker_key, broker_hosts = directory / "broker_key", directory / "broker_hosts"
+            for path, field in [
+                (broker_key, "BACKEND_DEPLOY_BROKER_SSH_KEY"),
+                (broker_hosts, "BACKEND_DEPLOY_BROKER_KNOWN_HOSTS"),
+            ]:
+                path.write_text(environment[field].rstrip() + "\n", encoding="utf-8")
+                os.chmod(path, 0o600)
+            # This existing forced command is a fixed TCP hop, independent of the
+            # separate frontend/backend account authenticated on the destination.
+            proxy = [
+                "ssh", "-F", "/dev/null", "-T", "-i", str(broker_key),
+                "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
+                "-o", "StrictHostKeyChecking=yes",
+                "-o", "UserKnownHostsFile=" + str(broker_hosts),
+                "-o", "HostKeyAlias=broker.mjsec.kr",
+                "-o", "ConnectTimeout=10", "-o", "ForwardAgent=no",
+                "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4",
+                "sla@35.193.235.206", "proxy-frontend-v1",
+            ]
+            broker_options = ["-o", "ProxyCommand=" + shlex.join(proxy)]
         clean = {
             k: v for k, v in environment.items() if not k.startswith("BACKEND_DEPLOY_")
         }
@@ -79,6 +112,9 @@ def send(action, environment=None):
                 "ServerAliveInterval=15",
                 "-o",
                 "ServerAliveCountMax=4",
+                "-o",
+                "ForwardAgent=no",
+                *broker_options,
                 "msg-backend-deploy@" + host,
                 "deploy",
             ],
