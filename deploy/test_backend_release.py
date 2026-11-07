@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import shlex
 from pathlib import Path
 import subprocess
 import tempfile
@@ -227,6 +228,73 @@ class SenderTests(unittest.TestCase):
                     {**self.environment(), "BACKEND_DEPLOY_HOST": "host; command"},
                 )
             run.assert_not_called()
+
+    def broker_environment(self):
+        return {
+            **self.environment(),
+            "BACKEND_DEPLOY_HOST": "msgctf.kr",
+            "BACKEND_DEPLOY_TRANSPORT": "broker",
+            "BACKEND_DEPLOY_BROKER_SSH_KEY": "fixture-broker-key",
+            "BACKEND_DEPLOY_BROKER_KNOWN_HOSTS": "fixture-broker-host-key",
+        }
+
+    def test_broker_uses_separate_pinned_keys_and_cleans_temporary_files(self):
+        directories = []
+
+        def run(args, **kwargs):
+            option = next(arg for arg in args if arg.startswith("ProxyCommand="))
+            proxy = shlex.split(option.split("=", 1)[1])
+            self.assertEqual(proxy[-2:], ["sla@35.193.235.206", "proxy-frontend-v1"])
+            self.assertIn("StrictHostKeyChecking=yes", proxy)
+            self.assertIn("HostKeyAlias=broker.mjsec.kr", proxy)
+            self.assertIn("ForwardAgent=no", proxy)
+            app_key = Path(args[args.index("-i") + 1])
+            broker_key = Path(proxy[proxy.index("-i") + 1])
+            directories.append(app_key.parent)
+            self.assertNotEqual(app_key, broker_key)
+            self.assertEqual(app_key.read_text().strip(), "fixture-key")
+            self.assertEqual(broker_key.read_text().strip(), "fixture-broker-key")
+            self.assertEqual(args[-2:], ["msg-backend-deploy@msgctf.kr", "deploy"])
+            self.assertEqual(json.loads(kwargs["input"]), request())
+            self.assertFalse(any(k.startswith("BACKEND_DEPLOY_") for k in kwargs["env"]))
+            return Mock(returncode=0, stdout=release.PREFIX + json.dumps({
+                "source_commit": "a" * 40,
+                "pipeline_revision": release.CENTRAL_REVISION,
+                "status": "verified",
+                "deployment_strategy": "verified_external_platform_image_update",
+                "ranking_scope": {"track": "external", "division": "EXTERNAL", "team_count": 50, "configured_roster_count": 50, "roster_sha256": "c" * 64, "api_verified": True, "database_probe_read_only": True},
+            }))
+
+        with patch.object(sender.subprocess, "run", side_effect=run):
+            self.assertEqual(sender.send("deploy", self.broker_environment())["status"], "verified")
+        self.assertTrue(directories)
+        self.assertTrue(all(not directory.exists() for directory in directories))
+
+    def test_broker_missing_credentials_wrong_target_or_mode_never_falls_back(self):
+        base = self.broker_environment()
+        invalid = [
+            {**base, "BACKEND_DEPLOY_BROKER_SSH_KEY": ""},
+            {**base, "BACKEND_DEPLOY_BROKER_KNOWN_HOSTS": ""},
+            {**base, "BACKEND_DEPLOY_HOST": "other.example.test"},
+            {**base, "BACKEND_DEPLOY_TRANSPORT": "broker; id"},
+        ]
+        for environment in invalid:
+            with self.subTest(keys=sorted(environment)), patch.object(sender.subprocess, "run") as run:
+                with self.assertRaises(ValueError):
+                    sender.send("deploy", environment)
+                run.assert_not_called()
+
+    def test_broker_temporary_keys_removed_on_connection_failure(self):
+        directories = []
+
+        def fail(args, **kwargs):
+            directories.append(Path(args[args.index("-i") + 1]).parent)
+            raise subprocess.TimeoutExpired("ssh", 960)
+
+        with patch.object(sender.subprocess, "run", side_effect=fail):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                sender.send("deploy", self.broker_environment())
+        self.assertTrue(all(not directory.exists() for directory in directories))
 
 
 if __name__ == "__main__":

@@ -208,6 +208,9 @@ jobs:
           BACKEND_DEPLOY_HOST: ${{ secrets.BACKEND_DEPLOY_HOST }}
           BACKEND_DEPLOY_SSH_KEY: ${{ secrets.BACKEND_DEPLOY_SSH_KEY }}
           BACKEND_DEPLOY_KNOWN_HOSTS: ${{ secrets.BACKEND_DEPLOY_KNOWN_HOSTS }}
+          BACKEND_DEPLOY_TRANSPORT: broker
+          BACKEND_DEPLOY_BROKER_SSH_KEY: ${{ secrets.BACKEND_DEPLOY_BROKER_SSH_KEY }}
+          BACKEND_DEPLOY_BROKER_KNOWN_HOSTS: ${{ secrets.BACKEND_DEPLOY_BROKER_KNOWN_HOSTS }}
         run: python3 deploy/send_backend_release.py probe
 
   deploy-development:
@@ -227,4 +230,7 @@ jobs:
           BACKEND_DEPLOY_HOST: ${{ secrets.BACKEND_DEPLOY_HOST }}
           BACKEND_DEPLOY_SSH_KEY: ${{ secrets.BACKEND_DEPLOY_SSH_KEY }}
           BACKEND_DEPLOY_KNOWN_HOSTS: ${{ secrets.BACKEND_DEPLOY_KNOWN_HOSTS }}
+          BACKEND_DEPLOY_TRANSPORT: broker
+          BACKEND_DEPLOY_BROKER_SSH_KEY: ${{ secrets.BACKEND_DEPLOY_BROKER_SSH_KEY }}
+          BACKEND_DEPLOY_BROKER_KNOWN_HOSTS: ${{ secrets.BACKEND_DEPLOY_BROKER_KNOWN_HOSTS }}
         run: python3 deploy/send_backend_release.py deploy
