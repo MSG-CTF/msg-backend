@@ -1491,10 +1491,16 @@ class BoardApiTestCase(TestCase):
 
     def test_free_travel_without_dice_preserves_recharge_and_replays_once(self):
         draw = self.draw_card("card_free_travel")
+        cell = self.set_position(31)
+        access = TeamChallengeAccess.objects.create(
+            team=self.team, source_cell=cell,
+            challenge=Challenge.objects.filter(difficulty=cell.difficulty).first(),
+        )
+        self.state.active_challenge_access = access
         deadline = timezone.now() + timedelta(minutes=5)
         self.state.dice_rolls_left = 0
         self.state.next_dice_reset_at = deadline
-        self.state.save(update_fields=["dice_rolls_left", "next_dice_reset_at"])
+        self.state.save(update_fields=["dice_rolls_left", "next_dice_reset_at", "active_challenge_access"])
         view = self.client.get("/api/v1/board/me").json()["data"]
         self.assertTrue(next(card for card in view["chance_cards"] if card["team_card_id"] == str(draw.pk))["usable_now"])
         body = {"team_card_id": str(draw.pk), "destination_index": 10}
@@ -1567,7 +1573,7 @@ class BoardApiTestCase(TestCase):
 
     def test_free_travel_without_dice_start_reward_is_awarded_once(self):
         draw = self.draw_card("card_free_travel")
-        self.set_position(5)
+        self.set_position(7)
         TeamCellConsumption.objects.filter(team=self.team, cell_id=1).delete()
         deadline = timezone.now() + timedelta(minutes=5)
         self.state.dice_rolls_left = 0
