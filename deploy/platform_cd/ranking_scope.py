@@ -79,15 +79,32 @@ def check_compose_scope(model, scope):
 
 
 def validate_proof(proof, scope):
-    expected = {"track": scope["track"], "division": scope["division"], "team_count": len(scope["team_ids"]),
-                "configured_roster_count": len(scope["team_ids"]), "roster_sha256": roster_digest(scope["team_ids"]),
+    if not isinstance(proof, dict):
+        raise ScopeError("Ranking scope proof differs")
+    banned = proof.get("banned_official_team_ids", [])
+    if (not isinstance(banned, list) or any(not isinstance(value, str) for value in banned)
+            or len(set(banned)) != len(banned) or not set(banned).issubset(scope["team_ids"])):
+        raise ScopeError("Invalid banned official team receipt")
+    eligible = sorted(set(scope["team_ids"]) - set(banned))
+    if not eligible:
+        raise ScopeError("No eligible official team is available for API verification")
+    official_digest = roster_digest(scope["team_ids"])
+    if banned and proof.get("official_roster_sha256") != official_digest:
+        raise ScopeError("Official roster identity differs")
+    if ("official_roster_sha256" in proof and proof["official_roster_sha256"] != official_digest
+            or type(proof.get("team_count")) is not int
+            or type(proof.get("configured_roster_count")) is not int):
+        raise ScopeError("Invalid official roster receipt")
+    expected = {"track": scope["track"], "division": scope["division"], "team_count": len(eligible),
+                "configured_roster_count": len(scope["team_ids"]), "roster_sha256": roster_digest(eligible),
                 "api_verified": True, "database_probe_read_only": True}
-    if not isinstance(proof, dict) or any(proof.get(key) != value for key, value in expected.items()):
+    if any(proof.get(key) != value for key, value in expected.items()):
         raise ScopeError("Ranking scope proof differs")
     checked = proof.get("koth_leaderboards_checked")
     if proof.get("api_verified") is not True or proof.get("database_probe_read_only") is not True or type(checked) is not int or not 0 <= checked <= 30:
         raise ScopeError("Invalid ranking verification receipt")
-    return {**expected, "koth_leaderboards_checked": checked}
+    return {**expected, "koth_leaderboards_checked": checked,
+            "official_roster_sha256": official_digest, "banned_official_team_ids": sorted(banned)}
 
 
 PROGRAM = r'''
@@ -101,13 +118,13 @@ try:
  django.setup()
  from django.conf import settings
  from django.db import connection,transaction
- from apps.accounts.models import User
+ from apps.accounts.models import Team,User
  from apps.ranking.population import public_ranking_teams
  from apps.common.jwt import issue_access_token
  from apps.ranking import views as ranking_views
  from apps.leaderboard import views as graph_views
  from apps.koth import views as koth_views
- scope=packet['scope'];expected=sorted(scope['team_ids'])
+ scope=packet['scope'];official=sorted(scope['team_ids'])
  def digest(ids):return hashlib.sha256(json.dumps(sorted(ids),separators=(',',':')).encode()).hexdigest()
  stage='readonly_roster_query'
  with transaction.atomic():
@@ -116,7 +133,11 @@ try:
    cursor.execute('SHOW transaction_read_only');assert cursor.fetchone()[0]=='on'
   stage='configured_roster'
   configured=sorted(str(uuid.UUID(str(value))) for value in settings.PUBLIC_RANKING_TEAM_IDS)
-  assert settings.PUBLIC_RANKING_DIVISION==scope['division'] and configured==expected
+  assert settings.PUBLIC_RANKING_DIVISION==scope['division'] and configured==official
+  stage='official_ban_state'
+  banned=sorted(str(value) for value in Team.objects.filter(pk__in=official,is_banned=True).values_list('pk',flat=True))
+  expected=sorted(set(official)-set(banned))
+  assert expected
   stage='database_roster'
   actual=sorted(str(value) for value in public_ranking_teams().values_list('pk',flat=True))
   assert actual==expected
@@ -158,7 +179,8 @@ try:
  token=None
  result={'status':'VERIFIED','track':scope['track'],'division':scope['division'],'team_count':len(actual),
   'configured_roster_count':len(configured),'roster_sha256':digest(actual),'api_verified':True,
-  'database_probe_read_only':True,'koth_leaderboards_checked':len(challenges)}
+  'database_probe_read_only':True,'koth_leaderboards_checked':len(challenges),
+  'official_roster_sha256':digest(official),'banned_official_team_ids':banned}
  print('RANKING_SCOPE_RESULT='+json.dumps(result))
 except Exception as error:
  print('RANKING_SCOPE_RESULT='+json.dumps({'status':'FAILED','stage':stage,'error_type':type(error).__name__}))

@@ -27,7 +27,45 @@ def proof(track="external"):
             "api_verified":True,"database_probe_read_only":True,"koth_leaderboards_checked":6}
 
 
+def banned_proof(track="internal", banned_count=1):
+    value=roster(track)
+    banned=value["team_ids"][:banned_count]
+    return {**proof(track),"team_count":len(value["team_ids"])-banned_count,
+            "roster_sha256":scope.roster_digest(value["team_ids"][banned_count:]),
+            "official_roster_sha256":scope.roster_digest(value["team_ids"]),
+            "banned_official_team_ids":banned}
+
+
 class SiteScopeTests(unittest.TestCase):
+    def test_banned_official_team_remains_in_pinned_roster_and_out_of_visible_population(self):
+        for track,total in [("internal",25),("external",50)]:
+            for banned_count in [1,2]:
+                with self.subTest(track=track,banned_count=banned_count):
+                    result=scope.validate_proof(banned_proof(track,banned_count),roster(track))
+                    self.assertEqual(result["configured_roster_count"],total)
+                    self.assertEqual(result["team_count"],total-banned_count)
+                    self.assertEqual(result["official_roster_sha256"],scope.roster_digest(roster(track)["team_ids"]))
+                    self.assertEqual(result["banned_official_team_ids"],roster(track)["team_ids"][:banned_count])
+
+    def test_ban_receipt_cannot_hide_unrelated_omissions_or_include_an_outsider(self):
+        valid=banned_proof()
+        changes=[{"team_count":23},{"configured_roster_count":24},
+                 {"roster_sha256":scope.roster_digest(roster("internal")["team_ids"][2:])},
+                 {"official_roster_sha256":"b"*64},
+                 {"banned_official_team_ids":[str(uuid.UUID(int=999))]},
+                 {"banned_official_team_ids":valid["banned_official_team_ids"]*2},
+                 {"banned_official_team_ids":"not-a-list"},
+                 {"banned_official_team_ids":roster("internal")["team_ids"]},
+                 {"team_count":True}, {"configured_roster_count":True}]
+        for change in changes:
+            with self.subTest(change=change),self.assertRaises(scope.ScopeError):
+                scope.validate_proof({**valid,**change},roster("internal"))
+        without_digest={k:v for k,v in valid.items() if k!="official_roster_sha256"}
+        with self.assertRaises(scope.ScopeError):scope.validate_proof(without_digest,roster("internal"))
+
+    def test_missing_official_without_a_verified_ban_still_fails(self):
+        with self.assertRaises(scope.ScopeError):
+            scope.validate_proof({**proof("internal"),"team_count":24},roster("internal"))
     def test_each_site_has_its_exact_unique_official_population(self):
         for track,count in [("external",50),("internal",25)]:
             with self.subTest(track=track):
@@ -94,6 +132,17 @@ class SiteScopeTests(unittest.TestCase):
 
 
 class SenderReceiptTests(unittest.TestCase):
+    def test_sender_retains_ban_identity_and_exact_configured_population(self):
+        value=banned_proof("external")
+        result=sender.scope_proof(value)
+        self.assertEqual(result["team_count"],49)
+        self.assertEqual(result["configured_roster_count"],50)
+        self.assertEqual(result["banned_official_team_ids"],value["banned_official_team_ids"])
+        for change in [{"team_count":48},{"configured_roster_count":49},
+                       {"official_roster_sha256":None},{"banned_official_team_ids":["invalid"]},
+                       {"banned_official_team_ids":value["banned_official_team_ids"]*2}]:
+            with self.subTest(change=change),self.assertRaises(sender.DeploymentFailure):
+                sender.scope_proof({**value,**change})
     def env(self):
         return {"SOURCE_SHA":"a"*40,"DEPLOYMENT_ID":"12345-1","BACKEND_DEPLOY_HOST":"host.example", "BACKEND_DEPLOY_SSH_KEY":"fixture", "BACKEND_DEPLOY_KNOWN_HOSTS":"fixture"}
 
