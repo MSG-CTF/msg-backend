@@ -1489,6 +1489,120 @@ class BoardApiTestCase(TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["code"], "CHANCE_CARD_AWAITING_DISCARD")
 
+    def test_free_travel_without_dice_preserves_recharge_and_replays_once(self):
+        draw = self.draw_card("card_free_travel")
+        cell = self.set_position(31)
+        access = TeamChallengeAccess.objects.create(
+            team=self.team, source_cell=cell,
+            challenge=Challenge.objects.filter(difficulty=cell.difficulty).first(),
+        )
+        self.state.active_challenge_access = access
+        deadline = timezone.now() + timedelta(minutes=5)
+        self.state.dice_rolls_left = 0
+        self.state.next_dice_reset_at = deadline
+        self.state.save(update_fields=["dice_rolls_left", "next_dice_reset_at", "active_challenge_access"])
+        view = self.client.get("/api/v1/board/me").json()["data"]
+        self.assertTrue(next(card for card in view["chance_cards"] if card["team_card_id"] == str(draw.pk))["usable_now"])
+        body = {"team_card_id": str(draw.pk), "destination_index": 10}
+        first = self.post_idem("/api/v1/board/chance/use", body, key="free-zero")
+        replay = self.post_idem("/api/v1/board/chance/use", body, key="free-zero")
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.json(), replay.json())
+        self.state.refresh_from_db()
+        self.assertEqual(self.state.position_id, 10)
+        self.assertEqual(self.state.dice_rolls_left, 0)
+        self.assertEqual(self.state.next_dice_reset_at, deadline)
+        self.assertEqual(TeamCellConsumption.objects.filter(team=self.team, cell_id=10).count(), 1)
+        self.assertEqual(DiceRoll.objects.filter(team=self.team).count(), 0)
+        self.assertEqual(MileageHistory.objects.filter(team=self.team).count(), 0)
+        used_again = self.post_idem("/api/v1/board/chance/use", body, key="free-zero-again")
+        self.assertEqual(used_again.status_code, 409)
+        self.assertEqual(used_again.json()["code"], "CHANCE_CARD_ALREADY_USED")
+
+    def test_free_travel_without_dice_keeps_movement_and_discard_blocks(self):
+        for blocked in ["pending", "discard", "completed", "unselected"]:
+            with self.subTest(blocked=blocked):
+                self.reset_card_scenario()
+                draw = self.draw_card("card_free_travel")
+                self.state.dice_rolls_left = 0
+                self.state.next_dice_reset_at = timezone.now() + timedelta(minutes=5)
+                self.state.save(update_fields=["dice_rolls_left", "next_dice_reset_at"])
+                if blocked == "pending":
+                    PendingDiceRoll.objects.create(
+                        team=self.team, dice_a=1, dice_b=1, rolled_number=2,
+                        previous_position=1, candidate_position=3, movement_path=[2, 3],
+                        skipped_cells=[], board_event_code="CHALLENGE",
+                    )
+                elif blocked == "discard":
+                    self.draw_card("card_extra_roll", source_cell_index=30)
+                elif blocked == "completed":
+                    TeamCellConsumption.objects.bulk_create([
+                        TeamCellConsumption(team=self.team, cell_id=index) for index in range(2, 37)
+                    ])
+                else:
+                    self.set_position(2)
+                view = self.client.get("/api/v1/board/me").json()["data"]
+                self.assertFalse(next(card for card in view["chance_cards"] if card["team_card_id"] == str(draw.pk))["usable_now"])
+                reply = self.post_idem("/api/v1/board/chance/use", {"team_card_id": str(draw.pk), "destination_index": 10}, key="free-block-" + blocked)
+                self.assertEqual(reply.status_code, 409)
+                self.assertEqual(reply.json()["code"], "CHANCE_CARD_AWAITING_DISCARD" if blocked == "discard" else "CHANCE_CARD_WRONG_TIMING")
+                draw.refresh_from_db()
+                self.assertIsNone(draw.used_at)
+
+    def test_free_travel_without_dice_keeps_destination_and_team_checks(self):
+        draw = self.draw_card("card_free_travel")
+        self.state.dice_rolls_left = 0
+        self.state.next_dice_reset_at = timezone.now() + timedelta(minutes=5)
+        self.state.save(update_fields=["dice_rolls_left", "next_dice_reset_at"])
+        TeamCellConsumption.objects.create(team=self.team, cell_id=10)
+        body = {"team_card_id": str(draw.pk), "destination_index": 10}
+        reply = self.post_idem("/api/v1/board/chance/use", body, key="free-consumed")
+        self.assertEqual(reply.status_code, 400)
+        self.assertEqual(reply.json()["code"], "INVALID_DESTINATION_INDEX")
+        self.as_member()
+        member = self.post_idem("/api/v1/board/chance/use", body, key="free-member")
+        self.assertEqual(member.status_code, 403)
+        self.as_other_leader()
+        other = self.post_idem("/api/v1/board/chance/use", body, key="free-other")
+        self.assertEqual(other.status_code, 404)
+        draw.refresh_from_db()
+        self.state.refresh_from_db()
+        self.assertIsNone(draw.used_at)
+        self.assertEqual(self.state.dice_rolls_left, 0)
+        self.assertEqual(self.state.position_id, 1)
+
+    def test_free_travel_without_dice_start_reward_is_awarded_once(self):
+        draw = self.draw_card("card_free_travel")
+        self.set_position(7)
+        TeamCellConsumption.objects.filter(team=self.team, cell_id=1).delete()
+        deadline = timezone.now() + timedelta(minutes=5)
+        self.state.dice_rolls_left = 0
+        self.state.next_dice_reset_at = deadline
+        self.state.save(update_fields=["dice_rolls_left", "next_dice_reset_at"])
+        body = {"team_card_id": str(draw.pk), "destination_index": 1}
+        first = self.post_idem("/api/v1/board/chance/use", body, key="free-start")
+        replay = self.post_idem("/api/v1/board/chance/use", body, key="free-start")
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.json(), replay.json())
+        self.state.refresh_from_db()
+        self.team.refresh_from_db()
+        self.assertEqual(self.state.position_id, 1)
+        self.assertEqual(self.state.dice_rolls_left, 1)
+        self.assertEqual(self.state.next_dice_reset_at, deadline)
+        self.assertEqual(self.team.mileage, 100)
+        self.assertEqual(MileageHistory.objects.filter(team=self.team).count(), 1)
+
+    def test_other_pre_roll_card_still_requires_dice(self):
+        draw = self.draw_card("card_roll_twice_choose")
+        self.state.dice_rolls_left = 0
+        self.state.next_dice_reset_at = timezone.now() + timedelta(minutes=5)
+        self.state.save(update_fields=["dice_rolls_left", "next_dice_reset_at"])
+        response = self.post_idem("/api/v1/board/chance/use", {"team_card_id": str(draw.pk)}, key="choose-zero")
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["code"], "CHANCE_CARD_WRONG_TIMING")
+        draw.refresh_from_db()
+        self.assertIsNone(draw.used_at)
+
     def test_chance_use_reroll_finalizes_new_position(self):
         self.draw_card("card_reroll")
         with patch("apps.board.services.random.randint", side_effect=[1, 1]):

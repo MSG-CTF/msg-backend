@@ -1126,7 +1126,11 @@ def _card_usable_now(card, state, blocked_reason, has_pending, *, dice=None):
         return False
     if blocked_reason is None:
         return True
-    return card.effect == "GRANT_EXTRA_ROLL" and blocked_reason == "NO_ROLL_LEFT"
+    # Free travel does not spend a roll; only its roll-balance check is waived.
+    return blocked_reason == "NO_ROLL_LEFT" and card.effect in {
+        "GRANT_EXTRA_ROLL",
+        "FREE_MOVE",
+    }
 
 
 def _held_cards_queryset(team):
