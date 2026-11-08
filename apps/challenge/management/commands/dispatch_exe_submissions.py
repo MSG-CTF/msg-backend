@@ -6,7 +6,11 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db.models import F
 
 from apps.challenge.checker_dispatch import dispatch_submission
-from apps.challenge.exe_submissions import ExeSubmissionError, close_exe_submission
+from apps.challenge.exe_submissions import (
+    ExeSubmissionError,
+    close_exe_submission,
+    resolve_cleaned_start_unknown,
+)
 from apps.challenge.models import ExeSubmission
 
 
@@ -71,6 +75,23 @@ class Command(BaseCommand):
         )
         for submission_id in ids:
             close_exe_submission(submission_id)
+        ids = (
+            rows.filter(
+                status="START_UNKNOWN",
+                attempt_state="RESERVED",
+                cleanup_complete=True,
+                cleanup_confirmed_at__isnull=False,
+                finished_at__isnull=False,
+                lease_released_at__isnull=True,
+            )
+            .order_by("created_at", "submission_id")
+            .values_list("pk", flat=True)[:limit]
+        )
+        for submission_id in ids:
+            try:
+                resolve_cleaned_start_unknown(submission_id)
+            except ExeSubmissionError as error:
+                self.stderr.write(error.code)
         ids = (
             rows.filter(
                 cleanup_complete=True,

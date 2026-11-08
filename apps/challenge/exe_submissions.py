@@ -486,6 +486,45 @@ def close_exe_submission(submission_id):
         return row
 
 
+def resolve_cleaned_start_unknown(submission_id):
+    """Refund an uncertain run only after the Broker's separate VM cleanup proof."""
+    from apps.adminpanel.models import AdminEvent
+
+    with transaction.atomic():
+        row = ExeSubmission.objects.select_for_update().select_related("challenge", "team").get(
+            pk=submission_id
+        )
+        if (
+            row.config_snapshot.get("assignment_mode") != "broker_pool"
+            or "private_qa" in row.config_snapshot
+            or row.status != ExeSubmission.Status.START_UNKNOWN
+            or row.attempt_state != ExeSubmission.AttemptState.RESERVED
+            or row.finished_at is None
+            or row.cleanup_complete is not True
+            or row.cleanup_confirmed_at is None
+            or row.lease_released_at is not None
+        ):
+            return False
+        row.status = ExeSubmission.Status.INFRA_ERROR
+        row.attempt_state = ExeSubmission.AttemptState.RELEASED
+        row.save(update_fields=["status", "attempt_state", "updated_at"])
+        AdminEvent.objects.create(
+            type=AdminEvent.EventType.CHALLENGE_UPDATED,
+            severity=AdminEvent.Severity.MANUAL_REVIEW,
+            message=(
+                "Windows execution start could not be confirmed; VM cleanup was "
+                f"confirmed. Released run {row.pk} for retry; runtime job {row.checker_job_id}."
+            ),
+            team=row.team,
+            team_snapshot_id=row.team_id,
+            team_snapshot_name=row.team.team_name,
+            challenge=row.challenge,
+            actor="exe-dispatch",
+        )
+        close_exe_submission(row.pk)
+        return True
+
+
 def normalize_exe_output(value, truncated=False):
     """Normalize before DB storage as well as response serialization (PostgreSQL rejects NUL)."""
     if value is None:
