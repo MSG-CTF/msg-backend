@@ -1,20 +1,36 @@
-# MSG CTF Backend
+<div align="center">
+<h1>MSG CTF · Backend</h1>
+<p>참가자·팀·문제·점수·마일리지를 관리하는 API 서버</p>
+<p><a href="https://msg-ctf.github.io/platform.html">플랫폼</a> · <a href="#development">개발 문서</a></p>
+</div>
 
-MSG CTF의 참가자·팀·문제·점수·마일리지를 관리하는 Django API 서버입니다
-문제 발행본을 가져와 배포 버전을 등록하고, 참가자의 실행 요청을 스케줄러로 연결합니다
+<h2 align="center">Overview</h2>
 
-[플랫폼 전체 소개](https://github.com/MSG-CTF/msg-ctf.github.io)
+<table align="center">
+<tr><th width="260">대회 진행</th><th width="260">문제 운영</th><th width="260">관리·복구</th></tr>
+<tr><td align="center">인증·팀·보드·보상</td><td align="center">발행본·실행 설정·KOTH</td><td align="center">배포·QR 결제·작업 복구</td></tr>
+</table>
 
-## 맡은 일
+<h2 align="center">Contributors</h2>
 
-- 로그인과 팀 권한, 보드 이동·찬스카드·주사위 충전
-- 일반 문제·시그니처 문제의 정답 제출, 동적 점수와 마일리지 지급
-- GitHub 발행본 수집, 버전별 제공 파일·환경변수·비밀값 관리
-- 인스턴스 생성·초기화·연장·종료와 응답 유실 후 작업 ID 복구
-- KOTH 문제별 팀 토큰, 점수 수집, 관리자 미리보기
-- 관리자 팀·문제·배포·QR 결제 처리와 감사 기록
+<table align="center">
+<tr><th align="center" colspan="12"><a href="https://github.com/MSG-CTF/msg-backend">Backend</a></th></tr>
+<tr>
+<td align="center" valign="top" colspan="3" width="195"><a href="https://github.com/gimgyumin0207"><img src="https://avatars.githubusercontent.com/u/244885819?v=4&amp;s=128" width="52" height="52" alt="gimgyumin0207"></a><br><a href="https://github.com/gimgyumin0207"><b>gimgyumin0207</b></a><br><sub>문제·인스턴스 API<br>파일·배포 버전</sub></td>
+<td align="center" valign="top" colspan="3" width="195"><a href="https://github.com/samdi70"><img src="https://avatars.githubusercontent.com/u/46455764?v=4&amp;s=128" width="52" height="52" alt="samdi70"></a><br><a href="https://github.com/samdi70"><b>samdi70</b></a><br><sub>인증·팀·마일리지<br>QR 결제·감사 기록</sub></td>
+<td align="center" valign="top" colspan="3" width="195"><a href="https://github.com/jiwonnii"><img src="https://avatars.githubusercontent.com/u/224767982?v=4&amp;s=128" width="52" height="52" alt="jiwonnii"></a><br><a href="https://github.com/jiwonnii"><b>jiwonnii</b></a><br><sub>보드·보상<br>KOTH 채점·팀 토큰</sub></td>
+<td align="center" valign="top" colspan="3" width="195"><a href="https://github.com/dnehdx"><img src="https://avatars.githubusercontent.com/u/178199953?v=4&amp;s=128" width="52" height="52" alt="dnehdx"></a><br><a href="https://github.com/dnehdx"><b>dnehdx</b></a><br><sub>점수·순위<br>조회 성능·로그인 제한</sub></td>
+</tr>
+<tr><th align="center" colspan="4"><a href="https://github.com/MSG-CTF/secure-provisioner/tree/dev">Runtime</a></th><th align="center" colspan="4"><a href="https://github.com/MSG-CTF/jm_devsecops/tree/main">DevSecOps</a></th><th align="center" colspan="4"><a href="https://github.com/MSG-CTF">PM</a></th></tr>
+<tr>
+<td align="center" valign="top" colspan="4" width="260"><a href="https://github.com/goldsimchoi"><img src="https://avatars.githubusercontent.com/u/173701392?v=4&amp;s=128" width="52" height="52" alt="goldsimchoi"></a><br><a href="https://github.com/goldsimchoi"><b>goldsimchoi</b></a><br><sub>Gateway · 이미지 준비<br>Windows 실행 연결</sub></td>
+<td align="center" valign="top" colspan="4" width="260"><a href="https://github.com/woalseee"><img src="https://avatars.githubusercontent.com/u/109592496?v=4&amp;s=128" width="52" height="52" alt="woalseee"></a><br><a href="https://github.com/woalseee"><b>woalseee</b></a><br><sub>공통 CI<br>VM 자동 배포</sub></td>
+<td align="center" valign="top" colspan="4" width="260"><a href="https://github.com/jongcoding"><img src="https://avatars.githubusercontent.com/u/128033808?v=4&amp;s=128" width="52" height="52" alt="jongcoding"></a><br><a href="https://github.com/jongcoding"><b>jongcoding</b></a><br><sub>서비스 통합·운영 QA<br>중복 요청·장애 복구</sub></td>
+</tr>
+</table>
 
-## 함께 만든 사람들
+<details>
+<summary>기여 기록 · 관련 PR</summary>
 
 | 기여자 | 기여 내용 | 관련 PR |
 | --- | --- | --- |
@@ -26,13 +42,13 @@ MSG CTF의 참가자·팀·문제·점수·마일리지를 관리하는 Django A
 | [woalseee](https://github.com/woalseee) | 공통 CI 연결과 백엔드 VM 자동 배포 | [#25](https://github.com/MSG-CTF/msg-backend/pull/25) · [#69](https://github.com/MSG-CTF/msg-backend/pull/69) · [#99](https://github.com/MSG-CTF/msg-backend/pull/99) |
 | [jongcoding](https://github.com/jongcoding) | 서비스 간 연동·운영 QA, 주사위 멱등성, 응답 유실·재시작 복구 | [#122](https://github.com/MSG-CTF/msg-backend/pull/122) · [#254](https://github.com/MSG-CTF/msg-backend/pull/254) · [#263](https://github.com/MSG-CTF/msg-backend/pull/263) |
 
-2026-11-09까지 병합된 PR과 커밋을 기준으로 정리했습니다
+</details>
 
-## 기술 구성
+<h2 align="center">Tech Stack</h2>
 
-Python · Django REST Framework · PostgreSQL · Redis · Docker
+<p align="center"><img src="https://raw.githubusercontent.com/MSG-CTF/msg-ctf.github.io/67e93a09ce630910f98ae56fb118ca1317af78e0/assets/tech/djangorest.svg" width="44" height="44" alt="Django REST" title="Django REST"> &nbsp; <img src="https://raw.githubusercontent.com/MSG-CTF/msg-ctf.github.io/67e93a09ce630910f98ae56fb118ca1317af78e0/assets/tech/postgresql.svg" width="44" height="44" alt="PostgreSQL" title="PostgreSQL"> &nbsp; <img src="https://raw.githubusercontent.com/MSG-CTF/msg-ctf.github.io/67e93a09ce630910f98ae56fb118ca1317af78e0/assets/tech/redis.svg" width="44" height="44" alt="Redis" title="Redis"> &nbsp; <img src="https://raw.githubusercontent.com/MSG-CTF/msg-ctf.github.io/67e93a09ce630910f98ae56fb118ca1317af78e0/assets/tech/docker.svg" width="44" height="44" alt="Docker" title="Docker"><br><sub>Django REST · PostgreSQL · Redis · Docker</sub><br><sub>Python · Django</sub></p>
 
-## 개발·운영 문서
+## Development
 
 - [문제 발행본 자동 수집](deploy/AUTOMATIC_PUBLICATIONS.md)
 - [환경변수와 비밀값](docs/backend-execution-settings.md)
@@ -40,3 +56,5 @@ Python · Django REST Framework · PostgreSQL · Redis · Docker
 - [배포와 운영 연결](deploy/platform_cd/README.md)
 - [환경 설정 예시](.env.example)
 - [로컬 Docker Compose 구성](docker-compose.yml)
+
+<p align="center"><sub><a href="https://github.com/MSG-CTF/msg-ctf.github.io/blob/67e93a09ce630910f98ae56fb118ca1317af78e0/docs/tech-icons.md">아이콘 출처</a></sub></p>
