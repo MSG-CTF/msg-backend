@@ -8,6 +8,7 @@ import re
 import shlex
 import subprocess
 import tempfile
+import uuid
 
 from backend_release import CENTRAL_REVISION, PREFIX, manifest
 
@@ -23,13 +24,31 @@ class DeploymentFailure(RuntimeError):
 def scope_proof(value):
     if not isinstance(value, dict) or value.get("track") != "external" or value.get("division") != "EXTERNAL":
         raise DeploymentFailure("RANKING_SCOPE_FAILED")
-    if (type(value.get("team_count")) is not int or value["team_count"] != 50
+    banned = value.get("banned_official_team_ids", [])
+    if (not isinstance(banned, list) or any(not isinstance(item, str) for item in banned)
+            or len(set(banned)) != len(banned) or len(banned) >= 50):
+        raise DeploymentFailure("RANKING_SCOPE_FAILED")
+    try:
+        if any(str(uuid.UUID(item)) != item for item in banned):
+            raise ValueError("Noncanonical official identity")
+    except ValueError:
+        raise DeploymentFailure("RANKING_SCOPE_FAILED") from None
+    official_digest = value.get("official_roster_sha256")
+    if ((banned or official_digest is not None)
+            and (not isinstance(official_digest, str) or not re.fullmatch(r"[a-f0-9]{64}", official_digest))):
+        raise DeploymentFailure("RANKING_SCOPE_FAILED")
+    if (type(value.get("team_count")) is not int or value["team_count"] != 50 - len(banned)
             or type(value.get("configured_roster_count")) is not int or value["configured_roster_count"] != 50
             or not isinstance(value.get("roster_sha256"), str)
             or not re.fullmatch(r"[a-f0-9]{64}", value["roster_sha256"])
             or value.get("api_verified") is not True or value.get("database_probe_read_only") is not True):
         raise DeploymentFailure("RANKING_SCOPE_FAILED")
-    return {key: value[key] for key in ["track", "division", "team_count", "configured_roster_count", "roster_sha256", "api_verified", "database_probe_read_only"]}
+    result = {key: value[key] for key in ["track", "division", "team_count", "configured_roster_count", "roster_sha256", "api_verified", "database_probe_read_only"]}
+    if "official_roster_sha256" in value:
+        result["official_roster_sha256"] = official_digest
+    if "banned_official_team_ids" in value:
+        result["banned_official_team_ids"] = banned
+    return result
 
 
 def send(action, environment=None):
