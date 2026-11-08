@@ -17,11 +17,13 @@ from rest_framework.test import APIClient
 
 from apps.accounts.models import Role
 from apps.accounts.models import Team, User
+from apps.adminpanel.models import AdminEvent
 from apps.board.models import Cell, TeamChallengeAccess
 from apps.challenge.checker_auth import checker_configuration, mint_job_token
 from apps.challenge.checker_dispatch import checker_request, dispatch_submission
 from apps.challenge.exe_submissions import (
     ExeSubmissionError, close_exe_submission, purge_released_payload,
+    serialize_exe_submission,
 )
 from apps.challenge.models import ExeExecutionEvent, ExeSubmission, Solve
 from apps.challenge.tests_exe_submissions import ExeFixtures, harmless_pe
@@ -519,6 +521,50 @@ class RemoteRunTests(ExeFixtures, TestCase):
         self.assertIsNotNone(row.lease_released_at)
         self.assertEqual(row.payload_key, "")
         self.assertFalse(list(self.root.rglob("payload.exe")))
+
+    def test_unknown_start_is_refunded_only_after_confirmed_vm_cleanup(self):
+        row = self.assigned()
+        client = self.checker(row)
+        uncertain = self.event(
+            row,
+            execution_status="START_UNKNOWN",
+            started=None,
+            started_at=None,
+            exit_code=None,
+            output=None,
+        )
+        self.assertEqual(self.callback(client, row, uncertain).status_code, 200)
+        call_command("dispatch_exe_submissions", stdout=io.StringIO())
+        row.refresh_from_db()
+        self.assertEqual((row.status, row.attempt_state), ("START_UNKNOWN", "RESERVED"))
+        self.assertIsNone(row.lease_released_at)
+        self.assertTrue((self.root / row.payload_key).is_file())
+
+        self.assertEqual(
+            self.callback(
+                client, row, self.event(row, "CLEANUP", cleanup_complete=False)
+            ).status_code,
+            200,
+        )
+        call_command("dispatch_exe_submissions", stdout=io.StringIO())
+        row.refresh_from_db()
+        self.assertEqual((row.status, row.attempt_state), ("START_UNKNOWN", "RESERVED"))
+        self.assertIsNone(row.lease_released_at)
+
+        self.assertEqual(
+            self.callback(client, row, self.event(row, "CLEANUP")).status_code, 200
+        )
+        call_command("dispatch_exe_submissions", stdout=io.StringIO())
+        row.refresh_from_db()
+        self.assertEqual((row.status, row.attempt_state), ("INFRA_ERROR", "RELEASED"))
+        self.assertIsNotNone(row.lease_released_at)
+        self.assertEqual(row.payload_key, "")
+        self.assertEqual(serialize_exe_submission(row)["reserved_attempts"], 0)
+        self.assertFalse(serialize_exe_submission(row)["requires_review"])
+        self.assertFalse(Solve.objects.exists())
+        self.assertEqual(AdminEvent.objects.filter(actor="exe-dispatch", team=row.team).count(), 1)
+        call_command("dispatch_exe_submissions", stdout=io.StringIO())
+        self.assertEqual(AdminEvent.objects.filter(actor="exe-dispatch", team=row.team).count(), 1)
 
     def test_result_cleanup_hint_cannot_release_or_delete_without_separate_report(self):
         row = self.assigned()
