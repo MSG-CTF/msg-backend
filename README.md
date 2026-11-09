@@ -1,6 +1,6 @@
 <div align="center">
 <h1>MSG CTF · Backend</h1>
-<p>참가자·팀·문제·점수·마일리지를 관리하는 API 서버</p>
+<p>참가자·팀·문제·점수·마일리지 관리 API</p>
 <p><a href="https://msg-ctf.github.io/platform.html">플랫폼</a> · <a href="#development">개발 문서</a></p>
 </div>
 
